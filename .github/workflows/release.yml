@@ -56,7 +56,6 @@ jobs:
 
   macos:
     name: macOS (${{ matrix.target }})
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
