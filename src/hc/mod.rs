@@ -2,3 +2,5 @@
 
 pub mod client;
 pub mod codec;
+pub mod net;
+pub mod proto;

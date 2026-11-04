@@ -1,5 +1,7 @@
 /target
+/dist
 **/target
+/dist
 **/zig-out
 **/zig-cache
 .zig-cache

@@ -248,3 +248,77 @@ hc server stop
 ```
 
 帧用 `struct.pack("<IBI", channel, kind, len)` + payload；读时先读 9 字节头。
+
+---
+
+## 12. G1 实现期的复测补充（2026-11-04）
+
+客户端接上真实 core 之后，下面几条从「文档说法」变成「实测事实」，实现依赖它们。
+
+**首帧可以是空屏。** 程序还没输出时，attach 的第一段 DATA 只有
+`\x18` + 软复位 + 模式全关 + 清屏 + tabstop + 光标定位，没有任何字符。
+这仍然是一次完整的整屏复位，必须照常喂给本地 VT；不能用「没有可见内容」判断失败。
+
+**CLOSE 的 payload 要按 `reason` 区分程序退出与 core 侧断开。**
+
+```json
+{"exit_code":0,"finished_ms":1793758473371,"reason":"exited","signal":null}
+{"exit_code":null,"finished_ms":1793773828466,"reason":"server_stop","signal":1}
+```
+
+第二条是 `hc server stop`：`exit_code` 是 `null`、`signal` 有值。因此**不能**用
+「有没有 `exit_code` 字段」判断程序是否结束，要看 `reason`：`server_stop` / `shutdown` /
+`restart` / `lost` 属于 core 侧事件，重连后应当重新 attach；其余 reason 表示程序自己结束，
+不再重来。
+
+**core 回答查询的方式是写回程序的 pty。** 程序打印 `\x1b[c` / `\x1b[6n` 时，core 把答复写进
+终端输入，于是答复作为程序的回显出现在输出里（实测看到 `62;22c`、`0R` 这类残片）。
+这些序列不会出现在 attach 流里，客户端不要重复回答。
+
+**kitty graphics 的查询原样透传到 viewer。** 实测 `\x1b_Gi=31,a=q,...` 完整出现在 attach 流里，
+core 不代答。libghostty-vt 在未启用 kitty graphics 时也不产生应答，因此客户端必须自己扫出
+`a=q` 并回 `\x1b_Gi=<id>;ENOTSUPPORTED\x1b\\`，否则程序会一直等。`a=t` 之类的传输命令不要求应答。
+
+**alternate screen 的首帧只重放当前屏幕。** 程序在备用屏时 attach，得到的是备用屏内容；
+主屏内容不会补发。退出备用屏后看到的是 viewer 本地原有的主屏内容，这与真实终端一致（实测 less/fzf/htop/nvim 对齐）。
+
+**core 重启后终端不存在。** `server stop` 之后重新拉起 core，原终端记录消失，
+对它的 `terminal.attach` 返回 `kind = not_found`。客户端要能在这种情况下换一个新 shell，
+而不是卡在「attach 失败」。
+
+**viewer 主动 CLOSE 是单向的。** 本地 detach 时 viewer 发 CLOSE，core 不会回 CLOSE 帧，
+只是把这条流从它的 viewer 列表里摘掉。客户端要自己确认这次关闭，不能等回帧。
+
+**多个 viewer attach 各自的终端不会互抢尺寸。** 抢尺寸只发生在两个客户端 attach 同一个终端时；
+多 Pane 布局里每个 Pane 是自己终端的唯一 viewer，因此能各用各的尺寸。
+
+---
+
+## 13. Agent 状态（OSC 7501）实测补充（2026-11-04）
+
+**上报格式**：程序向自己的 pty 写 `ESC ] 7501 ; state=<idle|working|done|blocked|error> BEL`。
+其余键可选：`kind`（`permission`/`question`/`auth`）、`pct`（0–100）、`msg`。core 只记录
+程序自己说的话，不做推断；从未上报的终端 `status` 为 `null`。
+
+**查询格式**：`ESC ] 7501 ; ? BEL`，core 回 `]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth`。
+
+**终端记录**里与本客户端相关的字段：
+
+```json
+{"address":"t1","state":"live","reported":true,"turn":1,
+ "status":{"state":"working"},"status_ms":1793792880233}
+```
+
+- `status` 是**对象**，不是字符串；`state` 是状态词。旧记录可能直接给字符串，客户端两边都要认。
+- `turn` 每次离开 `working` 递增。
+
+**事件**（订阅流里的原样）：
+
+```json
+{"type":"status","terminal":"t1","seq":4,"data":{"records":{},"reported":true,"status":{"state":"working"}}}
+{"type":"turn","terminal":"t1","seq":6,"data":{"state":"idle","turn":1}}
+```
+
+- `idle` 与 `done` 都是「可以输入」。客户端用本地 seen 与 `turn` 区分「有未读完成」：
+  `idle|done` 且 `turn > seen_turn` 显示 done，看过之后回落到 idle。
+- `blocked` 表示程序在等人回答；`error` 表示需要读原因。

@@ -1,5 +1,7 @@
 # 常用命令。没有 just 也可以直接看这里的 cargo 调用。
 
+version := `awk -F'"' '/^version = /{print $2; exit}' Cargo.toml`
+
 default:
     @just --list
 
@@ -15,8 +17,33 @@ test:
 run:
     cargo run -p hc-tui
 
+# 真实 core 的端到端验收（隔离 session，默认在 cargo test 里跳过）
+e2e:
+    HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach --test multi_pane -- --nocapture
+
 probe:
     cargo run -p hc-tui -- probe
+
+# 真实 core + tmux 的 UI 冒烟测试（隔离 session；需要 hc、tmux）
+smoke: build-smoke
+    HC_TUI_BIN=target/debug/hc-tui scripts/ui-smoke.sh
+
+build-smoke:
+    cargo build -p hc-tui
+
+# 静态发行构建（需要 rustup target add x86_64-unknown-linux-musl 与 cargo-zigbuild）
+release-musl:
+    cargo zigbuild --release --target x86_64-unknown-linux-musl -p hc-tui
+
+# 发行包与校验和：tar.gz 内含二进制、LICENSE、第三方声明与变更记录
+dist: release-musl
+    rm -rf dist
+    mkdir -p dist/stage
+    cp target/x86_64-unknown-linux-musl/release/hc-tui dist/stage/hc-tui
+    cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md dist/stage/
+    cd dist && tar -czf hc-tui-{{version}}-x86_64-unknown-linux-musl.tar.gz -C stage .
+    cd dist && sha256sum hc-tui-{{version}}-x86_64-unknown-linux-musl.tar.gz > hc-tui-{{version}}-x86_64-unknown-linux-musl.tar.gz.sha256
+    @ls -l dist
 
 # 升级 vendored libghostty-vt（流程见 docs/adr/0001-ghostty-vt.md §5）
 vendor *ARGS:

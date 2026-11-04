@@ -223,6 +223,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "ghostty-vt",
+ "png",
  "ratatui",
  "serde",
  "serde_json",

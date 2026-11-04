@@ -8,9 +8,13 @@
 //! - [`tui`]：外层终端的进入与恢复
 
 pub mod app;
+pub mod clipboard;
 pub mod config;
+pub mod copy;
 pub mod hc;
 pub mod layout;
+pub mod model;
 pub mod term;
+pub mod theme;
 pub mod tui;
 pub mod ui;

@@ -39,12 +39,10 @@ jobs:
       - name: test
         run: cargo test -p hc-tui
 
-  # 静态发行构建。首次跑可能需要调 Zig/链接器组合，先不阻塞主流程，
-  # P4 正式接 musl 发行时去掉 continue-on-error。
+  # 静态发行构建：本机已验证产出静态链接产物（见 README「发行」）。
   musl:
     name: build (x86_64-unknown-linux-musl)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -59,4 +57,5 @@ jobs:
       - uses: taiki-e/install-action@cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo zigbuild --target x86_64-unknown-linux-musl -p hc-tui
+      - run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p hc-tui
+      - run: file target/x86_64-unknown-linux-musl/release/hc-tui

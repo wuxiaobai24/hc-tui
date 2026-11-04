@@ -66,6 +66,16 @@ pub fn focus(channel: u32, focused: bool) -> Result<Vec<u8>, CodecError> {
     encode(channel, FOCUS, &[u8::from(focused)])
 }
 
+/// 本地 detach：只断这条流，core 里的程序继续跑。payload 为空。
+pub fn close(channel: u32) -> Result<Vec<u8>, CodecError> {
+    encode(channel, CLOSE, &[])
+}
+
+/// viewer 自身属性。payload 是 JSON `Display{fg,bg,cursor,cell}`。
+pub fn facts(channel: u32, display_json: &[u8]) -> Result<Vec<u8>, CodecError> {
+    encode(channel, FACTS, display_json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +127,20 @@ mod tests {
     fn focus_uses_one_byte() {
         assert_eq!(focus(2, true).unwrap()[HEADER], 1);
         assert_eq!(focus(2, false).unwrap()[HEADER], 0);
+    }
+
+    #[test]
+    fn close_has_empty_payload() {
+        let bytes = close(4).unwrap();
+        assert_eq!(bytes[4], CLOSE);
+        assert_eq!(bytes.len(), HEADER);
+    }
+
+    #[test]
+    fn facts_carries_display_json_verbatim() {
+        let display = br#"{"fg":null,"bg":null,"cursor":null,"cell":[8,16]}"#;
+        let bytes = facts(3, display).unwrap();
+        assert_eq!(bytes[4], FACTS);
+        assert_eq!(&bytes[HEADER..], display);
     }
 }

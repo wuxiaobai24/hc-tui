@@ -79,6 +79,162 @@ impl SplitNode {
             }
         }
     }
+
+    /// 把 `target` 这个叶子换成一个分屏，新 Pane 放在右侧/下侧。
+    ///
+    /// 返回 `false` 表示树里没有这个 Pane。
+    pub fn split_pane(&mut self, target: PaneId, axis: Axis, new: PaneId, ratio: f32) -> bool {
+        match self {
+            SplitNode::Leaf(id) if *id == target => {
+                let existing = SplitNode::Leaf(*id);
+                *self = SplitNode::split(axis, ratio, existing, SplitNode::Leaf(new));
+                true
+            }
+            SplitNode::Leaf(_) => false,
+            SplitNode::Split { first, second, .. } => {
+                first.split_pane(target, axis, new, ratio)
+                    || second.split_pane(target, axis, new, ratio)
+            }
+        }
+    }
+
+    /// 移除一个叶子并折叠它的父分屏，把空间还给兄弟。根是它自己时返回 `None`。
+    pub fn remove_pane(self, target: PaneId) -> Option<SplitNode> {
+        match self {
+            SplitNode::Leaf(id) if id == target => None,
+            SplitNode::Leaf(_) => Some(self),
+            SplitNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => match (first.remove_pane(target), second.remove_pane(target)) {
+                (Some(first), Some(second)) => Some(SplitNode::Split {
+                    axis,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// 调整离 `target` 最近、且轴为 `axis` 的那层分屏的比例。
+    ///
+    /// `delta` 为正时把 `target` 所在的那一侧变大。返回是否找到可调的层。
+    pub fn adjust_ratio(&mut self, target: PaneId, axis: Axis, delta: f32) -> bool {
+        match self {
+            SplitNode::Leaf(_) => false,
+            SplitNode::Split {
+                axis: node_axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let in_first = first.panes().contains(&target);
+                let in_second = second.panes().contains(&target);
+                if !in_first && !in_second {
+                    return false;
+                }
+                // 先试更深的一层：最近的分隔线优先。
+                let deeper = if in_first {
+                    first.adjust_ratio(target, axis, delta)
+                } else {
+                    second.adjust_ratio(target, axis, delta)
+                };
+                if deeper {
+                    return true;
+                }
+                if *node_axis != axis {
+                    return false;
+                }
+                let signed = if in_first { delta } else { -delta };
+                *ratio = (*ratio + signed).clamp(0.05, 0.95);
+                true
+            }
+        }
+    }
+}
+
+/// 方向键式的焦点移动：在 `rects` 里找 `from` 指定方向上的最近 Pane。
+///
+/// 只按几何位置判断，不看树结构：跨层分屏也能正确跳转。
+pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, direction: Direction) -> Option<PaneId> {
+    let current = rects
+        .iter()
+        .find(|(pane, _)| *pane == from)
+        .map(|(_, rect)| *rect)?;
+    let mut best: Option<(PaneId, u16, u32)> = None;
+    for (pane, rect) in rects {
+        if *pane == from {
+            continue;
+        }
+        let (edge, overlap) = match direction {
+            Direction::Left => {
+                if rect.x + rect.width > current.x {
+                    continue;
+                }
+                let edge = current.x - (rect.x + rect.width);
+                (edge, overlap_y(rect, &current))
+            }
+            Direction::Right => {
+                if rect.x < current.x + current.width {
+                    continue;
+                }
+                let edge = rect.x - (current.x + current.width);
+                (edge, overlap_y(rect, &current))
+            }
+            Direction::Up => {
+                if rect.y + rect.height > current.y {
+                    continue;
+                }
+                let edge = current.y - (rect.y + rect.height);
+                (edge, overlap_x(rect, &current))
+            }
+            Direction::Down => {
+                if rect.y < current.y + current.height {
+                    continue;
+                }
+                let edge = rect.y - (current.y + current.height);
+                (edge, overlap_x(rect, &current))
+            }
+        };
+        if overlap == 0 {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, best_edge, best_overlap)) => {
+                edge < best_edge || (edge == best_edge && overlap > best_overlap)
+            }
+        };
+        if better {
+            best = Some((*pane, edge, overlap));
+        }
+    }
+    best.map(|(pane, _, _)| pane)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+fn overlap_y(a: &Rect, b: &Rect) -> u32 {
+    let top = a.y.max(b.y);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    u32::from(bottom.saturating_sub(top))
+}
+
+fn overlap_x(a: &Rect, b: &Rect) -> u32 {
+    let left = a.x.max(b.x);
+    let right = (a.x + a.width).min(b.x + b.width);
+    u32::from(right.saturating_sub(left))
 }
 
 fn split_rect(area: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
@@ -160,6 +316,81 @@ mod tests {
         );
         assert_eq!(rects[1].1, Rect::new(40, 0, 40, 12));
         assert_eq!(rects[2].1, Rect::new(40, 12, 40, 12));
+    }
+
+    #[test]
+    fn splitting_a_leaf_adds_a_second_pane() {
+        let mut tree = SplitNode::leaf(1);
+        assert!(tree.split_pane(PaneId(1), Axis::Horizontal, PaneId(2), 0.5));
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+        let rects = tree.layout(Rect::new(0, 0, 80, 24));
+        assert_eq!(rects[0].1.width + rects[1].1.width, 80);
+    }
+
+    #[test]
+    fn removing_a_pane_collapses_its_parent() {
+        let tree = SplitNode::split(
+            Axis::Horizontal,
+            0.5,
+            SplitNode::leaf(1),
+            SplitNode::split(Axis::Vertical, 0.5, SplitNode::leaf(2), SplitNode::leaf(3)),
+        );
+        let tree = tree.remove_pane(PaneId(2)).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(3)]);
+        let only = tree.remove_pane(PaneId(3)).unwrap();
+        assert_eq!(only.panes(), vec![PaneId(1)]);
+        assert!(only.remove_pane(PaneId(1)).is_none());
+    }
+
+    #[test]
+    fn ratio_adjustment_hits_the_nearest_matching_split() {
+        let mut tree = SplitNode::split(
+            Axis::Horizontal,
+            0.5,
+            SplitNode::leaf(1),
+            SplitNode::split(
+                Axis::Horizontal,
+                0.5,
+                SplitNode::leaf(2),
+                SplitNode::leaf(3),
+            ),
+        );
+        assert!(tree.adjust_ratio(PaneId(2), Axis::Horizontal, 0.1));
+        match &tree {
+            SplitNode::Split { ratio, second, .. } => {
+                assert_eq!(*ratio, 0.5);
+                match second.as_ref() {
+                    SplitNode::Split { ratio, .. } => assert!((ratio - 0.6).abs() < 1e-6),
+                    _ => panic!("expected the inner split"),
+                }
+            }
+            _ => panic!("expected a split"),
+        }
+        assert!(!tree.adjust_ratio(PaneId(1), Axis::Vertical, 0.1));
+    }
+
+    #[test]
+    fn focus_neighbors_follow_geometry() {
+        let tree = SplitNode::split(
+            Axis::Horizontal,
+            0.5,
+            SplitNode::leaf(1),
+            SplitNode::split(Axis::Vertical, 0.5, SplitNode::leaf(2), SplitNode::leaf(3)),
+        );
+        let rects = tree.layout(Rect::new(0, 0, 80, 24));
+        assert_eq!(
+            neighbor(&rects, PaneId(1), Direction::Right),
+            Some(PaneId(2))
+        );
+        assert_eq!(
+            neighbor(&rects, PaneId(2), Direction::Down),
+            Some(PaneId(3))
+        );
+        assert_eq!(
+            neighbor(&rects, PaneId(3), Direction::Left),
+            Some(PaneId(1))
+        );
+        assert_eq!(neighbor(&rects, PaneId(1), Direction::Left), None);
     }
 
     #[test]

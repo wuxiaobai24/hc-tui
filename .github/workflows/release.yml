@@ -1,0 +1,113 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-musl:
+    name: linux x86_64 (musl, static)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # libghostty-vt 只认 Zig 0.16.0（见 docs/adr/0001-ghostty-vt.md）。
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: taiki-e/install-action@cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p hc-tui
+
+      - name: package
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          mkdir -p stage
+          cp target/x86_64-unknown-linux-musl/release/hc-tui stage/hc-tui
+          cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md stage/
+          tar -czf "hc-tui-${version}-x86_64-unknown-linux-musl.tar.gz" -C stage .
+          sha256sum "hc-tui-${version}-x86_64-unknown-linux-musl.tar.gz" \
+            > "hc-tui-${version}-x86_64-unknown-linux-musl.tar.gz.sha256"
+          file stage/hc-tui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-musl
+          path: hc-tui-*.tar.gz*
+
+  macos:
+    name: macOS (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }} -p hc-tui
+
+      - name: package
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          mkdir -p stage
+          cp target/${{ matrix.target }}/release/hc-tui stage/hc-tui
+          cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md stage/
+          tar -czf "hc-tui-${version}-${{ matrix.target }}.tar.gz" -C stage .
+          shasum -a 256 "hc-tui-${version}-${{ matrix.target }}.tar.gz" \
+            > "hc-tui-${version}-${{ matrix.target }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: hc-tui-*.tar.gz*
+
+  publish:
+    name: publish
+    needs: [linux-musl, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: list assets
+        run: ls -l artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body_path: CHANGELOG.md
