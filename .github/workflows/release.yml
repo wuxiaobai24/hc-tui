@@ -8,11 +8,6 @@ on:
       tag:
         description: "要发布为哪个标签（例如 v0.1.0）"
         required: false
-    inputs:
-      macos:
-        description: 同时构建 macOS 产物（aarch64 / x86_64）
-        type: boolean
-        default: false
 
 permissions:
   contents: write
