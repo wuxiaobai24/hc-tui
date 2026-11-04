@@ -476,26 +476,31 @@ pub fn parse_color(text: &str) -> Option<Color> {
     })
 }
 
+/// 设置面板里列出的内置主题，按 herdr 的顺序。
+pub fn names() -> &'static [&'static str] {
+    &[
+        "default",
+        "catppuccin",
+        "catppuccin-latte",
+        "tokyo-night",
+        "dracula",
+        "nord",
+        "gruvbox",
+        "one-dark",
+        "solarized",
+        "kanagawa",
+        "rose-pine",
+        "vesper",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn every_builtin_name_resolves() {
-        for name in [
-            "default",
-            "catppuccin",
-            "catppuccin-latte",
-            "tokyo-night",
-            "dracula",
-            "nord",
-            "gruvbox",
-            "one-dark",
-            "solarized",
-            "kanagawa",
-            "rose-pine",
-            "vesper",
-        ] {
+        for name in names() {
             assert!(builtin(name).is_some(), "{name}");
         }
         assert!(builtin("nope").is_none());

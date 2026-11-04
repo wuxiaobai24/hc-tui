@@ -1,5 +1,51 @@
 # 变更记录
 
+## 未发布
+
+### herdr 体验对齐
+
+- 默认键位改成 herdr 0.9.3 的那套：`prefix+s` settings、`prefix+g` Go to、
+  `prefix+o` 跳到最近的注意力目标；`rename_tab = prefix+shift+t`、
+  `close_tab = prefix+shift+x`、`rename_pane = prefix+shift+p`、
+  `kill_pane = prefix+shift+k`、`edit_scrollback = prefix+e`、
+  `close_workspace = prefix+shift+d`、`rename_workspace = prefix+shift+w`；
+  `prompt_new_tab_name` 默认打开，新建 Tab 先问名字并预填序号。
+- 布局：侧栏占满整列高度，Tab 栏只在内容区上方；Tab 栏改成 `1 2 3 +`，
+  缩放时当前 Tab 追加 `Z`，`+` 可点击新建；`hide_tab_bar_when_single_tab`
+  只有一个 Tab 时收起 Tab 栏；`tab_bar_right` 默认空，右对齐条目用
+  `tab_bar_right_separator` 连接。
+- 分隔线：`pane_borders = auto` 只在分屏时画框；新增 `pane_outer_borders`
+  （去掉 Pane 区域外沿的框）、`pane_scrollbars`、
+  `show_agent_labels_on_pane_borders`；边框不再写 `user@host:path · chN`。
+- 底部状态栏改成 herdr 式临时模式行：只有 PREFIX / COPY / RESIZE / NAVIGATE /
+  MOVE 或提示出现时占一行，右侧显示连接状态；普通状态下 Pane 一直铺到底。
+- 新增三个浮层：可过滤滚动的 Keybinds 面板、Settings 面板（theme / indicators /
+  toasts / sound，回车应用并写回 `config.toml`）、Go to 面板（搜索工作区与终端，
+  选中行显示面包屑与目录）。
+- 提示输入改成 herdr 样式的居中面板：标题 + 输入行 + `↵ save  ^c clear  esc cancel`，
+  确认类提示是 `↵ confirm  esc cancel`；`^c` 清空输入。
+- 侧栏与 herdr 同构：`spaces` 段每个工作区两行（目录名 + git 分支），
+  底行 `new ● menu`（可点击），分隔线后是 `agents` 段与右侧 `grouped`/`priority`
+  标注，超出高度时右下角显示滚动方向；`agent_panel_sort` 默认改为 `spaces`。
+- 其它客户端（`hc run`、另一个 hc-tui）在同一个 core 里创建的终端会出现在侧栏
+  和 Go to 里；选中后按需 attach 出一个新视图，不再只显示自己创建的 Pane。
+- 新增 `terminal.new_cwd`（`follow` / `home` / `current` / 固定路径，默认 `follow`）
+  与 `terminal.default_shell`：新建 Tab 与分屏沿用来源 Pane 的前台目录。
+- 工作区名字在创建时按目录名固定下来，不再随焦点 Pane 的目录变化。
+- 新增 `window_title`（默认 `{hostname}: {workspace}`，支持
+  `{tab}` / `{pane}` / `{terminal_title}`）与 `prompt_new_workspace_name`。
+- 界面提示文案统一成 herdr 的英文措辞（键位、模式行、面板页脚、操作回执）。
+
+### 手机与窄屏
+
+- 新增 `ui.mobile_width_threshold`（默认 64）：宽度不超过阈值且开启 `mouse_capture`
+  时进入手机单列布局，Tab 栏与状态栏收成一行顶栏，内容区只摆当前 Pane。
+- 顶栏右侧 ` switch ` 打开全屏切换面板：workspaces / tabs / agents / menu 四段全部可点，
+  新建 tab、分屏、关闭 pane、复制模式、下一个待处理、退出都能点完，
+  不依赖前缀键；面板打开时按钮变 ` close `。
+- 手机布局下单指上下拖动翻 scrollback，不触发拖选复制；单击 Pane 仍切焦点。
+- 修正滚轮方向：向上滚看更早的行，向下滚回到底部。
+
 ## 0.1.0 — 2026-11-04
 
 首个可发布版本：基于 herdr-core（`hc`）的终端工作台，客户端自带

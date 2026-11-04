@@ -69,29 +69,43 @@ expect_missing() {
   fi
 }
 
-start
-expect "首次绘制" "hc-tui"
+expect_tabs() {
+  local label="$1" want="$2"
+  if [[ "$(screen | head -1 | grep -o '[0-9]' | wc -l)" -ge "$want" ]]; then
+    echo "ok   $label"
+  else
+    echo "FAIL $label: 第一行找不到 $want 个 Tab 编号"
+    screen | head -3
+    FAILED=1
+  fi
+}
 
-# 新 Tab 与左右分屏
+start
+expect "首次绘制" "spaces"
+expect "侧栏 agents 段" "agents"
+
+# 新 Tab（默认先问名字）与左右分屏
 key C-b c; sleep 0.5
+key Enter; sleep 0.5
 key C-b c; sleep 0.5
+key Enter; sleep 0.5
 key C-b v; sleep 0.8
-expect "三个 Tab" "tab 3/3"
-expect "分屏后的两个 Pane" "ch"
+expect_tabs "三个 Tab" 3
+expect "分屏后的边框" "┌"
 
 # 布局写入 core doc 并跨重启恢复
 sleep 1.2
 key C-b q; sleep 0.8
 tmux -L "$SOCK" kill-server 2>/dev/null || true
 start 4.5
-expect "重启后恢复 Tab 数" "tab 3/3"
+expect_tabs "重启后恢复 Tab 数" 3
 
 # Copy Mode：进入、选择、复制
 type_text "printf 'alpha beta\\n'"; key Enter; sleep 0.6
 key C-b '['; sleep 0.4
 expect "Copy Mode 徽标" "COPY"
 key y; sleep 0.6
-expect "复制回执" "已复制"
+expect "复制回执" "copied"
 
 # reader：terminal.read 的文本浮层
 key C-b /; sleep 1.2

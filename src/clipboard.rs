@@ -11,19 +11,22 @@ use crossterm::execute;
 /// 复制文本，返回一句给状态栏用的人话。
 pub fn copy(text: &str) -> String {
     if text.is_empty() {
-        return "复制：选区为空".to_string();
+        return "copy: nothing selected".to_string();
     }
     let mut ways = Vec::new();
     if osc52(text) {
         ways.push("OSC 52");
     }
     if tool(text) {
-        ways.push("系统剪贴板");
+        ways.push("clipboard tool");
     }
     match ways.len() {
-        0 => format!("已复制 {} 字符（宿主可能未接收）", text.chars().count()),
+        0 => format!(
+            "copied {} chars (host may not accept it)",
+            text.chars().count()
+        ),
         _ => format!(
-            "已复制 {} 字符 · {}",
+            "copied {} chars · {}",
             text.chars().count(),
             ways.join(" + ")
         ),

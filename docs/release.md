@@ -28,6 +28,9 @@ just smoke
 
 - [ ] 以上全部通过。
 - [ ] `just dist` 产出 tar.gz 与 sha256。
+- [ ] 覆盖本机安装：`install -m 755 target/x86_64-unknown-linux-musl/release/hc-tui ~/.local/bin/hc-tui`，
+      用 `hc-tui --default-config | grep 'settings ='` 确认 PATH 上的是新构建（版本号未变时
+      只看 `--version` 分不出新旧）。
 - [ ] `sha256sum -c` 通过；解包后 `./hc-tui --version`、`--default-config` 正常。
 - [ ] 解包产物在干净环境的 `hc` 上能起 TUI（`hc ls` 有可 attach 的终端）。
 

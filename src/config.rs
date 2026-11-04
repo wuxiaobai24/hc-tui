@@ -24,6 +24,19 @@ pub enum PaneBorders {
     Off,
 }
 
+/// 新建 Pane 的起始目录策略（与 herdr 的 `new_cwd` 同名同义）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewCwd {
+    /// 沿用来源 Pane 的前台目录（默认）。
+    Follow,
+    /// `$HOME`。
+    Home,
+    /// hc-tui 进程自己的工作目录。
+    Current,
+    /// 固定路径。
+    Path(String),
+}
+
 /// Tab 栏位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarPosition {
@@ -241,7 +254,7 @@ fn name_of(code: KeyCode) -> String {
         KeyCode::Char(':') => "colon".to_string(),
         KeyCode::Char('&') => "ampersand".to_string(),
         KeyCode::Char('`') => "backtick".to_string(),
-        KeyCode::Char('?') => "question".to_string(),
+        KeyCode::Char('?') => "?".to_string(),
         KeyCode::Char('[') => "leftbracket".to_string(),
         KeyCode::Char(']') => "rightbracket".to_string(),
         KeyCode::Char(character) => character.to_string(),
@@ -343,8 +356,11 @@ fn parse_key(name: &str) -> Result<KeyCode, String> {
 pub struct Keys {
     pub prefix: Binding,
     pub help: Binding,
+    pub settings: Binding,
     pub detach: Binding,
     pub reload_config: Binding,
+    pub open_notification_target: Binding,
+    pub goto: Binding,
     pub new_tab: Binding,
     pub rename_tab: Binding,
     pub next_tab: Binding,
@@ -353,6 +369,7 @@ pub struct Keys {
     pub move_tab_next: Binding,
     pub close_tab: Binding,
     pub new_workspace: Binding,
+    pub rename_workspace: Binding,
     pub close_workspace: Binding,
     pub workspace_picker: Binding,
     pub next_workspace: Binding,
@@ -398,17 +415,21 @@ impl Default for Keys {
         Self {
             prefix,
             help: bind("prefix+?"),
+            settings: bind("prefix+s"),
             detach: bind("prefix+q"),
             reload_config: bind("prefix+shift+r"),
+            open_notification_target: bind("prefix+o"),
+            goto: bind("prefix+g"),
             new_tab: bind("prefix+c"),
-            rename_tab: bind("prefix+comma"),
+            rename_tab: bind("prefix+shift+t"),
             next_tab: bind("prefix+n"),
             previous_tab: bind("prefix+p"),
-            move_tab_previous: bind("prefix+shift+left"),
-            move_tab_next: bind("prefix+shift+right"),
-            close_tab: bind("prefix+ampersand"),
+            move_tab_previous: Binding::Off,
+            move_tab_next: Binding::Off,
+            close_tab: bind("prefix+shift+x"),
             new_workspace: bind("prefix+shift+n"),
-            close_workspace: bind("prefix+shift+x"),
+            rename_workspace: bind("prefix+shift+w"),
+            close_workspace: bind("prefix+shift+d"),
             workspace_picker: bind("prefix+w"),
             next_workspace: Binding::Off,
             previous_workspace: Binding::Off,
@@ -423,20 +444,20 @@ impl Default for Keys {
             last_pane: Binding::Off,
             zoom: bind("prefix+z"),
             close_pane: bind("prefix+x"),
-            rename_pane: bind("prefix+shift+k"),
-            kill_pane: bind("prefix+shift+d"),
+            rename_pane: bind("prefix+shift+p"),
+            kill_pane: bind("prefix+shift+k"),
             move_pane: bind("prefix+m"),
             resize_mode: bind("prefix+r"),
             toggle_sidebar: bind("prefix+b"),
-            scroll_bottom: bind("prefix+e"),
+            scroll_bottom: Binding::Off,
             copy_mode: bind("prefix+leftbracket"),
             next_agent: bind("prefix+a"),
             send_text: bind("prefix+i"),
             interrupt: bind("prefix+shift+c"),
             toggle_keep: bind("prefix+shift+o"),
             remove_terminal: bind("prefix+shift+u"),
-            open_link: bind("prefix+o"),
-            edit_history: bind("prefix+shift+e"),
+            open_link: Binding::Off,
+            edit_history: bind("prefix+e"),
             read_pane: bind("prefix+slash"),
             send_keys: bind("prefix+shift+i"),
             wait_output: bind("prefix+shift+w"),
@@ -454,8 +475,11 @@ impl Keys {
         vec![
             ("prefix", self.prefix),
             ("help", self.help),
+            ("settings", self.settings),
             ("detach", self.detach),
             ("reload_config", self.reload_config),
+            ("open_notification_target", self.open_notification_target),
+            ("goto", self.goto),
             ("new_tab", self.new_tab),
             ("rename_tab", self.rename_tab),
             ("next_tab", self.next_tab),
@@ -464,6 +488,7 @@ impl Keys {
             ("move_tab_next", self.move_tab_next),
             ("close_tab", self.close_tab),
             ("new_workspace", self.new_workspace),
+            ("rename_workspace", self.rename_workspace),
             ("close_workspace", self.close_workspace),
             ("workspace_picker", self.workspace_picker),
             ("next_workspace", self.next_workspace),
@@ -507,8 +532,11 @@ impl Keys {
         let slot = match name {
             "prefix" => &mut self.prefix,
             "help" => &mut self.help,
+            "settings" => &mut self.settings,
             "detach" => &mut self.detach,
             "reload_config" => &mut self.reload_config,
+            "open_notification_target" => &mut self.open_notification_target,
+            "goto" => &mut self.goto,
             "new_tab" => &mut self.new_tab,
             "rename_tab" => &mut self.rename_tab,
             "next_tab" => &mut self.next_tab,
@@ -517,6 +545,7 @@ impl Keys {
             "move_tab_next" => &mut self.move_tab_next,
             "close_tab" => &mut self.close_tab,
             "new_workspace" => &mut self.new_workspace,
+            "rename_workspace" => &mut self.rename_workspace,
             "close_workspace" => &mut self.close_workspace,
             "workspace_picker" => &mut self.workspace_picker,
             "next_workspace" => &mut self.next_workspace,
@@ -538,14 +567,14 @@ impl Keys {
             "resize_mode" => &mut self.resize_mode,
             "toggle_sidebar" => &mut self.toggle_sidebar,
             "scroll_bottom" => &mut self.scroll_bottom,
-            "copy_mode" | "edit_scrollback" => &mut self.copy_mode,
+            "copy_mode" => &mut self.copy_mode,
             "next_agent" => &mut self.next_agent,
             "send_text" => &mut self.send_text,
             "interrupt" => &mut self.interrupt,
             "toggle_keep" => &mut self.toggle_keep,
             "remove_terminal" => &mut self.remove_terminal,
             "open_link" => &mut self.open_link,
-            "edit_history" => &mut self.edit_history,
+            "edit_history" | "edit_scrollback" => &mut self.edit_history,
             "read_pane" => &mut self.read_pane,
             "send_keys" => &mut self.send_keys,
             "wait_output" => &mut self.wait_output,
@@ -575,8 +604,14 @@ pub struct Config {
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
     pub sidebar_max_width: u16,
+    /// 终端宽度不超过这个值时进入手机单列布局；`0` 关闭。
+    pub mobile_width_threshold: u16,
     /// 每个终端保留的 scrollback 字节数。
     pub scrollback_bytes: usize,
+    /// 新建 Pane 的起始目录。
+    pub new_cwd: NewCwd,
+    /// 新建 Pane 用的可执行文件；空表示交给 core 的默认 shell。
+    pub default_shell: String,
     pub render_fps: u32,
     pub keys: Keys,
     pub theme: Theme,
@@ -588,6 +623,14 @@ pub struct Config {
     pub host_cursor: HostCursor,
     pub pane_borders: PaneBorders,
     pub pane_gaps: bool,
+    /// 分隔线是否沿着 Pane 区域的外沿绘制。
+    pub pane_outer_borders: bool,
+    /// 是否在焦点 Pane 右缘画滚动条。
+    pub pane_scrollbars: bool,
+    /// 边框上是否显示检测到的 Agent 名字。
+    pub show_agent_labels_on_pane_borders: bool,
+    /// 只有一个 Tab 时隐藏 Tab 栏。
+    pub hide_tab_bar_when_single_tab: bool,
     pub tab_bar_position: TabBarPosition,
     pub agent_sort: AgentSort,
     pub indicators: Indicators,
@@ -600,7 +643,12 @@ pub struct Config {
     pub restore: bool,
     /// 新建 Tab 时先问名字。
     pub prompt_new_tab: bool,
+    /// 新建工作区时先问名字。
+    pub prompt_new_workspace: bool,
     pub tab_bar_right: Vec<String>,
+    pub tab_bar_right_separator: String,
+    /// 写给宿主终端的窗口标题模板；空字符串表示不改标题。
+    pub window_title: String,
     /// `[[keys.command]]` 解析结果，按文件顺序执行第一个命中的绑定。
     pub commands: Vec<CustomCommand>,
     pub config_path: PathBuf,
@@ -631,7 +679,10 @@ impl Default for Config {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            mobile_width_threshold: 64,
             scrollback_bytes: 8 << 20,
+            new_cwd: NewCwd::Follow,
+            default_shell: String::new(),
             render_fps: 30,
             keys: Keys::default(),
             theme: theme::builtin("default").expect("default theme exists"),
@@ -643,8 +694,12 @@ impl Default for Config {
             host_cursor: HostCursor::Native,
             pane_borders: PaneBorders::Auto,
             pane_gaps: true,
+            pane_outer_borders: true,
+            pane_scrollbars: true,
+            show_agent_labels_on_pane_borders: false,
+            hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPosition::Top,
-            agent_sort: AgentSort::Priority,
+            agent_sort: AgentSort::Spaces,
             indicators: Indicators::Dots,
             notifications: Delivery::Toast,
             sound: false,
@@ -652,8 +707,11 @@ impl Default for Config {
             sound_done_path: None,
             sound_request_path: None,
             restore: true,
-            prompt_new_tab: false,
-            tab_bar_right: vec!["zoom".to_string(), "hostname".to_string()],
+            prompt_new_tab: true,
+            prompt_new_workspace: false,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: " ".to_string(),
+            window_title: "{hostname}: {workspace}".to_string(),
             commands: Vec::new(),
             config_path: xdg_dir("XDG_CONFIG_HOME", ".config").join("hc-tui/config.toml"),
             state_path: xdg_dir("XDG_STATE_HOME", ".local/state").join("hc-tui/state.json"),
@@ -718,6 +776,13 @@ impl Config {
                         .unwrap_or(self.sidebar_max_width as i64)
                         as u16
                 }
+                "ui.mobile_width_threshold" => {
+                    self.mobile_width_threshold = value
+                        .number(&mut warnings, path)
+                        .unwrap_or(self.mobile_width_threshold as i64)
+                        .clamp(0, u16::MAX as i64)
+                        as u16
+                }
                 "ui.sidebar_start_collapsed" => {
                     self.sidebar = !value.boolean(&mut warnings, path).unwrap_or(true)
                 }
@@ -735,6 +800,34 @@ impl Config {
                 "ui.pane_gaps" => {
                     self.pane_gaps = value.boolean(&mut warnings, path).unwrap_or(self.pane_gaps)
                 }
+                "ui.pane_outer_borders" => {
+                    self.pane_outer_borders = value
+                        .boolean(&mut warnings, path)
+                        .unwrap_or(self.pane_outer_borders)
+                }
+                "ui.pane_scrollbars" => {
+                    self.pane_scrollbars = value
+                        .boolean(&mut warnings, path)
+                        .unwrap_or(self.pane_scrollbars)
+                }
+                "ui.show_agent_labels_on_pane_borders" => {
+                    self.show_agent_labels_on_pane_borders = value
+                        .boolean(&mut warnings, path)
+                        .unwrap_or(self.show_agent_labels_on_pane_borders)
+                }
+                "ui.hide_tab_bar_when_single_tab" => {
+                    self.hide_tab_bar_when_single_tab = value
+                        .boolean(&mut warnings, path)
+                        .unwrap_or(self.hide_tab_bar_when_single_tab)
+                }
+                "ui.window_title" => match value.text() {
+                    Some(text) => self.window_title = text.to_string(),
+                    None => warnings.push(format!("{path}: 需要字符串")),
+                },
+                "ui.tab_bar_right_separator" => match value.text() {
+                    Some(text) => self.tab_bar_right_separator = text.to_string(),
+                    None => warnings.push(format!("{path}: 需要字符串")),
+                },
                 "ui.mouse_capture" => {
                     self.mouse_capture = value
                         .boolean(&mut warnings, path)
@@ -784,6 +877,25 @@ impl Config {
                     self.prompt_new_tab = value
                         .boolean(&mut warnings, path)
                         .unwrap_or(self.prompt_new_tab)
+                }
+                "ui.prompt_new_workspace_name" => {
+                    self.prompt_new_workspace = value
+                        .boolean(&mut warnings, path)
+                        .unwrap_or(self.prompt_new_workspace)
+                }
+                "terminal.new_cwd" => match value.text() {
+                    Some("follow") => self.new_cwd = NewCwd::Follow,
+                    Some("home") => self.new_cwd = NewCwd::Home,
+                    Some("current") => self.new_cwd = NewCwd::Current,
+                    Some(path) => self.new_cwd = NewCwd::Path(path.to_string()),
+                    None => warnings.push(format!("{path}: 需要字符串")),
+                },
+                "terminal.default_shell" => {
+                    self.default_shell = value.text().unwrap_or_default().to_string()
+                }
+                "terminal.shell_mode" => {
+                    // herdr 的登录 shell 开关；core 用 argv 决定，这里只接受该键。
+                    let _ = value.text();
                 }
                 "terminal.scrollback_bytes" => {
                     self.scrollback_bytes = value
@@ -934,6 +1046,66 @@ struct Document {
 }
 
 /// `--default-config` 的输出：当前支持的每个字段。
+/// 把 `key = value` 写回配置文件。已有行就地替换，没有就追加到对应
+/// section 末尾；section 不存在时新建。写盘失败只返回错误文本。
+pub fn write_setting(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let (section, name) = match key.rsplit_once('.') {
+        Some((section, name)) => (Some(section.to_string()), name.to_string()),
+        None => (None, key.to_string()),
+    };
+    let wanted = format!("{name} = {value}");
+    let mut current = String::new();
+    let mut replaced = false;
+    let mut insert_at = None;
+    for (index, line) in lines.iter_mut().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if Some(current.as_str()) == section.as_deref() {
+                insert_at = Some(index);
+            }
+            current = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            continue;
+        }
+        if let Some((lhs, _)) = trimmed.split_once('=') {
+            if lhs.trim() == name && Some(current.as_str()) == section.as_deref() {
+                *line = wanted.clone();
+                replaced = true;
+                break;
+            }
+        }
+    }
+    if !replaced {
+        match section {
+            None => lines.insert(0, wanted),
+            Some(section) => {
+                if let Some(index) = insert_at {
+                    lines.insert(index, wanted);
+                } else {
+                    if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+                        lines.push(String::new());
+                    }
+                    lines.push(format!("[{section}]"));
+                    lines.push(wanted);
+                }
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(path, out).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 pub fn default_config_text() -> String {
     let config = Config::default();
     let mut out = String::new();
@@ -948,10 +1120,27 @@ pub fn default_config_text() -> String {
         "sidebar_max_width = {}\n",
         config.sidebar_max_width
     ));
+    out.push_str(&format!(
+        "mobile_width_threshold = {}   # 宽度 <= 此值走手机单列布局，0 关闭\n",
+        config.mobile_width_threshold
+    ));
     out.push_str(&format!("sidebar_start_collapsed = {}\n", !config.sidebar));
     out.push_str("tab_bar_position = \"top\"   # top | bottom\n");
     out.push_str("pane_borders = \"auto\"      # auto | always | off\n");
     out.push_str(&format!("pane_gaps = {}\n", config.pane_gaps));
+    out.push_str(&format!(
+        "pane_outer_borders = {}\n",
+        config.pane_outer_borders
+    ));
+    out.push_str(&format!("pane_scrollbars = {}\n", config.pane_scrollbars));
+    out.push_str(&format!(
+        "show_agent_labels_on_pane_borders = {}\n",
+        config.show_agent_labels_on_pane_borders
+    ));
+    out.push_str(&format!(
+        "hide_tab_bar_when_single_tab = {}\n",
+        config.hide_tab_bar_when_single_tab
+    ));
     out.push_str(&format!("mouse_capture = {}\n", config.mouse_capture));
     out.push_str(&format!(
         "mouse_scroll_lines = {}\n",
@@ -967,6 +1156,11 @@ pub fn default_config_text() -> String {
         "prompt_new_tab_name = {}\n",
         config.prompt_new_tab
     ));
+    out.push_str(&format!(
+        "prompt_new_workspace_name = {}\n",
+        config.prompt_new_workspace
+    ));
+    out.push_str(&format!("window_title = \"{}\"\n", config.window_title));
     out.push_str("tab_bar_right = [");
     out.push_str(
         &config
@@ -976,8 +1170,23 @@ pub fn default_config_text() -> String {
             .collect::<Vec<_>>()
             .join(", "),
     );
-    out.push_str("]\n\n[terminal]\n");
+    out.push_str("]\n");
+    out.push_str(&format!(
+        "tab_bar_right_separator = \"{}\"\n",
+        config.tab_bar_right_separator
+    ));
+    out.push_str("\n[terminal]\n");
     out.push_str(&format!("scrollback_bytes = {}\n", config.scrollback_bytes));
+    let new_cwd = match &config.new_cwd {
+        NewCwd::Follow => "follow".to_string(),
+        NewCwd::Home => "home".to_string(),
+        NewCwd::Current => "current".to_string(),
+        NewCwd::Path(path) => path.clone(),
+    };
+    out.push_str(&format!(
+        "new_cwd = \"{new_cwd}\"   # follow | home | current | 固定路径\n"
+    ));
+    out.push_str(&format!("default_shell = \"{}\"\n", config.default_shell));
     out.push_str("\n[theme]\n");
     out.push_str(&format!("name = \"{}\"\n", config.theme.name));
     out.push_str("# [theme.custom]\n# accent = \"#89b4fa\"\n");
@@ -1448,6 +1657,14 @@ mod tests {
     }
 
     #[test]
+    fn mobile_width_threshold_is_configurable() {
+        let path = temp_file("mobile", "[ui]\nmobile_width_threshold = 40\n");
+        let config = Config::load(Some(path));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.mobile_width_threshold, 40);
+    }
+
+    #[test]
     fn a_real_file_overrides_defaults() {
         let path = temp_file(
             "custom",
@@ -1483,6 +1700,7 @@ mod tests {
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert!(!config.sidebar);
         assert_eq!(config.sidebar_width, 31);
+        assert_eq!(config.mobile_width_threshold, 64);
         assert_eq!(config.pane_borders, PaneBorders::Off);
         assert!(!config.pane_gaps);
         assert_eq!(config.tab_bar_position, TabBarPosition::Bottom);

@@ -75,7 +75,7 @@ flowchart TD
 | 分隔线样式 | `pane_borders`（auto/always/off）、`pane_gaps`、`pane_outer_borders` | 固定全边框 | 无配置，无 tmux 风格内分隔 |
 | 滚动条 | `pane_scrollbars`、`mouse_scroll_lines` | 无 | 无滚动条，滚轮步长写死 3 |
 | 清除与编辑历史 | `pane.clear`、`pane.edit_scrollback`（交给 `$EDITOR`） | 无 | 无 |
-| 窄屏布局 | `mobile_width_threshold` 单列布局 | 无 | 窄终端下侧栏直接隐藏 |
+| 窄屏布局 | `mobile_width_threshold` 单列布局 | 同名单列布局：一行顶栏 + `switch` 全屏面板（workspaces / tabs / agents / menu），单指拖动翻 scrollback | 无 |
 
 ### 2.3 Agent（产品定位的核心）
 
@@ -303,3 +303,61 @@ kitty 虚拟 placement、macOS 产物（需 macOS runner）。
 下调后的开工顺序：core 接线（`terminal.read/send/keys`、`machine.*`、keep/rm、订阅过滤）→
 实装债务（doc 并发、`seen_turn` 落盘、断线重放文字、侧栏滚动）→ 原语（滚动条、链接、图形）→
 自定义命令 → 上述暂缓项。
+
+---
+
+## 6. 第四批：桌面 TUI 体验对齐
+
+对照方式：在隔离 tmux 会话里并排跑 `herdr 0.9.3` 与 `hc-tui`（120x26 与 120x40），
+逐屏抓取启动、分屏、缩放、Keybinds、Settings、Go to、新建 Tab 提示、Copy、Resize，
+把可见结构与交互逐项对齐。
+
+### 6.1 布局
+
+| 项 | herdr | 本轮之前 | 现在 |
+|---|---|---|---|
+| 侧栏位置 | 占满整列，Tab 栏只覆内容区 | Tab 栏横跨全宽 | 同 herdr |
+| Tab 栏 | `1 2 3 +`，缩放时当前编号后加 `Z` | `w1 名字 1 cwd 2 cwd …` | 同 herdr，`+` 可点击 |
+| 单 Tab | 默认仍显示 Tab 栏 | 显示 | 同 herdr；`hide_tab_bar_when_single_tab` 可收起 |
+| 常驻状态栏 | 没有；模式行临时占位 | 一直占一行，写连接/通道/尺寸 | 模式行，仅模式或提示时出现 |
+| Pane 边框 | `auto` 只在分屏时画，外沿由 `pane_outer_borders` 控制 | 固定全边框，边框上写终端地址 | 同 herdr；`pane_scrollbars`、`show_agent_labels_on_pane_borders` 可用 |
+| 侧栏结构 | `spaces`（名字 + 分支）/ `new ● menu` / 分隔线 / `agents grouped` | `workspaces` / `agents` / 帮助行 | 同 herdr |
+
+### 6.2 浮层与提示
+
+| 面板 | herdr | 现在 |
+|---|---|---|
+| Keybinds（`prefix+?`） | 分组列表 + `/` 过滤 + 滚动 + `esc close` | 同结构，行内容取自实际绑定 |
+| Settings（`prefix+s`） | theme / indicators / sound / toasts / integrations，`↵ apply` | 前四段，回车应用并写回 `config.toml` |
+| Go to（`prefix+g`） | 搜索行 + 工作区树 + 右侧信息 + 面包屑/目录 + 页脚 | 同结构，覆盖自己的 Pane 与其它客户端的终端 |
+| 输入提示 | 居中面板：标题 / 输入 / `↵ save  ^c clear  esc cancel` | 同结构，确认类为 `↵ confirm  esc cancel` |
+| 模式行 | `COPY` / `RESIZE` / `NAVIGATE` + 键位提示 + 右侧状态 | 同文案，另有 `PREFIX` / `MOVE` |
+
+### 6.3 键位默认值
+
+与 herdr `--default-config` 对齐的动作：`help`、`settings`、`detach`、
+`reload_config`、`open_notification_target`、`goto`、`new/rename/next/previous/close tab`、
+`new/rename/close workspace`、workspace picker、分屏与焦点、`cycle_pane_*`、`zoom`、
+`resize_mode`、`close_pane`、`rename_pane`、`copy_mode`（`edit_scrollback` 别名）。
+`hc-tui` 独有能力（kill、move pane、read、keys、wait、put、templates、machines、
+paste image、自定义命令）保留独立绑定，不占用 herdr 的默认组合。
+
+### 6.4 终端可见性
+
+`events.subscribe` 的快照里本来就有全部终端，此前只把它们用来补名字，侧栏与
+Agent 列表只遍历本地 Pane，所以看不到别的客户端创建的终端。现在：
+
+- 侧栏 `agents` 段与 Go to 面板都会列出没有本地视图的终端；
+- 选中时若已有视图就切焦点，没有就在当前 Tab 右侧建一个视图并 attach 到该地址；
+- 验证：隔离 session 里先 `hc run --bg sh -c 'echo OTHER-CLIENT-TERMINAL; sleep 120'`，
+  TUI 启动后侧栏出现 `t1`，Go to 过滤 `t1` 回车后新视图打印出 `OTHER-CLIENT-TERMINAL`。
+
+### 6.5 仍未对齐
+
+| 项 | 原因 |
+|---|---|
+| Worktree 面板与 `new_worktree` | 需要 git 子进程与工作树目录策略，未做 |
+| Settings 的 integrations 段 | 依赖 `integration install` 写各 Agent 的钩子 |
+| 插件动作、通知历史 | 自有 API 与持久化，未做 |
+| `machine.exec`、订阅过滤 | core 有方法，客户端未接 |
+| Toast 位置/延迟与声音按 Agent 静音 | 只做了全局开关 |

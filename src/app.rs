@@ -91,8 +91,28 @@ pub enum PromptKind {
 }
 
 impl PromptKind {
+    /// 浮层顶部的标题，跟 herdr 的面板标题一致。
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::NewTab => "new tab",
+            Self::NewWorkspace => "new workspace",
+            Self::RenameTab { .. } => "rename tab",
+            Self::RenameWorkspace(_) => "rename workspace",
+            Self::RenamePane(_) => "rename pane",
+            Self::SendText(_) => "send text",
+            Self::SendKeys(_) => "send keys",
+            Self::WaitOutput(_) => "wait for output",
+            Self::PutFile(_) => "send file",
+            Self::AddMachine => "add machine",
+            Self::RenameMachine(_) => "rename machine",
+            Self::CloseTab(_) => "close tab",
+            Self::CloseWorkspace(_) => "close workspace",
+            Self::KillPane(_) => "kill terminal",
+        }
+    }
+
     /// 只有这些动作需要输入 `y` 再回车。
-    fn needs_confirm(&self) -> bool {
+    pub fn needs_confirm(&self) -> bool {
         matches!(
             self,
             Self::CloseTab(_) | Self::CloseWorkspace(_) | Self::KillPane(_)
@@ -133,6 +153,49 @@ pub struct Reader {
     pub scroll: usize,
     pub complete: bool,
     pub how: String,
+}
+
+/// Keybinds 浮层：`/` 过滤、方向键或 j/k 滚动。
+#[derive(Debug, Clone)]
+pub struct HelpOverlay {
+    pub query: String,
+    pub selected: usize,
+    pub scroll: usize,
+}
+
+/// 帮助面板里的一行；`section` 为真的行只是标题。
+#[derive(Debug, Clone)]
+pub struct HelpRow {
+    pub section: bool,
+    pub key: String,
+    pub text: String,
+}
+
+/// 设置浮层：主题、状态图标、通知、声音。
+#[derive(Debug, Clone)]
+pub struct SettingsOverlay {
+    pub section: usize,
+    pub selected: usize,
+}
+
+/// Go to 浮层：搜索并跳转到任意终端。
+#[derive(Debug, Clone)]
+pub struct GotoOverlay {
+    pub query: String,
+    pub selected: usize,
+}
+
+/// Go to 里的一行：工作区标题、已有视图的 Pane，或其它客户端创建的终端。
+#[derive(Debug, Clone)]
+pub struct GotoRow {
+    pub pane: Option<u32>,
+    pub terminal: Option<String>,
+    pub text: String,
+    pub right: String,
+    pub section: bool,
+    /// 选中后显示在底部的面包屑与目录。
+    pub context: String,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +251,27 @@ pub struct Drag {
     pub current: (u16, u16),
 }
 
+/// 手机切换面板里可点的条目。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobileTarget {
+    Workspace(usize),
+    Tab(usize),
+    Agent(u32),
+    Action(MobileAction),
+}
+
+/// 面板 `menu` 段里的动作：手机上没有前缀键，这些动作只能靠点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobileAction {
+    NewTab,
+    SplitRight,
+    SplitDown,
+    ClosePane,
+    CopyMode,
+    NextAgent,
+    Detach,
+}
+
 pub struct App {
     pub config: Config,
     pub connection: Connection,
@@ -202,12 +286,19 @@ pub struct App {
     /// 上一次绘制算出的 Pane 区域（不含 Tab 栏、侧栏、状态栏）。
     pub content: Rect,
     pub tab_bar: Rect,
+    /// Tab 栏右侧 `+` 按钮的区域。
+    pub tab_add: Rect,
+    /// 侧栏 `new` / `menu` 按钮的区域。
+    pub sidebar_new: Rect,
+    pub sidebar_menu: Rect,
     /// Tab 栏上每一段的点击区域，值是当前工作区里的 Tab 下标。
     pub tab_hits: Vec<(usize, Rect)>,
     /// 侧栏里 Agent 行的点击区域。
     pub agent_hits: Vec<(u32, Rect)>,
     /// 侧栏里工作区行的点击区域。
     pub workspace_hits: Vec<(usize, Rect)>,
+    /// 侧栏里其它客户端终端的点击区域。
+    pub terminal_hits: Vec<(String, Rect)>,
     pub zoom: bool,
     pub resize_mode: bool,
     pub move_mode: bool,
@@ -218,6 +309,9 @@ pub struct App {
     pub toast: Option<Toast>,
     pub popup: Option<PopupPane>,
     pub reader: Option<Reader>,
+    pub help: Option<HelpOverlay>,
+    pub settings: Option<SettingsOverlay>,
+    pub goto: Option<GotoOverlay>,
     pub chooser: Option<Chooser>,
     pub machines: Vec<MachineInfo>,
     /// `tab_bar_right` 里 `cmd:` 条目的最近一次输出。
@@ -226,11 +320,27 @@ pub struct App {
     pub sidebar_scroll: usize,
     /// 侧栏区域，鼠标滚轮用。
     pub sidebar_area: Rect,
+    /// 上次绘制进入了手机单列布局。
+    pub mobile: bool,
+    /// 手机顶栏上 `switch` / `close` 按钮的区域。
+    pub mobile_switch: Rect,
+    /// 切换面板的 `close` 按钮、行点击区域与滚动偏移。
+    pub mobile_close: Rect,
+    pub mobile_targets: Vec<(MobileTarget, Rect)>,
+    pub mobile_scroll: usize,
+    pub mobile_max_scroll: usize,
+    pub switcher: bool,
     pub events_seen: u64,
     /// core doc 的版本；`0` 表示从未写过。
     pub doc_version: u64,
     pub doc_loaded: bool,
     pub last_pane: Option<u32>,
+    /// 最近一次后台完成或需要人工介入的 Pane（`prefix+o` 跳过去）。
+    pub last_attention: Option<u32>,
+    /// 分支名缓存：cwd → (branch, 取到的时刻)。
+    pub branches: HashMap<String, (String, Instant)>,
+    note_until: Option<Instant>,
+    note_seen: String,
     prefix: bool,
     dirty: bool,
     quit: bool,
@@ -286,9 +396,13 @@ impl App {
             slots: Vec::new(),
             content: Rect::new(0, 0, 80, 24),
             tab_bar: Rect::new(0, 0, 0, 0),
+            tab_add: Rect::new(0, 0, 0, 0),
+            sidebar_new: Rect::new(0, 0, 0, 0),
+            sidebar_menu: Rect::new(0, 0, 0, 0),
             tab_hits: Vec::new(),
             agent_hits: Vec::new(),
             workspace_hits: Vec::new(),
+            terminal_hits: Vec::new(),
             zoom: false,
             resize_mode: false,
             move_mode: false,
@@ -299,15 +413,29 @@ impl App {
             toast: None,
             popup: None,
             reader: None,
+            help: None,
+            settings: None,
+            goto: None,
             chooser: None,
             machines: Vec::new(),
             command_output: HashMap::new(),
             sidebar_scroll: 0,
             sidebar_area: Rect::new(0, 0, 0, 0),
+            mobile: false,
+            mobile_switch: Rect::new(0, 0, 0, 0),
+            mobile_close: Rect::new(0, 0, 0, 0),
+            mobile_targets: Vec::new(),
+            mobile_scroll: 0,
+            mobile_max_scroll: 0,
+            switcher: false,
             events_seen: 0,
             doc_version: 0,
             doc_loaded: false,
             last_pane: None,
+            last_attention: None,
+            branches: HashMap::new(),
+            note_until: None,
+            note_seen: String::new(),
             prefix: false,
             dirty: true,
             quit: false,
@@ -344,6 +472,49 @@ impl App {
 
     pub fn prefix_active(&self) -> bool {
         self.prefix
+    }
+
+    /// 底部模式行：左边标签加提示；`None` 表示不占行。
+    pub fn mode_line(&self) -> Option<(String, String)> {
+        if self.copy.is_some() {
+            return Some((
+                "COPY".to_string(),
+                "h/j/k/l w/b/e { } move  / ? search  n/N repeat  v/space select  y/enter copy  q/esc exit"
+                    .to_string(),
+            ));
+        }
+        if self.resize_mode {
+            return Some((
+                "RESIZE".to_string(),
+                "h/l width  j/k height  esc done".to_string(),
+            ));
+        }
+        if self.move_mode {
+            return Some((
+                "MOVE".to_string(),
+                "1-9 target tab  t new tab  esc back".to_string(),
+            ));
+        }
+        if self.workspace_mode {
+            return Some((
+                "NAVIGATE".to_string(),
+                "\u{2191}/\u{2193} workspace  1-9 switch  esc back".to_string(),
+            ));
+        }
+        if self.prefix_active() {
+            return Some((
+                "PREFIX".to_string(),
+                "? keybinds  s settings  c new tab  v/- split  hjkl focus  z zoom  x close  q detach"
+                    .to_string(),
+            ));
+        }
+        if !self.note.is_empty() {
+            return Some((String::new(), self.note.clone()));
+        }
+        if !matches!(self.connection, Connection::Ready { .. }) {
+            return Some((String::new(), self.connection.label()));
+        }
+        None
     }
 
     pub fn mark_dirty(&mut self) {
@@ -394,8 +565,13 @@ impl App {
             let pane = self.alloc_pane();
             let tab = self.alloc_tab();
             let workspace = self.alloc_workspace();
+            let label = std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| dir_label(Some(path), String::new()))
+                .unwrap_or_default();
             self.workspaces
-                .push(Workspace::new(workspace, String::new(), pane, tab));
+                .push(Workspace::new(workspace, label, pane, tab));
             self.active_ws = 0;
             self.spawn_pane(pane);
             let target = self.config.attach.clone();
@@ -444,11 +620,22 @@ impl App {
         if self.restore_pending && now.duration_since(self.restore_since) >= RESTORE_TIMEOUT {
             self.restore_pending = false;
             self.ensure_layout();
-            self.note = "core 没有返回布局，使用默认布局".to_string();
+            self.note = "core returned no layout; using the default".to_string();
             self.dirty = true;
         }
         if self.toast.as_ref().is_some_and(|toast| now >= toast.until) {
             self.toast = None;
+            self.dirty = true;
+        }
+        // note 变了就重新开始计时；过期后清掉，不给屏幕留固定状态栏。
+        if self.note != self.note_seen {
+            self.note_seen = self.note.clone();
+            self.note_until = Some(now + TOAST_LIFETIME);
+        }
+        if !self.note.is_empty() && self.note_until.is_some_and(|until| now >= until) {
+            self.note.clear();
+            self.note_seen.clear();
+            self.note_until = None;
             self.dirty = true;
         }
         self.refresh_tab_commands(now);
@@ -567,6 +754,11 @@ impl App {
         if let Some(toast) = &self.toast {
             deadlines.push(toast.until);
         }
+        if let Some(until) = self.note_until {
+            if !self.note.is_empty() {
+                deadlines.push(until);
+            }
+        }
         if self.seen_dirty {
             if let Some(since) = self.seen_since {
                 deadlines.push(since + Duration::from_millis(500));
@@ -583,7 +775,8 @@ impl App {
             return;
         }
         let focus = self.focused();
-        let leaves = if self.zoom {
+        // 手机单列布局只摆当前 Pane，其余 Pane 靠 `switch` 面板跳过去。
+        let leaves = if self.zoom || self.mobile {
             vec![(PaneId(focus), content)]
         } else {
             self.workspace()
@@ -598,6 +791,7 @@ impl App {
                 &leaves,
                 self.config.pane_borders,
                 self.config.pane_gaps,
+                self.config.pane_outer_borders,
             );
             slots.push(Slot {
                 pane: pane.0,
@@ -691,6 +885,18 @@ impl App {
             self.on_prompt_key(key);
             return;
         }
+        if self.help.is_some() {
+            self.on_help_key(key);
+            return;
+        }
+        if self.settings.is_some() {
+            self.on_settings_key(key);
+            return;
+        }
+        if self.goto.is_some() {
+            self.on_goto_key(key);
+            return;
+        }
         if self.reader.is_some() {
             self.on_reader_key(key);
             return;
@@ -701,6 +907,10 @@ impl App {
         }
         if self.copy.is_some() {
             self.on_copy_key(key);
+            return;
+        }
+        if self.switcher && key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
+            self.close_switcher();
             return;
         }
         if self.resize_mode {
@@ -783,6 +993,9 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.mobile && self.on_mobile_mouse(mouse) {
+            return;
+        }
         // popup 打开时独占鼠标：点在外面不改变下面分屏的焦点。
         if let Some(popup) = self.popup {
             let slot = self
@@ -807,10 +1020,10 @@ impl App {
                     });
                 }
             } else if mouse.kind == MouseEventKind::ScrollUp {
-                pane.view.scroll(self.config.mouse_scroll_lines as isize);
+                pane.view.scroll(-(self.config.mouse_scroll_lines as isize));
                 self.dirty = true;
             } else if mouse.kind == MouseEventKind::ScrollDown {
-                pane.view.scroll(-(self.config.mouse_scroll_lines as isize));
+                pane.view.scroll(self.config.mouse_scroll_lines as isize);
                 self.dirty = true;
             }
             return;
@@ -836,6 +1049,31 @@ impl App {
 
         let pressed = mouse.kind == MouseEventKind::Down(MouseButton::Left);
         if pressed {
+            if contains(self.tab_add, mouse.column, mouse.row) {
+                if self.config.prompt_new_tab {
+                    let suggested = format!("{}", self.tabs_in_workspace() + 1);
+                    self.ask_with(PromptKind::NewTab, "tab name", suggested);
+                } else {
+                    self.new_tab(None);
+                }
+                return;
+            }
+            if contains(self.sidebar_new, mouse.column, mouse.row) {
+                if self.config.prompt_new_workspace {
+                    self.ask(PromptKind::NewWorkspace, "workspace name");
+                } else {
+                    self.new_workspace(None);
+                }
+                return;
+            }
+            if contains(self.sidebar_menu, mouse.column, mouse.row) {
+                self.settings = Some(SettingsOverlay {
+                    section: 0,
+                    selected: self.settings_selected(0),
+                });
+                self.dirty = true;
+                return;
+            }
             if let Some((index, _)) = self
                 .tab_hits
                 .iter()
@@ -858,6 +1096,15 @@ impl App {
                 .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
             {
                 self.focus_pane(*pane);
+                return;
+            }
+            if let Some((terminal, _)) = self
+                .terminal_hits
+                .iter()
+                .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                .cloned()
+            {
+                self.open_terminal(&terminal);
                 return;
             }
         }
@@ -888,14 +1135,28 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(drag) = &mut self.drag {
-                    drag.current = to_inner(slot.inner, mouse);
+                    let next = to_inner(slot.inner, mouse);
+                    if self.mobile {
+                        // 触屏拖动是翻看 scrollback：手指下移就往前翻，不选文本。
+                        let delta = i32::from(next.1) - i32::from(drag.current.1);
+                        drag.current = next;
+                        drag.start = next;
+                        if delta != 0 {
+                            if let Some(pane) = self.panes.get_mut(&slot.pane) {
+                                pane.view.scroll(-(delta as isize));
+                            }
+                            self.dirty = true;
+                        }
+                        return;
+                    }
+                    drag.current = next;
                     self.dirty = true;
                     return;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 if let Some(drag) = self.drag.take() {
-                    if self.config.copy_on_select && drag.start != drag.current {
+                    if !self.mobile && self.config.copy_on_select && drag.start != drag.current {
                         let text = self
                             .panes
                             .get(&drag.pane)
@@ -928,14 +1189,100 @@ impl App {
         let lines = self.config.mouse_scroll_lines as isize;
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                pane.view.scroll(lines);
-                self.dirty = true;
-            }
-            MouseEventKind::ScrollDown => {
                 pane.view.scroll(-lines);
                 self.dirty = true;
             }
+            MouseEventKind::ScrollDown => {
+                pane.view.scroll(lines);
+                self.dirty = true;
+            }
             _ => {}
+        }
+    }
+
+    /// 手机布局下的鼠标事件：`switch` 打开面板，面板里 tap 跳转、滚动翻列表。
+    /// 返回 `true` 表示已消费。
+    fn on_mobile_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.switcher {
+            let overlay = self.prompt.is_some()
+                || self.reader.is_some()
+                || self.chooser.is_some()
+                || self.popup.is_some()
+                || self.copy.is_some();
+            if overlay {
+                return true;
+            }
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.mobile_scroll = self.mobile_scroll.saturating_sub(2);
+                    self.dirty = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.mobile_scroll = self
+                        .mobile_scroll
+                        .saturating_add(2)
+                        .min(self.mobile_max_scroll);
+                    self.dirty = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if contains(self.mobile_close, mouse.column, mouse.row) {
+                        self.close_switcher();
+                        return true;
+                    }
+                    let target = self
+                        .mobile_targets
+                        .iter()
+                        .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                        .map(|(target, _)| *target);
+                    if let Some(target) = target {
+                        self.run_mobile_target(target);
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.prompt.is_none()
+            && contains(self.mobile_switch, mouse.column, mouse.row)
+        {
+            self.open_switcher();
+            return true;
+        }
+        false
+    }
+
+    pub fn open_switcher(&mut self) {
+        self.switcher = true;
+        self.mobile_scroll = 0;
+        self.dirty = true;
+    }
+
+    fn close_switcher(&mut self) {
+        self.switcher = false;
+        self.mobile_scroll = 0;
+        self.dirty = true;
+    }
+
+    fn run_mobile_target(&mut self, target: MobileTarget) {
+        self.close_switcher();
+        match target {
+            MobileTarget::Workspace(index) => self.select_workspace(index),
+            MobileTarget::Tab(index) => self.select_tab(index),
+            MobileTarget::Agent(pane) => self.focus_pane(pane),
+            MobileTarget::Action(action) => self.run_mobile_action(action),
+        }
+    }
+
+    fn run_mobile_action(&mut self, action: MobileAction) {
+        match action {
+            MobileAction::NewTab => self.new_tab(None),
+            MobileAction::SplitRight => self.split_focused(Axis::Horizontal),
+            MobileAction::SplitDown => self.split_focused(Axis::Vertical),
+            MobileAction::ClosePane => self.close_focused_pane(),
+            MobileAction::CopyMode => self.enter_copy_mode(),
+            MobileAction::NextAgent => self.focus_next_attention(),
+            MobileAction::Detach => self.quit = true,
         }
     }
 
@@ -952,8 +1299,32 @@ impl App {
             return;
         }
         if keys.help.matches_prefix(&key) {
-            self.note = "c 新 tab · v/- 分屏 · hjkl 焦点 · z 缩放 · x 关闭视图 · , 命名 tab · K 命名 pane · D kill · m 移动 pane · w 工作区 · [ 复制 · a 下一个待处理 · & 关 tab · q 退出".to_string();
+            self.help = Some(HelpOverlay {
+                query: String::new(),
+                selected: 0,
+                scroll: 0,
+            });
             self.dirty = true;
+            return;
+        }
+        if keys.settings.matches_prefix(&key) {
+            self.settings = Some(SettingsOverlay {
+                section: 0,
+                selected: self.settings_selected(0),
+            });
+            self.dirty = true;
+            return;
+        }
+        if keys.goto.matches_prefix(&key) {
+            self.goto = Some(GotoOverlay {
+                query: String::new(),
+                selected: 1,
+            });
+            self.dirty = true;
+            return;
+        }
+        if keys.open_notification_target.matches_prefix(&key) {
+            self.open_notification_target();
             return;
         }
         if keys.detach.matches_prefix(&key) {
@@ -966,7 +1337,8 @@ impl App {
         }
         if keys.new_tab.matches_prefix(&key) {
             if self.config.prompt_new_tab {
-                self.ask(PromptKind::NewTab, "新 tab 名字");
+                let suggested = format!("{}", self.tabs_in_workspace() + 1);
+                self.ask_with(PromptKind::NewTab, "tab name", suggested);
             } else {
                 self.new_tab(None);
             }
@@ -974,10 +1346,11 @@ impl App {
         }
         if keys.rename_tab.matches_prefix(&key) {
             if let Some(tab) = self.tab() {
-                let (workspace, id) = (self.active_ws, tab.id);
-                self.ask(
+                let (workspace, id, label) = (self.active_ws, tab.id, tab.display(&self.panes));
+                self.ask_with(
                     PromptKind::RenameTab { workspace, tab: id },
-                    "tab 名字（留空恢复默认）",
+                    "rename tab",
+                    label,
                 );
             }
             return;
@@ -1002,7 +1375,7 @@ impl App {
             if self.config.confirm_close {
                 self.ask(
                     PromptKind::CloseTab(self.active_ws),
-                    "关闭整个 tab 连同其中的 pane 视图？(y/N)",
+                    "close this tab and every pane in it? (y/N)",
                 );
             } else {
                 let workspace = self.active_ws;
@@ -1011,22 +1384,35 @@ impl App {
             return;
         }
         if keys.new_workspace.matches_prefix(&key) {
-            self.ask(PromptKind::NewWorkspace, "新工作区名字");
+            if self.config.prompt_new_workspace {
+                self.ask(PromptKind::NewWorkspace, "workspace name");
+            } else {
+                self.new_workspace(None);
+            }
+            return;
+        }
+        if keys.rename_workspace.matches_prefix(&key) {
+            let (index, label) = self
+                .workspace()
+                .map(|workspace| (self.active_ws, workspace.label.clone()))
+                .unwrap_or((self.active_ws, String::new()));
+            self.ask_with(
+                PromptKind::RenameWorkspace(index),
+                "rename workspace",
+                label,
+            );
             return;
         }
         if keys.close_workspace.matches_prefix(&key) {
             self.ask(
                 PromptKind::CloseWorkspace(self.active_ws),
-                "关闭当前工作区及其全部 tab？(y/N)",
+                "close workspace and all its tabs? (y/N)",
             );
             return;
         }
         if keys.workspace_picker.matches_prefix(&key) {
             self.workspace_mode = true;
-            self.note = format!(
-                "workspace: {} 个，按 1-9 切换，Esc 取消",
-                self.workspaces.len()
-            );
+            self.note = String::new();
             self.dirty = true;
             return;
         }
@@ -1080,11 +1466,7 @@ impl App {
         }
         if keys.zoom.matches_prefix(&key) {
             self.zoom = !self.zoom;
-            self.note = if self.zoom {
-                "zoomed".to_string()
-            } else {
-                "unzoomed".to_string()
-            };
+            self.note = String::new();
             self.dirty = true;
             return;
         }
@@ -1121,7 +1503,7 @@ impl App {
         }
         if keys.resize_mode.matches_prefix(&key) {
             self.resize_mode = true;
-            self.note = "resize: h/j/k/l 调整，其他键退出".to_string();
+            self.note = String::new();
             self.dirty = true;
             return;
         }
@@ -1134,7 +1516,7 @@ impl App {
             if let Some(pane) = self.panes.get_mut(&self.focused()) {
                 pane.view.scroll_bottom();
             }
-            self.note = "scrolled to bottom".to_string();
+            self.note = "bottom".to_string();
             self.dirty = true;
             return;
         }
@@ -1167,7 +1549,7 @@ impl App {
                     "terminal.interrupt",
                     json!({"terminal": terminal}),
                 );
-                self.note = format!("正在中断 {terminal}");
+                self.note = format!("interrupting {terminal}");
             }
             return;
         }
@@ -1225,7 +1607,7 @@ impl App {
             }
             return;
         }
-        self.note = "prefix: ? 帮助 · c 新 tab · v/- 分屏 · hjkl 焦点 · z 缩放".to_string();
+        self.note = String::new();
         self.dirty = true;
     }
 
@@ -1256,7 +1638,7 @@ impl App {
                     self.select_workspace(index);
                 }
                 _ => {
-                    self.note = "workspace: 1-9 切换 · h/l 前后 · Esc 取消".to_string();
+                    self.note = String::new();
                     self.dirty = true;
                 }
             }
@@ -1273,7 +1655,7 @@ impl App {
                 self.move_pane_to_tab(index);
             }
             _ => {
-                self.note = "move: 1-9 目标 tab · t 新 tab · Esc 取消".to_string();
+                self.note = String::new();
                 self.dirty = true;
             }
         }
@@ -1287,7 +1669,11 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.prompt = None;
-                self.note = "已取消".to_string();
+                self.note = "cancelled".to_string();
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.buffer.clear();
+                prompt.cursor = 0;
             }
             KeyCode::Enter => {
                 let prompt = self.prompt.take().expect("prompt exists");
@@ -1390,7 +1776,7 @@ impl App {
         let lines = state.view.viewport_lines();
         let cursor = state.view.cursor();
         self.copy = Some(CopyMode::new(pane, size, lines, cursor));
-        self.note = "copy: hjkl 移动 · w/b 词 · v 选区 · y 复制 · / 搜索 · q 退出".to_string();
+        self.note = String::new();
         self.dirty = true;
     }
 
@@ -1404,15 +1790,15 @@ impl App {
                     copy.typing = false;
                     let found = copy.find_next();
                     self.note = if found {
-                        format!("搜索：{}", copy.search.clone().unwrap_or_default())
+                        format!("/{}", copy.search.clone().unwrap_or_default())
                     } else {
-                        "没有找到".to_string()
+                        "not found".to_string()
                     };
                 }
                 KeyCode::Esc => {
                     copy.typing = false;
                     copy.search = None;
-                    self.note = "copy".to_string();
+                    self.note = "copy mode".to_string();
                 }
                 KeyCode::Backspace => {
                     if let Some(search) = &mut copy.search {
@@ -1433,7 +1819,7 @@ impl App {
         let mut done = false;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.note = "copy 结束".to_string();
+                self.note = "copy mode closed".to_string();
                 done = true;
             }
             KeyCode::Char('h') | KeyCode::Left => copy.move_by(-1, 0),
@@ -1462,9 +1848,9 @@ impl App {
             KeyCode::Char('R') => {
                 copy.toggle_rectangle();
                 self.note = if copy.rectangle {
-                    "矩形选区".to_string()
+                    "block selection".to_string()
                 } else {
-                    "线性选区".to_string()
+                    "line selection".to_string()
                 };
             }
             KeyCode::Char('o') => {
@@ -1483,19 +1869,19 @@ impl App {
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .spawn();
-                    self.note = format!("打开 {uri}");
+                    self.note = format!("opening {uri}");
                 } else {
-                    self.note = "光标处没有链接".to_string();
+                    self.note = "no link under cursor".to_string();
                 }
             }
             KeyCode::Char('/') => {
                 copy.typing = true;
                 copy.search = Some(String::new());
-                self.note = "搜索（Enter 确认，Esc 取消）".to_string();
+                self.note = "search".to_string();
             }
             KeyCode::Char('n') => {
                 if !copy.find_next() {
-                    self.note = "没有找到".to_string();
+                    self.note = "not found".to_string();
                 }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1555,10 +1941,718 @@ impl App {
         self.dirty = true;
     }
 
+    /// 带预填内容的提示行（重命名与新建 Tab 用）。
+    fn ask_with(&mut self, kind: PromptKind, label: &str, initial: String) {
+        self.ask(kind, label);
+        if let Some(prompt) = &mut self.prompt {
+            prompt.cursor = initial.len();
+            prompt.buffer = initial;
+        }
+    }
+
+    // ------------------------------------------------------------- 浮层面板
+
+    /// Keybinds 面板的全部行，按 herdr 的分组分好。
+    pub fn help_rows(&self) -> Vec<HelpRow> {
+        let bindings = self.config.keys.entries();
+        let text = |name: &str| -> &'static str {
+            match name {
+                "prefix" => "prefix mode",
+                "help" => "keybinds",
+                "settings" => "settings",
+                "detach" => "detach",
+                "reload_config" => "reload config",
+                "open_notification_target" => "open notification target",
+                "goto" => "search agents and terminals",
+                "new_tab" => "new tab",
+                "rename_tab" => "rename tab",
+                "next_tab" => "next tab",
+                "previous_tab" => "previous tab",
+                "move_tab_previous" => "move tab toward front",
+                "move_tab_next" => "move tab toward back",
+                "close_tab" => "close tab",
+                "new_workspace" => "new workspace",
+                "rename_workspace" => "rename workspace",
+                "close_workspace" => "close workspace",
+                "workspace_picker" => "workspace picker",
+                "next_workspace" => "next workspace",
+                "previous_workspace" => "previous workspace",
+                "split_vertical" => "split vertical",
+                "split_horizontal" => "split horizontal",
+                "focus_pane_left" => "focus pane left",
+                "focus_pane_down" => "focus pane down",
+                "focus_pane_up" => "focus pane up",
+                "focus_pane_right" => "focus pane right",
+                "cycle_pane_next" => "cycle pane next",
+                "cycle_pane_previous" => "cycle pane previous",
+                "last_pane" => "last pane",
+                "zoom" => "zoom",
+                "close_pane" => "close pane",
+                "rename_pane" => "rename pane",
+                "kill_pane" => "kill terminal",
+                "move_pane" => "move pane",
+                "resize_mode" => "resize mode",
+                "toggle_sidebar" => "toggle sidebar",
+                "scroll_bottom" => "scroll to bottom",
+                "copy_mode" => "copy mode",
+                "next_agent" => "next agent needing attention",
+                "send_text" => "send text to pane",
+                "interrupt" => "interrupt turn",
+                "toggle_keep" => "toggle keep",
+                "remove_terminal" => "remove finished terminal",
+                "open_link" => "open link",
+                "edit_history" => "edit scrollback",
+                "read_pane" => "read pane",
+                "send_keys" => "send named keys",
+                "wait_output" => "wait for output",
+                "put_file" => "send file",
+                "templates" => "templates",
+                "machines" => "machines",
+                "paste_image" => "paste image",
+                _ => "",
+            }
+        };
+        let groups: [(&str, &[&str]); 5] = [
+            (
+                "global",
+                &[
+                    "prefix",
+                    "help",
+                    "settings",
+                    "detach",
+                    "reload_config",
+                    "open_notification_target",
+                ],
+            ),
+            ("navigation", &["goto", "workspace_picker"]),
+            (
+                "panes",
+                &[
+                    "split_vertical",
+                    "split_horizontal",
+                    "focus_pane_left",
+                    "focus_pane_down",
+                    "focus_pane_up",
+                    "focus_pane_right",
+                    "cycle_pane_next",
+                    "cycle_pane_previous",
+                    "last_pane",
+                    "zoom",
+                    "resize_mode",
+                    "close_pane",
+                    "rename_pane",
+                    "kill_pane",
+                    "move_pane",
+                    "copy_mode",
+                    "edit_history",
+                    "toggle_sidebar",
+                ],
+            ),
+            (
+                "tabs and workspaces",
+                &[
+                    "new_tab",
+                    "rename_tab",
+                    "next_tab",
+                    "previous_tab",
+                    "move_tab_previous",
+                    "move_tab_next",
+                    "close_tab",
+                    "new_workspace",
+                    "rename_workspace",
+                    "close_workspace",
+                    "next_workspace",
+                    "previous_workspace",
+                ],
+            ),
+            (
+                "agents and terminals",
+                &[
+                    "next_agent",
+                    "send_text",
+                    "send_keys",
+                    "wait_output",
+                    "put_file",
+                    "paste_image",
+                    "interrupt",
+                    "read_pane",
+                    "open_link",
+                    "templates",
+                    "machines",
+                    "toggle_keep",
+                    "remove_terminal",
+                ],
+            ),
+        ];
+        let by_name: std::collections::HashMap<&str, crate::config::Binding> =
+            bindings.into_iter().collect();
+        let mut rows = Vec::new();
+        for (title, names) in groups {
+            rows.push(HelpRow {
+                section: true,
+                key: String::new(),
+                text: title.to_string(),
+            });
+            for name in names {
+                let Some(binding) = by_name.get(name) else {
+                    continue;
+                };
+                if binding.is_off() {
+                    continue;
+                }
+                rows.push(HelpRow {
+                    section: false,
+                    key: binding.to_string().trim_matches('"').to_string(),
+                    text: text(name).to_string(),
+                });
+            }
+        }
+        rows.push(HelpRow {
+            section: true,
+            key: String::new(),
+            text: "copy mode".to_string(),
+        });
+        for (key, text) in [
+            ("h j k l", "move"),
+            ("w b e", "word"),
+            ("{ }", "paragraph"),
+            ("/ ?", "search"),
+            ("n N", "repeat search"),
+            ("v space", "select"),
+            ("y enter", "copy"),
+            ("q esc", "exit"),
+        ] {
+            rows.push(HelpRow {
+                section: false,
+                key: key.to_string(),
+                text: text.to_string(),
+            });
+        }
+        rows
+    }
+
+    /// 过滤后的 Keybinds 行；查询为空时原样返回。
+    pub fn help_view(&self) -> Vec<HelpRow> {
+        let query = self
+            .help
+            .as_ref()
+            .map(|help| help.query.clone())
+            .unwrap_or_default();
+        self.help_view_for(&query)
+    }
+
+    fn help_view_for(&self, query: &str) -> Vec<HelpRow> {
+        let rows = self.help_rows();
+        let query = query.to_ascii_lowercase();
+        if query.is_empty() {
+            return rows;
+        }
+        let matched: Vec<HelpRow> = rows
+            .iter()
+            .filter(|row| {
+                !row.section
+                    && (row.key.to_ascii_lowercase().contains(&query)
+                        || row.text.to_ascii_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect();
+        let mut out = Vec::new();
+        if !matched.is_empty() {
+            out.push(HelpRow {
+                section: true,
+                key: String::new(),
+                text: "matches".to_string(),
+            });
+            out.extend(matched);
+        }
+        out
+    }
+
+    fn on_help_key(&mut self, key: KeyEvent) {
+        let Some(mut help) = self.help.take() else {
+            return;
+        };
+        let rows = self.help_view_for(&help.query);
+        let max = rows.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.dirty = true;
+                return;
+            }
+            KeyCode::Char('q') if help.query.is_empty() => {
+                self.dirty = true;
+                return;
+            }
+            KeyCode::Char('k') | KeyCode::Up => help.selected = help.selected.saturating_sub(1),
+            KeyCode::Char('j') | KeyCode::Down => help.selected = (help.selected + 1).min(max),
+            KeyCode::PageUp => help.selected = help.selected.saturating_sub(10),
+            KeyCode::PageDown => help.selected = (help.selected + 10).min(max),
+            KeyCode::Backspace => {
+                help.query.pop();
+                help.selected = 0;
+                help.scroll = 0;
+            }
+            KeyCode::Char('/') => {}
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                help.query.push(character);
+                help.selected = 0;
+                help.scroll = 0;
+            }
+            _ => {}
+        }
+        self.help = Some(help);
+        self.dirty = true;
+    }
+
+    pub const SETTINGS_SECTIONS: [&'static str; 4] = ["theme", "indicators", "toasts", "sound"];
+
+    /// 设置面板当前分段的条目数。
+    pub fn settings_len(&self, section: usize) -> usize {
+        match section {
+            0 => crate::theme::names().len(),
+            1 => 2,
+            2 => 3,
+            _ => 2,
+        }
+    }
+
+    /// 打开设置时让选中项落在当前值上。
+    fn settings_selected(&self, section: usize) -> usize {
+        match section {
+            0 => crate::theme::names()
+                .iter()
+                .position(|name| *name == self.config.theme.name)
+                .unwrap_or(0),
+            1 => usize::from(self.config.indicators == crate::config::Indicators::Symbols),
+            2 => match self.config.notifications {
+                crate::config::Delivery::Off => 0,
+                crate::config::Delivery::Toast => 1,
+                crate::config::Delivery::System => 2,
+            },
+            _ => usize::from(self.config.sound),
+        }
+    }
+
+    fn on_settings_key(&mut self, key: KeyEvent) {
+        let Some(mut settings) = self.settings.take() else {
+            return;
+        };
+        let section = settings.section;
+        let len = self.settings_len(section);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.dirty = true;
+                return;
+            }
+            KeyCode::Tab | KeyCode::Right => {
+                settings.section = (section + 1) % Self::SETTINGS_SECTIONS.len();
+                settings.selected = self.settings_selected(settings.section);
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                let next =
+                    (section + Self::SETTINGS_SECTIONS.len() - 1) % Self::SETTINGS_SECTIONS.len();
+                settings.section = next;
+                settings.selected = self.settings_selected(next);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                settings.selected = settings.selected.saturating_sub(1)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                settings.selected = (settings.selected + 1).min(len.saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                self.apply_setting(settings.section, settings.selected);
+                settings.selected = self.settings_selected(settings.section);
+            }
+            _ => {}
+        }
+        self.settings = Some(settings);
+        self.dirty = true;
+    }
+
+    /// 应用设置项并写回配置文件，让下次启动保持同一选择。
+    fn apply_setting(&mut self, section: usize, selected: usize) {
+        let (key, value) = match section {
+            0 => {
+                let name = crate::theme::names()[selected].to_string();
+                self.config.theme = crate::theme::builtin(&name).expect("built-in theme resolves");
+                ("theme.name", format!("\"{name}\""))
+            }
+            1 => {
+                self.config.indicators = if selected == 1 {
+                    crate::config::Indicators::Symbols
+                } else {
+                    crate::config::Indicators::Dots
+                };
+                let text = if selected == 1 { "symbols" } else { "dots" };
+                ("ui.status_indicators", format!("\"{text}\""))
+            }
+            2 => {
+                self.config.notifications = match selected {
+                    0 => crate::config::Delivery::Off,
+                    1 => crate::config::Delivery::Toast,
+                    _ => crate::config::Delivery::System,
+                };
+                let text = ["off", "toast", "system"][selected.min(2)];
+                ("ui.toast.delivery", format!("\"{text}\""))
+            }
+            _ => {
+                self.config.sound = selected == 1;
+                ("ui.sound.enabled", format!("{}", selected == 1))
+            }
+        };
+        let path = self.config.config_path.clone();
+        let outcome = crate::config::write_setting(&path, key, &value);
+        self.note = match outcome {
+            Ok(()) => format!("{key} = {value}"),
+            Err(error) => format!("applied for this session; {error}"),
+        };
+        self.dirty = true;
+    }
+
+    /// Go to 面板的行：工作区标题 + 每个终端；没有本地视图的终端也能跳过去。
+    pub fn goto_rows(&self) -> Vec<GotoRow> {
+        let query = self
+            .goto
+            .as_ref()
+            .map(|goto| goto.query.clone())
+            .unwrap_or_default();
+        self.goto_rows_for(&query)
+    }
+
+    fn goto_rows_for(&self, query: &str) -> Vec<GotoRow> {
+        let query = query.to_ascii_lowercase();
+        let matches = |text: &str, extra: &str| -> bool {
+            query.is_empty()
+                || text.to_ascii_lowercase().contains(&query)
+                || extra.to_ascii_lowercase().contains(&query)
+        };
+        let mut rows = Vec::new();
+        for (index, workspace) in self.workspaces.iter().enumerate() {
+            let label = self.workspace_label(index);
+            let mut panes: Vec<(u32, String, String)> = Vec::new();
+            for tab in &workspace.tabs {
+                for pane in tab.panes() {
+                    let Some(state) = self.panes.get(&pane.0) else {
+                        continue;
+                    };
+                    let name = state.label();
+                    let address = state.terminal.clone().unwrap_or_default();
+                    panes.push((pane.0, name, address));
+                }
+            }
+            if !query.is_empty()
+                && !panes
+                    .iter()
+                    .any(|(_, name, address)| matches(name, address))
+                && !matches(&label, "")
+            {
+                continue;
+            }
+            rows.push(GotoRow {
+                pane: None,
+                terminal: None,
+                text: label,
+                right: self
+                    .workspace_cwd(index)
+                    .and_then(|cwd| self.branch(&cwd))
+                    .unwrap_or_default(),
+                section: true,
+                context: String::new(),
+                cwd: self.workspace_cwd(index).unwrap_or_default(),
+            });
+            for (pane, name, address) in panes {
+                if !matches(&name, &address) {
+                    continue;
+                }
+                let located = self.locate_public(pane);
+                let position = located
+                    .map(|(workspace, tab)| {
+                        format!(
+                            "{}/tab{}/{}",
+                            self.workspaces[workspace].id,
+                            self.workspaces[workspace].tabs[tab].id,
+                            pane
+                        )
+                    })
+                    .unwrap_or_default();
+                let context = located
+                    .map(|(workspace, tab)| {
+                        format!(
+                            "{} / {} / w{}:p{}",
+                            self.workspace_label(workspace),
+                            self.workspaces[workspace].tabs[tab].display(&self.panes),
+                            self.workspaces[workspace].id,
+                            pane
+                        )
+                    })
+                    .unwrap_or_default();
+                let cwd = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|state| state.cwd.clone())
+                    .unwrap_or_default();
+                rows.push(GotoRow {
+                    pane: Some(pane),
+                    terminal: Some(address.clone()),
+                    text: format!("{} · {}", short(&address), short(&name)),
+                    right: position,
+                    section: false,
+                    context,
+                    cwd,
+                });
+            }
+        }
+        let unowned: Vec<GotoRow> = self
+            .terminals_without_pane()
+            .into_iter()
+            .filter(|terminal| {
+                matches(
+                    &format!("{} · {}", terminal.address, terminal.title),
+                    &terminal.address,
+                )
+            })
+            .map(|terminal| {
+                let label = if terminal.title.is_empty() {
+                    terminal.address.clone()
+                } else {
+                    format!("{} · {}", short(&terminal.address), short(&terminal.title))
+                };
+                GotoRow {
+                    pane: None,
+                    terminal: Some(terminal.address.clone()),
+                    text: label,
+                    right: if terminal.live {
+                        "terminal"
+                    } else {
+                        "finished"
+                    }
+                    .to_string(),
+                    section: false,
+                    context: String::new(),
+                    cwd: String::new(),
+                }
+            })
+            .collect();
+        if !unowned.is_empty() {
+            rows.push(GotoRow {
+                pane: None,
+                terminal: None,
+                text: "other clients".to_string(),
+                right: String::new(),
+                section: true,
+                context: String::new(),
+                cwd: String::new(),
+            });
+            rows.extend(unowned);
+        }
+        rows
+    }
+
+    fn on_goto_key(&mut self, key: KeyEvent) {
+        let Some(mut goto) = self.goto.take() else {
+            return;
+        };
+        let rows = self.goto_rows_for(&goto.query);
+        let max = rows.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => {
+                self.dirty = true;
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(row) = rows.get(goto.selected) {
+                    if let Some(pane) = row.pane {
+                        self.focus_pane(pane);
+                    } else if let Some(terminal) = &row.terminal {
+                        self.open_terminal(terminal);
+                    }
+                }
+                self.dirty = true;
+                return;
+            }
+            KeyCode::Char('k') | KeyCode::Up => goto.selected = goto.selected.saturating_sub(1),
+            KeyCode::Char('j') | KeyCode::Down => goto.selected = (goto.selected + 1).min(max),
+            KeyCode::PageUp => goto.selected = goto.selected.saturating_sub(10),
+            KeyCode::PageDown => goto.selected = (goto.selected + 10).min(max),
+            KeyCode::Backspace => {
+                goto.query.pop();
+            }
+            KeyCode::Char('/') => {}
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                goto.query.push(character);
+            }
+            _ => {}
+        }
+        // 过滤后选不中标题行时，落到第一条真正的终端上。
+        if rows.get(goto.selected).is_some_and(|row| row.section) {
+            if let Some(index) = rows
+                .iter()
+                .enumerate()
+                .skip(goto.selected)
+                .find(|(_, row)| !row.section)
+                .map(|(index, _)| index)
+            {
+                goto.selected = index;
+            }
+        }
+        goto.selected = goto.selected.min(max);
+        self.goto = Some(goto);
+        self.dirty = true;
+    }
+
+    /// 焦点落到最近的注意力目标；没有就跳下一个待处理的 Pane。
+    fn open_notification_target(&mut self) {
+        if let Some(pane) = self
+            .last_attention
+            .filter(|pane| self.panes.contains_key(pane))
+        {
+            self.focus_pane(pane);
+            return;
+        }
+        self.focus_next_attention();
+    }
+
+    /// 工作区里任一 Pane 的前台目录，用来查分支；都还没上报时退回本进程目录。
+    pub fn workspace_cwd(&self, workspace: usize) -> Option<String> {
+        let state = self.workspaces.get(workspace)?;
+        state
+            .focus()
+            .and_then(|pane| self.panes.get(&pane))
+            .and_then(|pane| pane.cwd.clone())
+            .or_else(|| {
+                state
+                    .panes()
+                    .into_iter()
+                    .find_map(|pane| self.panes.get(&pane.0).and_then(|state| state.cwd.clone()))
+            })
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+    }
+
+    /// 工作区在侧栏与 Go to 里的名字：创建时定下来，之后只随重命名变化。
+    pub fn workspace_label(&self, workspace: usize) -> String {
+        let Some(state) = self.workspaces.get(workspace) else {
+            return String::new();
+        };
+        if !state.label.is_empty() {
+            return state.label.clone();
+        }
+        format!("w{}", state.id)
+    }
+
+    /// 写给宿主终端的窗口标题。
+    pub fn window_title(&self) -> Option<String> {
+        if self.config.window_title.is_empty() {
+            return None;
+        }
+        let workspace = self.workspace_label(self.active_ws);
+        let tab = self
+            .tab()
+            .map(|tab| tab.display(&self.panes))
+            .unwrap_or_default();
+        let pane = self
+            .focused_pane()
+            .map(|pane| pane.label())
+            .unwrap_or_default();
+        let terminal_title = self
+            .focused_pane()
+            .map(|pane| pane.title.clone())
+            .unwrap_or_default();
+        let mut out = self.config.window_title.clone();
+        for (token, value) in [
+            ("{hostname}", hostname_text()),
+            ("{workspace}", workspace),
+            ("{tab}", tab),
+            ("{pane}", pane),
+            ("{terminal_title}", terminal_title),
+        ] {
+            out = out.replace(token, &value);
+        }
+        out = out.replace("{{", "\u{0}").replace("}}", "\u{1}");
+        out = out.replace('\u{0}', "{").replace('\u{1}', "}");
+        Some(out)
+    }
+
+    /// 仓库分支名，5 秒缓存，避免每帧跑 git。
+    pub fn branch(&self, cwd: &str) -> Option<String> {
+        self.branches
+            .get(cwd)
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(5))
+            .map(|(branch, _)| branch.clone())
+    }
+
+    /// 刷新分支缓存；切工作区或前台目录变化时调用。
+    pub fn refresh_branch(&mut self, cwd: &str) {
+        if self
+            .branches
+            .get(cwd)
+            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .arg("rev-parse")
+            .arg("--abbrev-ref")
+            .arg("HEAD")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let branch = output
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_default();
+        self.branches
+            .insert(cwd.to_string(), (branch, Instant::now()));
+    }
+
+    /// core 里存在、但没有任何本地视图的终端（其它客户端创建的）。
+    pub fn terminals_without_pane(&self) -> Vec<&crate::hc::proto::TerminalSummary> {
+        self.terminals
+            .iter()
+            .filter(|terminal| {
+                !self.panes.values().any(|pane| {
+                    pane.terminal.as_deref() == Some(terminal.address.as_str()) && !pane.transient
+                })
+            })
+            .collect()
+    }
+
+    /// 打开一个已有终端：已有视图就切焦点，没有就在当前 Tab 右侧建一个视图。
+    pub fn open_terminal(&mut self, address: &str) {
+        if let Some(pane) = self.pane_by_terminal(address) {
+            self.focus_pane(pane);
+            return;
+        }
+        let Some(pane) = self.split_new(Axis::Horizontal) else {
+            self.note = "no room for a new view".to_string();
+            return;
+        };
+        self.spawn_pane(pane);
+        if let Some(state) = self.panes.get_mut(&pane) {
+            state.terminal = Some(address.to_string());
+        }
+        self.focus_pane(pane);
+        self.dirty = true;
+    }
+
     fn commit_prompt(&mut self, prompt: Prompt) {
         let text = prompt.buffer.trim().to_string();
         if prompt.kind.needs_confirm() && !matches!(text.as_str(), "y" | "Y" | "yes") {
-            self.note = "已取消".to_string();
+            self.note = "cancelled".to_string();
             self.dirty = true;
             return;
         }
@@ -1609,9 +2703,9 @@ impl App {
                         "terminal.send",
                         json!({"terminal": terminal, "text": text}),
                     );
-                    self.note = format!("正在发给 {terminal}");
+                    self.note = format!("sending to {terminal}");
                 } else {
-                    self.note = "这个 pane 还没有终端".to_string();
+                    self.note = "this pane has no terminal yet".to_string();
                 }
             }
             PromptKind::SendKeys(pane) => {
@@ -1630,7 +2724,7 @@ impl App {
                         "terminal.keys",
                         json!({"terminal": terminal, "keys": keys}),
                     );
-                    self.note = format!("按下 {} 个键", keys.len());
+                    self.note = format!("sent {} keys", keys.len());
                 }
             }
             PromptKind::WaitOutput(pane) => {
@@ -1644,7 +2738,7 @@ impl App {
                         "terminal.wait",
                         json!({"terminal": terminal, "output": text}),
                     );
-                    self.note = format!("等待输出：{text}");
+                    self.note = format!("waiting for: {text}");
                 }
             }
             PromptKind::PutFile(pane) => {
@@ -1669,15 +2763,15 @@ impl App {
                                     "data": crate::clipboard::base64(&bytes),
                                 }),
                             );
-                            self.note = format!("发送文件 {name}");
+                            self.note = format!("sending {name}");
                         }
                     }
-                    Err(error) => self.note = format!("读取失败：{error}"),
+                    Err(error) => self.note = format!("read failed: {error}"),
                 }
             }
             PromptKind::AddMachine => {
                 self.call_rpc("machine.add", "machine.add", json!({"target": text}));
-                self.note = format!("正在添加机器 {text}");
+                self.note = format!("adding machine {text}");
             }
             PromptKind::RenameMachine(machine) => {
                 self.call_rpc(
@@ -1695,9 +2789,9 @@ impl App {
                     .and_then(|state| state.terminal.clone());
                 if let Some(terminal) = terminal {
                     self.call_rpc("kill", "terminal.kill", json!({"terminal": terminal}));
-                    self.note = format!("正在结束 {terminal}");
+                    self.note = format!("killing {terminal}");
                 } else {
-                    self.note = "这个 pane 还没有终端".to_string();
+                    self.note = "this pane has no terminal yet".to_string();
                 }
             }
         }
@@ -1726,6 +2820,10 @@ impl App {
         let pane = self.alloc_pane();
         let id = self.alloc_tab();
         self.spawn_pane(pane);
+        let launch = self.new_pane_launch();
+        if let Some(state) = self.panes.get_mut(&pane) {
+            state.launch = launch;
+        }
         let Some(workspace) = self.workspaces.get_mut(self.active_ws) else {
             return;
         };
@@ -1743,9 +2841,14 @@ impl App {
         let tab = self.alloc_tab();
         let id = self.alloc_workspace();
         self.spawn_pane(pane);
+        let launch = self.new_pane_launch();
+        let cwd = launch.as_ref().and_then(|launch| launch.cwd.clone());
+        if let Some(state) = self.panes.get_mut(&pane) {
+            state.launch = launch;
+        }
         let label = match label {
             Some(text) if !text.is_empty() => text,
-            _ => format!("w{id}"),
+            _ => dir_label(cwd, format!("w{id}")),
         };
         self.workspaces.push(Workspace::new(id, label, pane, tab));
         self.active_ws = self.workspaces.len() - 1;
@@ -1755,9 +2858,13 @@ impl App {
     }
 
     fn split_focused(&mut self, axis: Axis) {
+        let launch = self.new_pane_launch();
         match self.split_new(axis) {
             Some(new) => {
                 self.spawn_pane(new);
+                if let Some(state) = self.panes.get_mut(&new) {
+                    state.launch = launch;
+                }
                 self.note = "split".to_string();
             }
             None => {
@@ -1847,7 +2954,7 @@ impl App {
             .get(&pane)
             .and_then(|state| state.terminal.clone())
         else {
-            self.note = "这个 pane 还没有终端".to_string();
+            self.note = "this pane has no terminal yet".to_string();
             self.dirty = true;
             return;
         };
@@ -1874,7 +2981,7 @@ impl App {
             .get(&pane)
             .and_then(|state| state.terminal.clone())
         else {
-            self.note = "这个 pane 还没有终端".to_string();
+            self.note = "this pane has no terminal yet".to_string();
             self.dirty = true;
             return;
         };
@@ -1885,13 +2992,13 @@ impl App {
             .map(|summary| summary.live)
             .unwrap_or(true);
         if live {
-            self.note = format!("{terminal} 还在运行，先 prefix shift+d 结束它");
+            self.note = format!("{terminal} is still running; kill it first with prefix shift+k");
             self.dirty = true;
             return;
         }
         self.call_rpc("rm", "terminal.rm", json!({"terminal": terminal}));
         self.remove_pane_view(pane);
-        self.note = format!("已移除 {terminal}");
+        self.note = format!("removed {terminal}");
         self.dirty = true;
     }
 
@@ -1903,7 +3010,7 @@ impl App {
         };
         let position = state.view.cursor().unwrap_or((0, 0));
         let Some(uri) = state.view.link_at(position.0, u32::from(position.1)) else {
-            self.note = "光标处没有链接".to_string();
+            self.note = "no link under cursor".to_string();
             self.dirty = true;
             return;
         };
@@ -1918,8 +3025,8 @@ impl App {
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            Ok(_) => self.note = format!("打开 {uri}"),
-            Err(error) => self.note = format!("打开链接失败：{error}"),
+            Ok(_) => self.note = format!("opening {uri}"),
+            Err(error) => self.note = format!("cannot open link: {error}"),
         }
         self.dirty = true;
     }
@@ -1933,7 +3040,7 @@ impl App {
         let ansi = state.view.ansi_viewport();
         let path = std::env::temp_dir().join(format!("hc-tui-history-{pane}.ansi"));
         if let Err(error) = std::fs::write(&path, ansi) {
-            self.note = format!("写临时文件失败：{error}");
+            self.note = format!("cannot write temp file: {error}");
             self.dirty = true;
             return;
         }
@@ -1960,7 +3067,7 @@ impl App {
             width: Span::Percent(80),
             height: Span::Percent(80),
         });
-        self.note = "popup 打开（Esc 关闭）".to_string();
+        self.note = "popup open".to_string();
         self.dirty = true;
     }
 
@@ -2067,9 +3174,9 @@ impl App {
                     .filter(|label| !label.is_empty())
                     .unwrap_or_else(|| format!("pane {pane}"));
                 self.focus_pane(pane);
-                self.note = format!("跳到 {} 的 {label}", badge.text());
+                self.note = format!("{} · {label}", badge.text());
             }
-            None => self.note = "没有需要处理的 Agent".to_string(),
+            None => self.note = "no agent needs attention".to_string(),
         }
         self.dirty = true;
     }
@@ -2116,7 +3223,7 @@ impl App {
                 focused: true,
             });
             self.zoom = false;
-            self.note = "pane 视图已关闭，程序仍在 core 里运行".to_string();
+            self.note = "pane closed; the program keeps running in core".to_string();
         }
         self.mark_layout();
     }
@@ -2137,7 +3244,7 @@ impl App {
             .map(|workspace| workspace.tabs.len())
             .unwrap_or(0);
         if tab_count <= 1 && self.workspaces.len() <= 1 {
-            self.note = "最后一个 tab：用 prefix q 退出".to_string();
+            self.note = "last tab; prefix q detaches".to_string();
             self.dirty = true;
             return;
         }
@@ -2170,7 +3277,7 @@ impl App {
             return;
         }
         if self.workspaces.len() <= 1 {
-            self.note = "最后一个工作区：用 prefix q 退出".to_string();
+            self.note = "last workspace; prefix q detaches".to_string();
             self.dirty = true;
             return;
         }
@@ -2286,7 +3393,7 @@ impl App {
             return;
         };
         if source_index == target_index || target_index >= workspace.tabs.len() {
-            self.note = "目标 tab 无效".to_string();
+            self.note = "invalid target tab".to_string();
             self.dirty = true;
             return;
         }
@@ -2328,7 +3435,7 @@ impl App {
         let tab = &mut workspace.tabs[target_index];
         let focus = tab.focus;
         if !tab.tree.split_pane(PaneId(focus), axis, PaneId(pane), 0.5) {
-            self.note = "移动失败：目标 tab 找不到插入点".to_string();
+            self.note = "no room in the target tab".to_string();
             self.dirty = true;
             return;
         }
@@ -2343,7 +3450,7 @@ impl App {
             focused: true,
         });
         self.zoom = false;
-        self.note = format!("pane 已移到 tab {}", target_index + 1);
+        self.note = format!("pane moved to tab {}", target_index + 1);
         self.mark_layout();
     }
 
@@ -2378,7 +3485,7 @@ impl App {
         workspace.tabs.push(Tab::new(id, pane));
         workspace.active = workspace.tabs.len() - 1;
         self.zoom = false;
-        self.note = "pane 已移成新 tab".to_string();
+        self.note = "pane moved into a new tab".to_string();
         self.mark_layout();
     }
 
@@ -2391,6 +3498,39 @@ impl App {
             }
         };
         self.panes.insert(pane, Pane::new(view));
+    }
+
+    /// 新建 Pane 时的 shell 启动参数：按 `terminal.new_cwd` 决定目录。
+    fn new_pane_launch(&self) -> Option<Launch> {
+        let cwd = match &self.config.new_cwd {
+            crate::config::NewCwd::Follow => self
+                .focused_pane()
+                .and_then(|pane| pane.cwd.clone())
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                }),
+            crate::config::NewCwd::Home => std::env::var("HOME").ok(),
+            crate::config::NewCwd::Current => std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned()),
+            crate::config::NewCwd::Path(path) => Some(expand_home(path)),
+        };
+        let argv = if self.config.default_shell.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.config.default_shell.clone()]
+        };
+        if argv.is_empty() && cwd.is_none() {
+            None
+        } else {
+            Some(Launch {
+                argv,
+                cwd,
+                on: None,
+            })
+        }
     }
 
     fn alloc_pane(&mut self) -> u32 {
@@ -2502,8 +3642,8 @@ impl App {
                     .stderr(std::process::Stdio::null())
                     .spawn();
                 self.note = match spawned {
-                    Ok(_) => format!("后台运行：{}", command.command),
-                    Err(error) => format!("启动失败：{error}"),
+                    Ok(_) => format!("running in background: {}", command.command),
+                    Err(error) => format!("failed to start: {error}"),
                 };
             }
             CommandKind::Pane => {
@@ -2520,11 +3660,12 @@ impl App {
                             state.transient = true;
                             state.launch = Some(launch);
                         }
-                        self.note = format!("pane：{}", command.command);
+                        self.note = format!("pane: {}", command.command);
                     }
                     None => {
-                        self.note =
-                            format!("空间不足：每个 Pane 至少要 {MIN_PANE_WIDTH}x{MIN_PANE_HEIGHT}")
+                        self.note = format!(
+                            "no room: panes need at least {MIN_PANE_WIDTH}x{MIN_PANE_HEIGHT}"
+                        )
                     }
                 }
             }
@@ -2534,7 +3675,7 @@ impl App {
                     popup.width = command.width.unwrap_or(Span::Percent(80));
                     popup.height = command.height.unwrap_or(Span::Percent(80));
                 }
-                self.note = format!("popup：{}（Esc 关闭）", command.command);
+                self.note = format!("popup: {}", command.command);
             }
         }
         self.dirty = true;
@@ -2543,7 +3684,7 @@ impl App {
     fn close_popup(&mut self) {
         if let Some(popup) = self.popup.take() {
             self.remove_pane_view(popup.pane);
-            self.note = "popup 已关闭（程序仍在 core 里运行）".to_string();
+            self.note = "popup closed; the program keeps running in core".to_string();
             self.dirty = true;
         }
     }
@@ -2555,7 +3696,7 @@ impl App {
             .get(&pane)
             .and_then(|state| state.terminal.clone())
         else {
-            self.note = "这个 pane 还没有终端".to_string();
+            self.note = "this pane has no terminal yet".to_string();
             self.dirty = true;
             return;
         };
@@ -2564,7 +3705,7 @@ impl App {
             "terminal.read",
             json!({"terminal": terminal, "lines": 500}),
         );
-        self.note = format!("读取 {terminal}…");
+        self.note = format!("reading {terminal}…");
         self.dirty = true;
     }
 
@@ -2576,7 +3717,7 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.reader = None;
-                self.note = "reader 关闭".to_string();
+                self.note = "reader closed".to_string();
             }
             KeyCode::Char('j') | KeyCode::Down => reader.scroll = reader.scroll.saturating_add(1),
             KeyCode::Char('k') | KeyCode::Up => reader.scroll = reader.scroll.saturating_sub(1),
@@ -2648,7 +3789,7 @@ impl App {
                     let machine = item.value.clone();
                     self.call_rpc("machine.rm", "machine.rm", json!({"machine": machine}));
                     self.chooser = None;
-                    self.note = "正在移除机器".to_string();
+                    self.note = "removing machine".to_string();
                 }
             }
             KeyCode::Char('c') if kind == ChooserKind::Machines => {
@@ -2659,7 +3800,7 @@ impl App {
                         "machine.connect",
                         json!({"machine": machine}),
                     );
-                    self.note = format!("正在连接 {machine}");
+                    self.note = format!("connecting {machine}");
                 }
             }
             KeyCode::Char('r') if kind == ChooserKind::Machines => {
@@ -2709,9 +3850,9 @@ impl App {
                 if let Some(state) = self.panes.get_mut(&pane) {
                     state.launch = Some(Launch::remote(Vec::new(), None, machine.clone()));
                 }
-                self.note = format!("在 {machine} 上开新 pane");
+                self.note = format!("opening a pane on {machine}");
             }
-            None => self.note = "空间不足".to_string(),
+            None => self.note = "no room".to_string(),
         }
         self.dirty = true;
     }
@@ -2740,12 +3881,12 @@ impl App {
             .get(&pane)
             .and_then(|state| state.terminal.clone())
         else {
-            self.note = "这个 pane 还没有终端".to_string();
+            self.note = "this pane has no terminal yet".to_string();
             self.dirty = true;
             return;
         };
         let Some(bytes) = clipboard_image() else {
-            self.note = "剪贴板里没有图片".to_string();
+            self.note = "no image in the clipboard".to_string();
             self.dirty = true;
             return;
         };
@@ -2762,7 +3903,7 @@ impl App {
                 "data": crate::clipboard::base64(&bytes),
             }),
         );
-        self.note = "正在发送剪贴板图片".to_string();
+        self.note = "pasting clipboard image".to_string();
         self.dirty = true;
     }
 
@@ -2795,7 +3936,7 @@ impl App {
                         focused: true,
                     });
                 }
-                self.note = "临时命令已结束".to_string();
+                self.note = "transient command finished".to_string();
             }
             None => self.close_tab_in(workspace),
         }
@@ -2902,7 +4043,7 @@ impl App {
                 if program_exit && self.popup.is_some_and(|popup| popup.pane == pane) {
                     self.popup = None;
                     self.remove_pane_view(pane);
-                    self.note = format!("popup 结束：{reason}");
+                    self.note = format!("popup ended: {reason}");
                     self.dirty = true;
                     return;
                 }
@@ -2955,7 +4096,7 @@ impl App {
                         .filter(SavedState::is_usable);
                     if let Some(state) = restored {
                         self.restore(state);
-                        self.note = "已从 core 恢复布局".to_string();
+                        self.note = String::new();
                     }
                     self.restore_pending = false;
                     self.ensure_layout();
@@ -2965,7 +4106,7 @@ impl App {
                     self.doc_loaded = false;
                     self.restore_pending = false;
                     self.ensure_layout();
-                    self.note = format!("无法读取布局：{}", error.message);
+                    self.note = format!("cannot read layout: {}", error.message);
                     self.dirty = true;
                 }
             },
@@ -2976,7 +4117,7 @@ impl App {
                     self.layout_dirty = true;
                     self.layout_since = Some(Instant::now());
                 }
-                Err(error) => self.note = format!("布局同步失败：{}", error.message),
+                Err(error) => self.note = format!("layout sync failed: {}", error.message),
             },
             "doc.remote" => match result {
                 Ok(value) => {
@@ -2989,7 +4130,7 @@ impl App {
                         }
                     }
                 }
-                Err(error) => self.note = format!("读取布局失败：{}", error.message),
+                Err(error) => self.note = format!("cannot read layout: {}", error.message),
             },
             "doc.set" => match result {
                 Ok(value) => {
@@ -3001,7 +4142,7 @@ impl App {
                     // 另一个客户端先写了：拿最新版本后再提交本地的意图。
                     self.request_doc("doc.sync");
                 }
-                Err(error) => self.note = format!("布局未保存：{}", error.message),
+                Err(error) => self.note = format!("layout not saved: {}", error.message),
             },
             "read" => match result {
                 Ok(value) => {
@@ -3030,7 +4171,7 @@ impl App {
                     });
                     self.dirty = true;
                 }
-                Err(error) => self.note = format!("读取失败：{}", error.message),
+                Err(error) => self.note = format!("read failed: {}", error.message),
             },
             "keys" => match result {
                 Ok(value) => {
@@ -3039,9 +4180,9 @@ impl App {
                         .get("status")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    self.note = format!("按键已送达 · {status} · turn {turn}");
+                    self.note = format!("keys delivered · {status} · turn {turn}");
                 }
-                Err(error) => self.note = format!("按键失败：{}", error.message),
+                Err(error) => self.note = format!("keys failed: {}", error.message),
             },
             "wait" => match result {
                 Ok(value) => {
@@ -3056,7 +4197,7 @@ impl App {
                         format!("等待超时（{reason}）")
                     };
                 }
-                Err(error) => self.note = format!("等待失败：{}", error.message),
+                Err(error) => self.note = format!("wait failed: {}", error.message),
             },
             "put" => match result {
                 Ok(value) => {
@@ -3064,9 +4205,9 @@ impl App {
                         .get("path")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    self.note = format!("文件已放到 {path}");
+                    self.note = format!("file delivered to {path}");
                 }
-                Err(error) => self.note = format!("发送文件失败：{}", error.message),
+                Err(error) => self.note = format!("send file failed: {}", error.message),
             },
             "put-image" => match result {
                 Ok(value) => {
@@ -3083,9 +4224,9 @@ impl App {
                     if let Some(bytes) = bytes {
                         self.send(Command::Input { pane, bytes });
                     }
-                    self.note = format!("图片已发送，路径 {path}");
+                    self.note = format!("image sent · {path}");
                 }
-                Err(error) => self.note = format!("发送图片失败：{}", error.message),
+                Err(error) => self.note = format!("send image failed: {}", error.message),
             },
             "templates" => match result {
                 Ok(value) => {
@@ -3121,7 +4262,7 @@ impl App {
                         kind: ChooserKind::Templates,
                     });
                 }
-                Err(error) => self.note = format!("模板列表失败：{}", error.message),
+                Err(error) => self.note = format!("templates failed: {}", error.message),
             },
             "machines" => match result {
                 Ok(value) => {
@@ -3145,7 +4286,7 @@ impl App {
                         kind: ChooserKind::Machines,
                     });
                 }
-                Err(error) => self.note = format!("机器列表失败：{}", error.message),
+                Err(error) => self.note = format!("machine list failed: {}", error.message),
             },
             "machine.add" => match result {
                 Ok(value) => {
@@ -3153,17 +4294,17 @@ impl App {
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    self.note = format!("已添加 {name}");
+                    self.note = format!("added {name}");
                     self.call_rpc("machines", "machine.list", json!({}));
                 }
-                Err(error) => self.note = format!("添加失败：{}", error.message),
+                Err(error) => self.note = format!("add failed: {}", error.message),
             },
             "machine.rm" => match result {
                 Ok(_) => {
-                    self.note = "机器已移除".to_string();
+                    self.note = "machine removed".to_string();
                     self.call_rpc("machines", "machine.list", json!({}));
                 }
-                Err(error) => self.note = format!("移除失败：{}", error.message),
+                Err(error) => self.note = format!("remove failed: {}", error.message),
             },
             "machine.connect" => match result {
                 Ok(value) => {
@@ -3171,21 +4312,21 @@ impl App {
                         .get("state")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    self.note = format!("机器状态 {state}");
+                    self.note = format!("machine state {state}");
                     self.call_rpc("machines", "machine.list", json!({}));
                 }
-                Err(error) => self.note = format!("连接失败：{}", error.message),
+                Err(error) => self.note = format!("connect failed: {}", error.message),
             },
             "machine.rename" => match result {
                 Ok(_) => {
-                    self.note = "机器已改名".to_string();
+                    self.note = "machine renamed".to_string();
                     self.call_rpc("machines", "machine.list", json!({}));
                 }
-                Err(error) => self.note = format!("改名失败：{}", error.message),
+                Err(error) => self.note = format!("rename failed: {}", error.message),
             },
             "send" => match result {
-                Ok(_) => self.note = "已发送（等 Agent 开始这一轮）".to_string(),
-                Err(error) => self.note = format!("发送失败：{}", error.message),
+                Ok(_) => self.note = "sent; waiting for the turn to start".to_string(),
+                Err(error) => self.note = format!("send failed: {}", error.message),
             },
             "interrupt" => match result {
                 Ok(value) => {
@@ -3194,34 +4335,34 @@ impl App {
                         .and_then(|status| status.get("state"))
                         .and_then(Value::as_str)
                         .unwrap_or("done");
-                    self.note = format!("已中断，当前状态 {state}");
+                    self.note = format!("interrupted · state {state}");
                 }
-                Err(error) => self.note = format!("中断失败：{}", error.message),
+                Err(error) => self.note = format!("interrupt failed: {}", error.message),
             },
             "keep" => match result {
                 Ok(value) => {
                     let keep = value.get("keep").and_then(Value::as_bool).unwrap_or(false);
                     self.note = format!("keep = {keep}");
                 }
-                Err(error) => self.note = format!("keep 失败：{}", error.message),
+                Err(error) => self.note = format!("keep failed: {}", error.message),
             },
             "rm" => match result {
-                Ok(_) => self.note = "终端记录已移除".to_string(),
-                Err(error) => self.note = format!("移除失败：{}", error.message),
+                Ok(_) => self.note = "terminal record removed".to_string(),
+                Err(error) => self.note = format!("remove failed: {}", error.message),
             },
             "label" => match result {
                 Ok(_) => {}
                 Err(error) => {
-                    self.note = format!("命名失败：{}", error.message);
+                    self.note = format!("rename failed: {}", error.message);
                     self.dirty = true;
                 }
             },
             "kill" => match result {
                 Ok(value) => {
                     let _ = value;
-                    self.note = "程序已结束（prefix c 新 tab 继续）".to_string();
+                    self.note = "program finished; prefix c starts a new tab".to_string();
                 }
-                Err(error) => self.note = format!("结束失败：{}", error.message),
+                Err(error) => self.note = format!("kill failed: {}", error.message),
             },
             _ => {}
         }
@@ -3344,6 +4485,12 @@ impl App {
             }
             if workspace.active >= workspace.tabs.len() {
                 workspace.active = workspace.tabs.len() - 1;
+            }
+            if workspace.label.is_empty() {
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned());
+                workspace.label = dir_label(cwd, format!("w{}", workspace.id));
             }
             self.workspaces.push(workspace);
         }
@@ -3575,6 +4722,7 @@ impl App {
             .filter(|label| !label.is_empty())
             .unwrap_or_else(|| format!("pane {pane}"));
         let text = format!("{label} · {}", after.text());
+        self.last_attention = Some(pane);
         match self.config.notifications {
             Delivery::Off => {}
             Delivery::Toast => {
@@ -3600,7 +4748,7 @@ impl App {
                 });
             }
         }
-        self.note = format!("{label} 需要你看一眼（prefix a 跳过去）");
+        self.note = format!("{label} needs attention (prefix o)");
         self.play_sound(after);
         self.dirty = true;
     }
@@ -3733,6 +4881,45 @@ fn clipboard_image() -> Option<Vec<u8>> {
     None
 }
 
+/// 目录路径的最后一段；空路径时用 fallback。
+fn dir_label(path: Option<String>, fallback: String) -> String {
+    path.and_then(|path| {
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })
+    .filter(|name| !name.is_empty())
+    .unwrap_or(fallback)
+}
+
+/// 展开配置里以 `~/` 开头的路径。
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_string()
+}
+
+fn hostname_text() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_default()
+}
+
+fn short(text: &str) -> String {
+    if text.chars().count() <= 28 {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(27).collect();
+    out.push('…');
+    out
+}
+
 fn prev_char_boundary(text: &str, index: usize) -> usize {
     text[..index]
         .char_indices()
@@ -3789,6 +4976,7 @@ fn borders_for(
     leaves: &[(PaneId, Rect)],
     mode: PaneBorders,
     gaps: bool,
+    outer_edges: bool,
 ) -> ratatui::widgets::Borders {
     use ratatui::widgets::Borders;
     let mut borders = match mode {
@@ -3802,6 +4990,40 @@ fn borders_for(
             }
         }
     };
+    if !outer_edges && !borders.is_empty() {
+        let left = leaves
+            .iter()
+            .map(|(_, rect)| rect.x)
+            .min()
+            .unwrap_or(outer.x);
+        let top = leaves
+            .iter()
+            .map(|(_, rect)| rect.y)
+            .min()
+            .unwrap_or(outer.y);
+        let right = leaves
+            .iter()
+            .map(|(_, rect)| rect.x + rect.width)
+            .max()
+            .unwrap_or(outer.x + outer.width);
+        let bottom = leaves
+            .iter()
+            .map(|(_, rect)| rect.y + rect.height)
+            .max()
+            .unwrap_or(outer.y + outer.height);
+        if outer.x == left {
+            borders.remove(Borders::LEFT);
+        }
+        if outer.y == top {
+            borders.remove(Borders::TOP);
+        }
+        if outer.x + outer.width == right {
+            borders.remove(Borders::RIGHT);
+        }
+        if outer.y + outer.height == bottom {
+            borders.remove(Borders::BOTTOM);
+        }
+    }
     if gaps || borders.is_empty() {
         return borders;
     }
@@ -3862,6 +5084,7 @@ pub fn run(config: Config) -> Result<()> {
     let _guard = tui::Guard;
     let mut app = App::new(config)?;
     let mut next_draw = Instant::now();
+    let mut title = String::new();
 
     loop {
         app.pump();
@@ -3886,6 +5109,14 @@ pub fn run(config: Config) -> Result<()> {
         if app.take_dirty() || Instant::now() >= next_draw {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
             next_draw = Instant::now() + frame;
+            if let Some(next) = app.window_title() {
+                if next != title {
+                    title = next.clone();
+                    let mut stdout = std::io::stdout();
+                    let _ =
+                        crossterm::execute!(stdout, crossterm::terminal::SetTitle(title.clone()));
+                }
+            }
         }
         app.reconcile();
 
@@ -3920,13 +5151,13 @@ mod tests {
             (PaneId(1), Rect::new(0, 0, 10, 10)),
             (PaneId(2), Rect::new(10, 0, 10, 10)),
         ];
-        let left = borders_for(leaves[0].1, &leaves, PaneBorders::Auto, false);
-        let right = borders_for(leaves[1].1, &leaves, PaneBorders::Auto, false);
+        let left = borders_for(leaves[0].1, &leaves, PaneBorders::Auto, false, true);
+        let right = borders_for(leaves[1].1, &leaves, PaneBorders::Auto, false, true);
         assert!(!left.contains(Borders::RIGHT));
         assert!(!right.contains(Borders::LEFT));
         assert!(left.contains(Borders::LEFT));
 
-        let gapped = borders_for(leaves[0].1, &leaves, PaneBorders::Auto, true);
+        let gapped = borders_for(leaves[0].1, &leaves, PaneBorders::Auto, true, true);
         assert!(gapped.contains(Borders::RIGHT));
     }
 
@@ -3935,11 +5166,11 @@ mod tests {
         use ratatui::widgets::Borders;
         let leaves = vec![(PaneId(1), Rect::new(0, 0, 10, 10))];
         assert_eq!(
-            borders_for(leaves[0].1, &leaves, PaneBorders::Auto, true),
+            borders_for(leaves[0].1, &leaves, PaneBorders::Auto, true, true),
             Borders::NONE
         );
         assert_eq!(
-            borders_for(leaves[0].1, &leaves, PaneBorders::Always, true),
+            borders_for(leaves[0].1, &leaves, PaneBorders::Always, true, true),
             Borders::ALL
         );
     }
