@@ -1,0 +1,11 @@
+/target
+**/target
+**/zig-out
+**/zig-cache
+.zig-cache
+*.log
+.DS_Store
+.idea
+.vscode
+vendor/libghostty-vt/.zig-cache
+vendor/libghostty-vt/zig-pkg

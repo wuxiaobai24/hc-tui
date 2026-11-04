@@ -1,0 +1,21 @@
+[package]
+name = "ghostty-vt"
+version = "0.0.0"
+edition = "2021"
+description = "Herdr's binding to its vendored libghostty-vt"
+license = "Apache-2.0"
+repository = "https://github.com/herdrdev/herdr"
+publish = false
+
+[dependencies]
+base64 = "0.22.1"
+libc = "0.2"
+png = "0.17"
+tracing = "0.1.44"
+
+# 这是从 herdr 迁入的 vendored 拷贝。它针对较旧的 clippy 编写，
+# 新 lint 在这里显式放行，避免升级工具链时被迫改上游代码。
+# 我们自己新增的代码仍然受根 workspace 的 lint 约束。
+[lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+too_many_arguments = "allow"

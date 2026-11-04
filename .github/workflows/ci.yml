@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # libghostty-vt 只认 Zig 0.16.0：0.17 会因 Build API 变更直接编译失败。
+      # 见 docs/adr/0001-ghostty-vt.md。
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt -p hc-tui -- --check
+
+      - name: clippy
+        run: cargo clippy -p hc-tui --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test -p hc-tui
+
+  # 静态发行构建。首次跑可能需要调 Zig/链接器组合，先不阻塞主流程，
+  # P4 正式接 musl 发行时去掉 continue-on-error。
+  musl:
+    name: build (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: taiki-e/install-action@cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo zigbuild --target x86_64-unknown-linux-musl -p hc-tui

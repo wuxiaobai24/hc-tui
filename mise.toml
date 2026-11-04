@@ -1,0 +1,4 @@
+# 工具链钉版本：libghostty-vt 硬性要求 Zig 0.16.0（0.17 会编译失败）。
+# 详见 docs/adr/0001-ghostty-vt.md。
+[tools]
+zig = "0.16.0"
