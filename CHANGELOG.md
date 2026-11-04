@@ -1,6 +1,6 @@
 # 变更记录
 
-## 未发布
+## 0.2.0 — 2026-11-05
 
 ### herdr 体验对齐
 
@@ -17,6 +17,40 @@
 - 分隔线：`pane_borders = auto` 只在分屏时画框；新增 `pane_outer_borders`
   （去掉 Pane 区域外沿的框）、`pane_scrollbars`、
   `show_agent_labels_on_pane_borders`；边框不再写 `user@host:path · chN`。
+- 分隔线新增 `pane_borders = "titles"`：只画每个 Pane 顶上的标题行，
+  其余三边不画；相邻 Pane 与 `pane_outer_borders = false` 都不会把标题行去掉。
+
+### 布局预设
+
+- `src/layout/preset.rs`：七个预设 —— `balanced`、`main-left`、`main-top`、
+  `columns`、`rows`、`stack`、`main-stack`。都是 `SplitNode` 的生成函数，
+  按当前分屏 Pane 的先后顺序填进去，不碰浮动层。
+- `prefix+shift+l` / `prefix+shift+j` 顺序切换，当前用的是哪个记在
+  `Tab.layout` 里并随布局持久化；分屏少于两个时只给提示。
+
+### 浮动层
+
+- `prefix+f` 把焦点 Pane 在分屏与浮动层之间切换：浮起后位置与大小按内容区
+  百分比保存，窗口尺寸变化时保持相对位置；分屏里至少要留一个 Pane。
+- 支持多个浮动 Pane，焦点所在的那个自动提到最上面；`prefix+shift+f` 切换 pin
+  （同一层里不随焦点沉下去）。
+- `prefix+shift+h` 收起 / 展开整个浮动层。收起的 Pane 不重排终端、也不断流，
+  焦点落上去时浮动层自动展开。
+- 鼠标拖标题行移动浮动 Pane，拖右下角改尺寸；浮动的 Pane 上分屏会再浮一个
+  错开的新 Pane。
+- 浮动层写进 core doc，随布局一起恢复；移动 Pane 到别的 Tab、关闭 Tab、
+  关闭工作区都会连带处理浮动层的成员。
+
+### Stack
+
+- 布局树新增 `Stack` 节点：`prefix+t` 把当前 Tab 的所有 Pane 收成一个纵向堆叠，
+  折叠项集中排在顶部各占一行标题，焦点那个占剩下的高度。
+- 折叠项的终端沿用上次展开时的尺寸（不重排、不重绘内容）；切成展开项时
+  才按展开后的矩形重新上报尺寸。
+- `prefix+h/j/k/l` 落到折叠项即把它切成展开项；点标题行同样切换。
+- Stack 写进 core doc（`schema_version` 升到 2，旧的 version 1 文档仍可读）；
+  在 Stack 里关掉一个 Pane 会把它从堆叠里摘出，关到只剩一个时变回普通 Pane；
+  对 Stack 分屏会把整个 Stack 和新 Pane 分左右/上下。
 - 底部状态栏改成 herdr 式临时模式行：只有 PREFIX / COPY / RESIZE / NAVIGATE /
   MOVE 或提示出现时占一行，右侧显示连接状态；普通状态下 Pane 一直铺到底。
 - 新增三个浮层：可过滤滚动的 Keybinds 面板、Settings 面板（theme / indicators /

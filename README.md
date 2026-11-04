@@ -37,7 +37,9 @@ HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach -- --nocapture   # 真实 cor
 | `hc::proto` | 终端记录、事件、attach/subscribe 结果、CLOSE reason 的宽松解析 |
 | `term::view` | 本地 VT → Ratatui Buffer 的桥：样式、宽字符、真彩、反显、光标；key/mouse 编码、bracketed paste、透传查询的否定应答 |
 | `term::input` | crossterm 键盘 → ghostty 键码与修饰键映射 |
-| `layout::split` | BSP 分屏：分裂、折叠、比例调整、按几何找焦点邻居，有单测 |
+| `layout::split` | BSP 分屏：分裂、折叠、比例调整、按几何找焦点邻居；Stack 纵向堆叠（折叠项只占一行标题），有单测 |
+| `layout::preset` | 七个布局预设（balanced / main-left / main-top / columns / rows / stack / main-stack），按当前分屏 Pane 顺序重排 |
+| 浮动层 | Tab 自带的浮动 Pane：多个并存、按 z 叠放、pin、收起、鼠标拖动与改尺寸、随布局持久化 |
 | `app` / `ui` | Workspace/Tab/BSP Pane 的事件循环、尺寸对齐、侧栏（工作区 + Agent）、Tab 栏、状态栏、提示行、toast、鼠标与拖选、手机单列布局与 `switch` 面板 |
 | `model` | Workspace / Tab / Pane / Agent 状态、Pane 跨 Tab 移动、布局序列化 |
 | `config` | `~/.config/hc-tui/config.toml`（XDG 优先）的 TOML 子集解析、键位绑定、`--default-config` |
@@ -60,7 +62,7 @@ sidebar = true
 sidebar_width = 26
 mobile_width_threshold = 64     # 宽度 <= 此值时进手机单列布局，0 关闭
 tab_bar_position = "top"      # top | bottom
-pane_borders = "auto"         # auto | always | off（auto：只在分屏时画）
+pane_borders = "auto"         # auto | always | titles | off（auto：只在分屏时画；titles：只画标题行）
 pane_gaps = true              # false 时相邻 Pane 共用一条分隔线
 pane_outer_borders = true     # false：去掉 Pane 区域外沿的框
 pane_scrollbars = true        # 焦点 Pane 右缘的滚动条
@@ -168,6 +170,11 @@ Shift 大小写，`minus` / `comma` / `ampersand` / `leftbracket` 等命名符�
 | `-` | 上下分屏 |
 | `h` `j` `k` `l` | 焦点移动到左/下/上/右的 Pane |
 | `tab` / `shift+tab` | 在当前 Tab 内循环焦点 |
+| `t` | 把当前 Tab 的所有 Pane 收成一个 Stack（标题排在顶部，焦点那个展开） |
+| `shift+l` / `shift+j` | 下一个 / 上一个布局预设 |
+| `f` | 焦点 Pane 在分屏与浮动层之间切换 |
+| `shift+f` | 切换浮动 Pane 的 pin |
+| `shift+h` | 收起 / 展开浮动层 |
 | `z` | 缩放当前 Pane 占满内容区 |
 | `r` 然后 `h j k l` | 调整分隔线比例，其他键退出调整 |
 | `x` | 关闭当前 Pane 视图（程序继续跑） |

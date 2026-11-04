@@ -93,6 +93,37 @@ key C-b v; sleep 0.8
 expect_tabs "三个 Tab" 3
 expect "分屏后的边框" "┌"
 
+# Stack：当前 Tab 全部收成堆叠，折叠项只留标题行
+key C-b t; sleep 1
+expect "Stack 提示" "stacked 2 panes"
+if [[ "$(screen | grep -c '^ *│ *[^│ ]' || true)" -ge 1 ]]; then
+  echo "ok   Stack 标题行"
+else
+  echo "FAIL Stack 没有画出折叠标题行"
+  screen | tail -20
+  FAILED=1
+fi
+
+# 布局预设：按顺序重排分屏
+key C-b L; sleep 1
+expect "布局预设提示" "layout ·"
+
+# 浮动层：浮起、收起、落回分屏
+key C-b f; sleep 1
+expect "浮起后边框" "┌"
+if screen | grep -qF "pin"; then
+  echo "FAIL 未 pin 的浮动 Pane 标题里出现了 pin"
+  FAILED=1
+else
+  echo "ok   浮动 Pane 未 pin"
+fi
+key C-b F; sleep 0.8
+expect "pin 标记" "pin"
+key C-b H; sleep 0.8
+key C-b H; sleep 0.8
+key C-b f; sleep 1
+expect_missing "落回分屏后没有 pin 标记" "pin"
+
 # 布局写入 core doc 并跨重启恢复
 sleep 1.2
 key C-b q; sleep 0.8

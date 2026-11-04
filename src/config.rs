@@ -20,6 +20,8 @@ pub enum PaneBorders {
     Auto,
     /// 永远画。
     Always,
+    /// 只画顶上的标题行，其余三边不画。
+    Titles,
     /// 从不画。
     Off,
 }
@@ -384,6 +386,12 @@ pub struct Keys {
     pub cycle_pane_previous: Binding,
     pub last_pane: Binding,
     pub zoom: Binding,
+    pub stack_panes: Binding,
+    pub layout_next: Binding,
+    pub layout_previous: Binding,
+    pub float_pane: Binding,
+    pub float_pin: Binding,
+    pub float_hide: Binding,
     pub close_pane: Binding,
     pub rename_pane: Binding,
     pub kill_pane: Binding,
@@ -443,6 +451,12 @@ impl Default for Keys {
             cycle_pane_previous: bind("prefix+backtab"),
             last_pane: Binding::Off,
             zoom: bind("prefix+z"),
+            stack_panes: bind("prefix+t"),
+            layout_next: bind("prefix+shift+l"),
+            layout_previous: bind("prefix+shift+j"),
+            float_pane: bind("prefix+f"),
+            float_pin: bind("prefix+shift+f"),
+            float_hide: bind("prefix+shift+h"),
             close_pane: bind("prefix+x"),
             rename_pane: bind("prefix+shift+p"),
             kill_pane: bind("prefix+shift+k"),
@@ -503,6 +517,12 @@ impl Keys {
             ("cycle_pane_previous", self.cycle_pane_previous),
             ("last_pane", self.last_pane),
             ("zoom", self.zoom),
+            ("stack_panes", self.stack_panes),
+            ("layout_next", self.layout_next),
+            ("layout_previous", self.layout_previous),
+            ("float_pane", self.float_pane),
+            ("float_pin", self.float_pin),
+            ("float_hide", self.float_hide),
             ("close_pane", self.close_pane),
             ("rename_pane", self.rename_pane),
             ("kill_pane", self.kill_pane),
@@ -560,6 +580,12 @@ impl Keys {
             "cycle_pane_previous" => &mut self.cycle_pane_previous,
             "last_pane" => &mut self.last_pane,
             "zoom" => &mut self.zoom,
+            "stack_panes" => &mut self.stack_panes,
+            "layout_next" => &mut self.layout_next,
+            "layout_previous" => &mut self.layout_previous,
+            "float_pane" => &mut self.float_pane,
+            "float_pin" => &mut self.float_pin,
+            "float_hide" => &mut self.float_hide,
             "close_pane" => &mut self.close_pane,
             "rename_pane" => &mut self.rename_pane,
             "kill_pane" => &mut self.kill_pane,
@@ -794,6 +820,7 @@ impl Config {
                 "ui.pane_borders" => match value.text() {
                     Some("auto" | "true") => self.pane_borders = PaneBorders::Auto,
                     Some("always") => self.pane_borders = PaneBorders::Always,
+                    Some("titles") => self.pane_borders = PaneBorders::Titles,
                     Some("off" | "false") => self.pane_borders = PaneBorders::Off,
                     _ => warnings.push(format!("{path}: 只支持 auto / always / off")),
                 },
@@ -1126,7 +1153,7 @@ pub fn default_config_text() -> String {
     ));
     out.push_str(&format!("sidebar_start_collapsed = {}\n", !config.sidebar));
     out.push_str("tab_bar_position = \"top\"   # top | bottom\n");
-    out.push_str("pane_borders = \"auto\"      # auto | always | off\n");
+    out.push_str("pane_borders = \"auto\"      # auto | always | titles | off\n");
     out.push_str(&format!("pane_gaps = {}\n", config.pane_gaps));
     out.push_str(&format!(
         "pane_outer_borders = {}\n",
@@ -1702,6 +1729,14 @@ mod tests {
         assert_eq!(config.sidebar_width, 31);
         assert_eq!(config.mobile_width_threshold, 64);
         assert_eq!(config.pane_borders, PaneBorders::Off);
+        assert_eq!(
+            Config::load(Some(temp_file(
+                "titles",
+                "[ui]\npane_borders = \"titles\"\n"
+            )))
+            .pane_borders,
+            PaneBorders::Titles
+        );
         assert!(!config.pane_gaps);
         assert_eq!(config.tab_bar_position, TabBarPosition::Bottom);
         assert_eq!(config.indicators, Indicators::Symbols);

@@ -270,6 +270,81 @@ pub struct Tab {
     pub label: String,
     pub tree: SplitNode,
     pub focus: u32,
+    /// 浮动层。`tree` 里没有它们；按 `z` 叠放，`pinned` 的一直在最上面。
+    pub floating: Vec<FloatingPane>,
+    /// 当前用的是哪个布局预设（[`crate::layout::preset::NAMES`] 的下标）；
+    /// `None` 表示手写布局。
+    pub layout: Option<usize>,
+}
+
+/// 浮动层里的一个 Pane。位置与大小按内容区的百分比保存，
+/// 窗口尺寸变化时保持相对位置。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FloatingPane {
+    pub pane: u32,
+    /// 左边缘与上边缘，按内容区减去自身尺寸之后的余量取百分比。
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    /// 叠放顺序，越大越靠上。
+    pub z: u32,
+    /// 固定在浮动层最上面，隐藏浮动层时也不收。
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+impl FloatingPane {
+    pub const MIN_WIDTH: u16 = 8;
+    pub const MIN_HEIGHT: u16 = 4;
+
+    pub fn new(pane: u32, z: u32) -> Self {
+        Self {
+            pane,
+            x: 20,
+            y: 10,
+            width: 60,
+            height: 60,
+            z,
+            pinned: false,
+        }
+    }
+
+    /// 它在内容区里的实际矩形。
+    pub fn rect(&self, content: Rect) -> Rect {
+        let width = snap(self.width, content.width)
+            .clamp(Self::MIN_WIDTH.min(content.width), content.width.max(1));
+        let height = snap(self.height, content.height)
+            .clamp(Self::MIN_HEIGHT.min(content.height), content.height.max(1));
+        let x = content.x + snap(self.x, content.width.saturating_sub(width));
+        let y = content.y + snap(self.y, content.height.saturating_sub(height));
+        Rect::new(x, y, width, height)
+    }
+
+    /// 把屏幕上的矩形反推回百分比，拖拽后写回。
+    pub fn place(&mut self, rect: Rect, content: Rect) {
+        let (width, height) = (content.width.max(1), content.height.max(1));
+        self.width = percent(rect.width, width);
+        self.height = percent(rect.height, height);
+        self.x = percent(
+            rect.x.saturating_sub(content.x),
+            width.saturating_sub(rect.width),
+        );
+        self.y = percent(
+            rect.y.saturating_sub(content.y),
+            height.saturating_sub(rect.height),
+        );
+    }
+}
+
+fn snap(percent: u16, total: u16) -> u16 {
+    ((u32::from(percent) * u32::from(total) + 50) / 100) as u16
+}
+
+fn percent(value: u16, total: u16) -> u16 {
+    let total = u32::from(total.max(1));
+    let percent = (u32::from(value) * 100 + total / 2) / total;
+    percent.min(100) as u16
 }
 
 impl Tab {
@@ -279,15 +354,104 @@ impl Tab {
             label: String::new(),
             tree: SplitNode::leaf(pane),
             focus: pane,
+            floating: Vec::new(),
+            layout: None,
         }
     }
 
     pub fn panes(&self) -> Vec<PaneId> {
-        self.tree.panes()
+        let mut out = self.tree.panes();
+        out.extend(self.floating.iter().map(|entry| PaneId(entry.pane)));
+        out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tree.panes().is_empty()
+        self.tree.panes().is_empty() && self.floating.is_empty()
+    }
+
+    pub fn floating_of(&self, pane: u32) -> Option<&FloatingPane> {
+        self.floating.iter().find(|entry| entry.pane == pane)
+    }
+
+    /// 把一个分屏里的 Pane 抬到浮动层。分屏里至少还要剩一个 Pane。
+    pub fn float(&mut self, pane: u32) -> bool {
+        let tiled = self.tree.panes();
+        if tiled.len() < 2 || !tiled.iter().any(|id| id.0 == pane) {
+            return false;
+        }
+        let Some(tree) = self.tree.clone().remove_pane(PaneId(pane)) else {
+            return false;
+        };
+        self.tree = tree;
+        let z = self
+            .floating
+            .iter()
+            .map(|entry| entry.z + 1)
+            .max()
+            .unwrap_or(1);
+        self.floating.push(FloatingPane::new(pane, z));
+        true
+    }
+
+    /// 把浮动的 Pane 放回分屏，接在最后一个分屏 Pane 的右边。
+    pub fn unfloat(&mut self, pane: u32) -> bool {
+        let Some(index) = self.floating.iter().position(|entry| entry.pane == pane) else {
+            return false;
+        };
+        self.floating.remove(index);
+        match self.tree.panes().last().map(|id| id.0) {
+            Some(anchor) => {
+                self.tree
+                    .split_pane(PaneId(anchor), Axis::Horizontal, PaneId(pane), 0.5);
+            }
+            None => self.tree = SplitNode::leaf(pane),
+        }
+        true
+    }
+
+    /// 在某个浮动 Pane 旁边再浮一个：新 Pane 错开几格，压在原来那个上面。
+    pub fn float_beside(&mut self, pane: u32, source: u32) {
+        let z = self
+            .floating
+            .iter()
+            .map(|entry| entry.z + 1)
+            .max()
+            .unwrap_or(1);
+        let mut next = self
+            .floating
+            .iter()
+            .find(|entry| entry.pane == source)
+            .cloned()
+            .unwrap_or_else(|| FloatingPane::new(pane, z));
+        next.pane = pane;
+        next.z = z;
+        next.x = next.x.saturating_add(5).min(60);
+        next.y = next.y.saturating_add(3).min(60);
+        self.floating.push(next);
+    }
+
+    /// 分屏里已经空了时，把一个浮动 Pane 提上来接住分屏；没有浮动 Pane 返回 `false`。
+    pub fn promote_floating(&mut self) -> bool {
+        let Some(promoted) = self.floating.first().map(|entry| entry.pane) else {
+            return false;
+        };
+        self.floating.retain(|entry| entry.pane != promoted);
+        self.tree = SplitNode::leaf(promoted);
+        self.focus = promoted;
+        true
+    }
+
+    /// 把某个浮动 Pane 提到浮动层最上面。
+    pub fn raise_floating(&mut self, pane: u32) {
+        let z = self
+            .floating
+            .iter()
+            .map(|entry| entry.z + 1)
+            .max()
+            .unwrap_or(1);
+        if let Some(entry) = self.floating.iter_mut().find(|entry| entry.pane == pane) {
+            entry.z = z;
+        }
     }
 
     /// Tab 的显示名：手动名字，其次是焦点 Pane 的名字。
@@ -356,6 +520,8 @@ pub struct Slot {
     pub borders: ratatui::widgets::Borders,
     /// 浮层 Pane（popup），画在所有分屏之上。
     pub overlay: bool,
+    /// 折叠成一行标题的 Stack 成员：不重排终端，也不重绘内容。
+    pub collapsed: bool,
 }
 
 /// 持久化进 `doc` 的布局。不含屏幕内容，也不含任何进程状态。
@@ -371,7 +537,7 @@ pub struct SavedState {
 }
 
 impl SavedState {
-    pub const SCHEMA: u32 = 1;
+    pub const SCHEMA: u32 = 2;
 
     pub fn empty() -> Self {
         Self {
@@ -417,6 +583,10 @@ pub struct SavedTab {
     #[serde(default)]
     pub focus: u32,
     pub tree: SavedNode,
+    #[serde(default)]
+    pub floating: Vec<FloatingPane>,
+    #[serde(default)]
+    pub layout: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -438,6 +608,12 @@ pub enum SavedNode {
         ratio: f32,
         first: Box<SavedNode>,
         second: Box<SavedNode>,
+    },
+    Stack {
+        #[serde(default)]
+        panes: Vec<u32>,
+        #[serde(default)]
+        active: usize,
     },
 }
 
@@ -466,6 +642,10 @@ impl From<&SplitNode> for SavedNode {
                 first: Box::new(first.as_ref().into()),
                 second: Box::new(second.as_ref().into()),
             },
+            SplitNode::Stack { panes, active } => Self::Stack {
+                panes: panes.iter().map(|pane| pane.0).collect(),
+                active: *active,
+            },
         }
     }
 }
@@ -488,6 +668,9 @@ impl From<&SavedNode> for SplitNode {
                 first.as_ref().into(),
                 second.as_ref().into(),
             ),
+            SavedNode::Stack { panes, active } => {
+                SplitNode::stack(panes.iter().map(|pane| PaneId(*pane)).collect(), *active)
+            }
         }
     }
 }
@@ -501,6 +684,7 @@ impl SavedNode {
                 out.extend(second.panes());
                 out
             }
+            Self::Stack { panes, .. } => panes.clone(),
         }
     }
 }
@@ -517,6 +701,14 @@ pub fn renumber_node(node: &mut SavedNode, map: &mut BTreeMap<u32, u32>, next: &
         SavedNode::Split { first, second, .. } => {
             renumber_node(first, map, next);
             renumber_node(second, map, next);
+        }
+        SavedNode::Stack { panes, .. } => {
+            for pane in panes.iter_mut() {
+                let fresh = *next;
+                *next += 1;
+                map.insert(*pane, fresh);
+                *pane = fresh;
+            }
         }
     }
 }
@@ -537,6 +729,8 @@ mod tests {
                     id: 1,
                     label: String::new(),
                     focus: 2,
+                    layout: None,
+                    floating: Vec::new(),
                     tree: SavedNode::Split {
                         axis: SavedAxis::Horizontal,
                         ratio: 0.5,
@@ -558,6 +752,56 @@ mod tests {
         assert!(parsed.is_usable());
         let tree: SplitNode = (&state.workspaces[0].tabs[0].tree).into();
         assert_eq!(tree.panes(), vec![PaneId(2), PaneId(3)]);
+    }
+
+    #[test]
+    fn a_floating_pane_maps_between_cells_and_percent() {
+        let content = Rect::new(10, 4, 100, 40);
+        let mut entry = FloatingPane::new(3, 1);
+        let rect = entry.rect(content);
+        assert!(rect.width >= FloatingPane::MIN_WIDTH);
+        assert!(content.intersection(rect) == rect);
+        entry.place(Rect::new(60, 20, 40, 20), content);
+        assert_eq!(entry.rect(content), Rect::new(60, 20, 40, 20));
+    }
+
+    #[test]
+    fn floating_and_tiling_move_panes_between_layers() {
+        let mut tab = Tab::new(1, 1);
+        tab.tree
+            .split_pane(PaneId(1), Axis::Horizontal, PaneId(2), 0.5);
+        assert!(tab.float(2));
+        assert_eq!(tab.tree.panes(), vec![PaneId(1)]);
+        assert_eq!(tab.panes(), vec![PaneId(1), PaneId(2)]);
+        assert!(tab.floating_of(2).is_some());
+        assert!(!tab.float(1), "the last tiled pane stays tiled");
+        tab.raise_floating(2);
+        assert!(tab.unfloat(2));
+        assert_eq!(tab.tree.panes(), vec![PaneId(1), PaneId(2)]);
+        assert!(tab.floating.is_empty());
+    }
+
+    #[test]
+    fn an_empty_tiled_layer_promotes_a_floating_pane() {
+        let mut tab = Tab::new(1, 1);
+        tab.tree
+            .split_pane(PaneId(1), Axis::Horizontal, PaneId(2), 0.5);
+        assert!(tab.float(2));
+        let tree = tab.tree.clone();
+        assert!(tree.remove_pane(PaneId(1)).is_none());
+        assert!(tab.promote_floating());
+        assert_eq!(tab.tree.panes(), vec![PaneId(2)]);
+        assert!(tab.floating.is_empty());
+        assert_eq!(tab.focus, 2);
+    }
+
+    #[test]
+    fn a_stack_survives_the_doc_round_trip() {
+        let node = SplitNode::stack(vec![PaneId(2), PaneId(3)], 1);
+        let saved: SavedNode = (&node).into();
+        assert_eq!(saved.panes(), vec![2, 3]);
+        let tree: SplitNode = (&saved).into();
+        assert_eq!(tree, node);
     }
 
     #[test]

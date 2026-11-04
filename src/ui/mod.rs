@@ -844,28 +844,56 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
         .map(|copy| copy.matches.clone());
     let copy_active = app.copy.is_some();
     let state = app.panes.get(&slot.pane);
+    let floating = app
+        .workspace()
+        .and_then(crate::model::Workspace::tab)
+        .and_then(|tab| tab.floating_of(slot.pane));
+    let popup = app.popup.is_some_and(|popup| popup.pane == slot.pane);
     let badge = state.map(|pane| pane.agent.badge()).unwrap_or(Badge::None);
     let symbols = app.config.indicators == crate::config::Indicators::Symbols;
     // herdr 不在边框上写终端地址：只有手动命名或开启 Agent 标签时才出现标题。
-    let title = match state.map(|pane| &pane.state) {
-        Some(PaneState::Live { .. }) => {
-            let named = state.and_then(|pane| {
-                pane.name
-                    .as_deref()
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_string)
-            });
-            match named {
-                Some(name) => format!(" {} ", truncate(&name, 24)),
-                None if app.config.show_agent_labels_on_pane_borders && badge != Badge::None => {
-                    let label = state.map(|pane| pane.label()).unwrap_or_default();
-                    format!(" {} {} ", badge.glyph(symbols), truncate(&label, 22))
-                }
-                None => String::new(),
-            }
+    let title = if slot.collapsed {
+        // 折叠行就是标题行本身，标签必须一直显示。
+        let label = state.map(|pane| pane.label()).unwrap_or_default();
+        match badge {
+            Badge::None => format!(" {} ", truncate(&label, 40)),
+            _ => format!(" {} {} ", badge.glyph(symbols), truncate(&label, 38)),
         }
-        Some(PaneState::Ended { reason }) => format!(" closed: {} ", short(reason)),
-        Some(PaneState::Waiting) | None => " starting ".to_string(),
+    } else if floating.is_some() {
+        // 浮动 Pane 没有相邻边框，标题里必须带身份。
+        let label = state.map(|pane| pane.label()).unwrap_or_default();
+        let pin = if floating.is_some_and(|entry| entry.pinned) {
+            "pin "
+        } else {
+            ""
+        };
+        match badge {
+            Badge::None => format!(" {pin}{} ", truncate(&label, 36)),
+            _ => format!(" {} {pin}{} ", badge.glyph(symbols), truncate(&label, 34)),
+        }
+    } else {
+        match state.map(|pane| &pane.state) {
+            Some(PaneState::Live { .. }) => {
+                let named = state.and_then(|pane| {
+                    pane.name
+                        .as_deref()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string)
+                });
+                match named {
+                    Some(name) => format!(" {} ", truncate(&name, 24)),
+                    None if app.config.show_agent_labels_on_pane_borders
+                        && badge != Badge::None =>
+                    {
+                        let label = state.map(|pane| pane.label()).unwrap_or_default();
+                        format!(" {} {} ", badge.glyph(symbols), truncate(&label, 22))
+                    }
+                    None => String::new(),
+                }
+            }
+            Some(PaneState::Ended { reason }) => format!(" closed: {} ", short(reason)),
+            Some(PaneState::Waiting) | None => " starting ".to_string(),
+        }
     };
     let border_color = if slot.overlay {
         theme.color("accent")
@@ -876,7 +904,7 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
     } else {
         theme.color("border")
     };
-    let title = if slot.overlay {
+    let title = if popup {
         format!("popup ·{title}")
     } else {
         title
@@ -887,6 +915,10 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
         .style(Style::default().bg(theme.color("bg")))
         .title(Span::styled(title, Style::default().fg(border_color)));
     frame.render_widget(block, slot.outer);
+
+    if slot.collapsed {
+        return;
+    }
 
     if slot.inner.width == 0 || slot.inner.height == 0 {
         return;

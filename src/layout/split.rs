@@ -15,6 +15,15 @@ pub enum Axis {
     Vertical,
 }
 
+impl Axis {
+    pub fn other(self) -> Self {
+        match self {
+            Axis::Horizontal => Axis::Vertical,
+            Axis::Vertical => Axis::Horizontal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SplitNode {
     Leaf(PaneId),
@@ -25,6 +34,20 @@ pub enum SplitNode {
         first: Box<SplitNode>,
         second: Box<SplitNode>,
     },
+    /// 纵向堆叠。`active` 那个 Pane 占掉标题行以下的高度，其余 Pane 各自只占一行标题。
+    Stack {
+        panes: Vec<PaneId>,
+        active: usize,
+    },
+}
+
+/// 一个 Pane 在某一帧里的位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub pane: PaneId,
+    pub rect: Rect,
+    /// 只占一行标题。终端尺寸沿用上次展开时的值，不跟着这条矩形缩。
+    pub collapsed: bool,
 }
 
 impl SplitNode {
@@ -41,16 +64,25 @@ impl SplitNode {
         }
     }
 
+    pub fn stack(panes: Vec<PaneId>, active: usize) -> Self {
+        let active = active.min(panes.len().saturating_sub(1));
+        SplitNode::Stack { panes, active }
+    }
+
     /// 收集所有叶子及其矩形，按先序。
-    pub fn layout(&self, area: Rect) -> Vec<(PaneId, Rect)> {
+    pub fn layout(&self, area: Rect) -> Vec<Placement> {
         let mut out = Vec::new();
         self.collect(area, &mut out);
         out
     }
 
-    fn collect(&self, area: Rect, out: &mut Vec<(PaneId, Rect)>) {
+    fn collect(&self, area: Rect, out: &mut Vec<Placement>) {
         match self {
-            SplitNode::Leaf(id) => out.push((*id, area)),
+            SplitNode::Leaf(id) => out.push(Placement {
+                pane: *id,
+                rect: area,
+                collapsed: false,
+            }),
             SplitNode::Split {
                 axis,
                 ratio,
@@ -60,6 +92,33 @@ impl SplitNode {
                 let (a, b) = split_rect(area, *axis, *ratio);
                 first.collect(a, out);
                 second.collect(b, out);
+            }
+            SplitNode::Stack { panes, active } => {
+                if panes.is_empty() {
+                    return;
+                }
+                let active = (*active).min(panes.len() - 1);
+                // 标题行全部集中在顶部，展开的 Pane 占剩下的高度。
+                let titles = (panes.len() as u16 - 1).min(area.height.saturating_sub(1));
+                let expanded = Rect::new(area.x, area.y + titles, area.width, area.height - titles);
+                let mut row = area.y;
+                for (index, pane) in panes.iter().enumerate() {
+                    if index == active {
+                        out.push(Placement {
+                            pane: *pane,
+                            rect: expanded,
+                            collapsed: false,
+                        });
+                        continue;
+                    }
+                    let height = u16::from(row < area.y + titles);
+                    out.push(Placement {
+                        pane: *pane,
+                        rect: Rect::new(area.x, row, area.width, height),
+                        collapsed: true,
+                    });
+                    row += height;
+                }
             }
         }
     }
@@ -77,6 +136,34 @@ impl SplitNode {
                 first.collect_panes(out);
                 second.collect_panes(out);
             }
+            SplitNode::Stack { panes, .. } => out.extend(panes.iter().copied()),
+        }
+    }
+
+    fn in_a_stack(&self, target: PaneId) -> bool {
+        match self {
+            SplitNode::Leaf(_) => false,
+            SplitNode::Split { .. } => false,
+            SplitNode::Stack { panes, .. } => panes.contains(&target),
+        }
+    }
+
+    /// 把一个 Stack 里 `target` 那一项切成展开项。不在 Stack 里返回 `false`。
+    pub fn activate_in_stack(&mut self, target: PaneId) -> bool {
+        match self {
+            SplitNode::Leaf(_) => false,
+            SplitNode::Split { first, second, .. } => {
+                first.activate_in_stack(target) || second.activate_in_stack(target)
+            }
+            SplitNode::Stack { panes, active } => {
+                match panes.iter().position(|pane| *pane == target) {
+                    Some(index) if *active != index => {
+                        *active = index;
+                        true
+                    }
+                    _ => false,
+                }
+            }
         }
     }
 
@@ -84,6 +171,12 @@ impl SplitNode {
     ///
     /// 返回 `false` 表示树里没有这个 Pane。
     pub fn split_pane(&mut self, target: PaneId, axis: Axis, new: PaneId, ratio: f32) -> bool {
+        // Stack 里的 Pane 不能就地分屏：整个 Stack 一起和新的 Pane 分左右/上下。
+        if self.in_a_stack(target) {
+            let existing = std::mem::replace(self, SplitNode::Leaf(new));
+            *self = SplitNode::split(axis, ratio, existing, SplitNode::Leaf(new));
+            return true;
+        }
         match self {
             SplitNode::Leaf(id) if *id == target => {
                 let existing = SplitNode::Leaf(*id);
@@ -95,6 +188,7 @@ impl SplitNode {
                 first.split_pane(target, axis, new, ratio)
                     || second.split_pane(target, axis, new, ratio)
             }
+            SplitNode::Stack { .. } => false,
         }
     }
 
@@ -118,6 +212,24 @@ impl SplitNode {
                 (Some(only), None) | (None, Some(only)) => Some(only),
                 (None, None) => None,
             },
+            SplitNode::Stack {
+                mut panes,
+                mut active,
+            } => {
+                let index = match panes.iter().position(|pane| *pane == target) {
+                    Some(index) => index,
+                    None => return Some(SplitNode::Stack { panes, active }),
+                };
+                panes.remove(index);
+                if index < active {
+                    active -= 1;
+                }
+                match panes.len() {
+                    0 => None,
+                    1 => Some(SplitNode::Leaf(panes[0])),
+                    _ => Some(SplitNode::stack(panes, active)),
+                }
+            }
         }
     }
 
@@ -127,6 +239,7 @@ impl SplitNode {
     pub fn adjust_ratio(&mut self, target: PaneId, axis: Axis, delta: f32) -> bool {
         match self {
             SplitNode::Leaf(_) => false,
+            SplitNode::Stack { .. } => false,
             SplitNode::Split {
                 axis: node_axis,
                 ratio,
@@ -278,10 +391,17 @@ fn split_rect(area: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
 mod tests {
     use super::*;
 
+    fn rects(node: &SplitNode, area: Rect) -> Vec<(PaneId, Rect)> {
+        node.layout(area)
+            .into_iter()
+            .map(|placement| (placement.pane, placement.rect))
+            .collect()
+    }
+
     #[test]
     fn a_single_leaf_fills_the_area() {
         let area = Rect::new(0, 0, 80, 24);
-        assert_eq!(SplitNode::leaf(1).layout(area), vec![(PaneId(1), area)]);
+        assert_eq!(rects(&SplitNode::leaf(1), area), vec![(PaneId(1), area)]);
     }
 
     #[test]
@@ -292,7 +412,7 @@ mod tests {
             SplitNode::leaf(1),
             SplitNode::leaf(2),
         );
-        let rects = node.layout(Rect::new(0, 0, 80, 24));
+        let rects = rects(&node, Rect::new(0, 0, 80, 24));
         assert_eq!(rects[0], (PaneId(1), Rect::new(0, 0, 40, 24)));
         assert_eq!(rects[1], (PaneId(2), Rect::new(40, 0, 40, 24)));
     }
@@ -300,7 +420,7 @@ mod tests {
     #[test]
     fn vertical_split_stacks() {
         let node = SplitNode::split(Axis::Vertical, 0.25, SplitNode::leaf(1), SplitNode::leaf(2));
-        let rects = node.layout(Rect::new(0, 0, 80, 24));
+        let rects = rects(&node, Rect::new(0, 0, 80, 24));
         assert_eq!(rects[0], (PaneId(1), Rect::new(0, 0, 80, 6)));
         assert_eq!(rects[1], (PaneId(2), Rect::new(0, 6, 80, 18)));
     }
@@ -309,7 +429,7 @@ mod tests {
     fn nested_splits_keep_preorder() {
         let inner = SplitNode::split(Axis::Vertical, 0.5, SplitNode::leaf(2), SplitNode::leaf(3));
         let node = SplitNode::split(Axis::Horizontal, 0.5, SplitNode::leaf(1), inner);
-        let rects = node.layout(Rect::new(0, 0, 80, 24));
+        let rects = rects(&node, Rect::new(0, 0, 80, 24));
         assert_eq!(
             rects.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![PaneId(1), PaneId(2), PaneId(3)]
@@ -323,7 +443,7 @@ mod tests {
         let mut tree = SplitNode::leaf(1);
         assert!(tree.split_pane(PaneId(1), Axis::Horizontal, PaneId(2), 0.5));
         assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
-        let rects = tree.layout(Rect::new(0, 0, 80, 24));
+        let rects = rects(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(rects[0].1.width + rects[1].1.width, 80);
     }
 
@@ -377,7 +497,7 @@ mod tests {
             SplitNode::leaf(1),
             SplitNode::split(Axis::Vertical, 0.5, SplitNode::leaf(2), SplitNode::leaf(3)),
         );
-        let rects = tree.layout(Rect::new(0, 0, 80, 24));
+        let rects = rects(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(
             neighbor(&rects, PaneId(1), Direction::Right),
             Some(PaneId(2))
@@ -401,8 +521,100 @@ mod tests {
             SplitNode::leaf(1),
             SplitNode::leaf(2),
         );
-        let rects = node.layout(Rect::new(0, 0, 1, 1));
+        let rects = rects(&node, Rect::new(0, 0, 1, 1));
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[1].1.width, 0);
+    }
+
+    #[test]
+    fn a_stack_puts_the_titles_on_top_of_the_expanded_pane() {
+        let tree = SplitNode::stack(vec![PaneId(1), PaneId(2), PaneId(3)], 1);
+        let placements = tree.layout(Rect::new(0, 0, 80, 24));
+        assert_eq!(placements.len(), 3);
+        assert_eq!(
+            placements[0],
+            Placement {
+                pane: PaneId(1),
+                rect: Rect::new(0, 0, 80, 1),
+                collapsed: true,
+            }
+        );
+        assert_eq!(
+            placements[1],
+            Placement {
+                pane: PaneId(2),
+                rect: Rect::new(0, 2, 80, 22),
+                collapsed: false,
+            }
+        );
+        assert_eq!(
+            placements[2],
+            Placement {
+                pane: PaneId(3),
+                rect: Rect::new(0, 1, 80, 1),
+                collapsed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_stack_shorter_than_its_titles_drops_the_extra_rows() {
+        let tree = SplitNode::stack(vec![PaneId(1), PaneId(2), PaneId(3)], 0);
+        let placements = tree.layout(Rect::new(0, 0, 40, 2));
+        assert_eq!(
+            placements[0],
+            Placement {
+                pane: PaneId(1),
+                rect: Rect::new(0, 1, 40, 1),
+                collapsed: false,
+            }
+        );
+        assert_eq!(
+            placements[1],
+            Placement {
+                pane: PaneId(2),
+                rect: Rect::new(0, 0, 40, 1),
+                collapsed: true,
+            }
+        );
+        assert_eq!(placements[2].rect.height, 0);
+    }
+
+    #[test]
+    fn activating_a_stacked_pane_expands_it() {
+        let mut tree = SplitNode::stack(vec![PaneId(1), PaneId(2)], 0);
+        assert!(tree.activate_in_stack(PaneId(2)));
+        assert!(!tree.activate_in_stack(PaneId(2)));
+        match &tree {
+            SplitNode::Stack { active, .. } => assert_eq!(*active, 1),
+            _ => panic!("expected a stack"),
+        }
+    }
+
+    #[test]
+    fn removing_a_stacked_pane_folds_the_stack_back() {
+        let tree = SplitNode::stack(vec![PaneId(1), PaneId(2), PaneId(3)], 2);
+        let tree = tree.remove_pane(PaneId(2)).unwrap();
+        match &tree {
+            SplitNode::Stack { panes, active } => {
+                assert_eq!(panes, &vec![PaneId(1), PaneId(3)]);
+                assert_eq!(*active, 1);
+            }
+            _ => panic!("expected a stack"),
+        }
+        assert_eq!(
+            tree.remove_pane(PaneId(3)).unwrap().panes(),
+            vec![PaneId(1)]
+        );
+    }
+
+    #[test]
+    fn splitting_a_stacked_pane_wraps_the_whole_stack() {
+        let mut tree = SplitNode::stack(vec![PaneId(1), PaneId(2)], 0);
+        assert!(tree.split_pane(PaneId(2), Axis::Horizontal, PaneId(9), 0.5));
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2), PaneId(9)]);
+        let placements = tree.layout(Rect::new(0, 0, 80, 24));
+        assert_eq!(placements[2].pane, PaneId(9));
+        assert!(!placements[2].collapsed);
     }
 }

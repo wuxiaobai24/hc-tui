@@ -23,10 +23,10 @@ use crate::config::{AgentSort, CommandKind, Config, Delivery, PaneBorders, Span}
 use crate::copy::CopyMode;
 use crate::hc::net::{Command, NetConfig, NetEvent, NetHandle};
 use crate::hc::proto::{Event as TerminalEvent, TerminalSummary};
-use crate::layout::split::{neighbor, Axis, Direction, PaneId, SplitNode};
+use crate::layout::split::{neighbor, Axis, Direction, PaneId, Placement, SplitNode};
 use crate::model::{
-    renumber_node, Badge, Launch, Pane, PaneState, SavedNode, SavedPane, SavedState, SavedTab,
-    SavedWorkspace, Slot, Tab, Workspace,
+    renumber_node, Badge, FloatingPane, Launch, Pane, PaneState, SavedNode, SavedPane, SavedState,
+    SavedTab, SavedWorkspace, Slot, Tab, Workspace,
 };
 use crate::term::view::TerminalView;
 use crate::tui;
@@ -251,6 +251,21 @@ pub struct Drag {
     pub current: (u16, u16),
 }
 
+/// 拖浮动 Pane：抓标题行移动，抓右下角改尺寸。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatingDragMode {
+    Move,
+    Resize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FloatingDrag {
+    pub pane: u32,
+    pub mode: FloatingDragMode,
+    /// 按下时鼠标在 Pane 矩形里的偏移（列, 行）。
+    pub grab: (u16, u16),
+}
+
 /// 手机切换面板里可点的条目。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MobileTarget {
@@ -300,6 +315,10 @@ pub struct App {
     /// 侧栏里其它客户端终端的点击区域。
     pub terminal_hits: Vec<(String, Rect)>,
     pub zoom: bool,
+    /// 浮动层是否收起；pin 的浮动 Pane 不受影响。
+    pub floating_hidden: bool,
+    /// 正在拖动的浮动 Pane。
+    pub floating_drag: Option<FloatingDrag>,
     pub resize_mode: bool,
     pub move_mode: bool,
     pub workspace_mode: bool,
@@ -404,6 +423,8 @@ impl App {
             workspace_hits: Vec::new(),
             terminal_hits: Vec::new(),
             zoom: false,
+            floating_hidden: false,
+            floating_drag: None,
             resize_mode: false,
             move_mode: false,
             workspace_mode: false,
@@ -775,30 +796,68 @@ impl App {
             return;
         }
         let focus = self.focused();
+        let focus_floating = self
+            .workspace()
+            .and_then(Workspace::tab)
+            .is_some_and(|tab| tab.floating_of(focus).is_some());
         // 手机单列布局只摆当前 Pane，其余 Pane 靠 `switch` 面板跳过去。
-        let leaves = if self.zoom || self.mobile {
-            vec![(PaneId(focus), content)]
+        let leaves = if (self.zoom || self.mobile) && !focus_floating {
+            vec![Placement {
+                pane: PaneId(focus),
+                rect: content,
+                collapsed: false,
+            }]
         } else {
+            // Stack 的展开项始终跟着焦点走，所以这里先把它对齐再算矩形。
+            if let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) {
+                tab.tree.activate_in_stack(PaneId(focus));
+            }
             self.workspace()
                 .and_then(Workspace::tab)
                 .map(|tab| tab.tree.layout(content))
                 .unwrap_or_default()
         };
+        let rects: Vec<(PaneId, Rect)> = leaves.iter().map(|leaf| (leaf.pane, leaf.rect)).collect();
         let mut slots = Vec::with_capacity(leaves.len() + 1);
-        for (pane, outer) in &leaves {
-            let borders = borders_for(
-                *outer,
-                &leaves,
-                self.config.pane_borders,
-                self.config.pane_gaps,
-                self.config.pane_outer_borders,
-            );
+        for leaf in &leaves {
+            // 折叠成标题行的成员只留顶线，不参与相邻边共享。
+            let borders = if leaf.collapsed {
+                ratatui::widgets::Borders::TOP
+            } else {
+                borders_for(
+                    leaf.rect,
+                    &rects,
+                    self.config.pane_borders,
+                    self.config.pane_gaps,
+                    self.config.pane_outer_borders,
+                )
+            };
             slots.push(Slot {
-                pane: pane.0,
-                outer: *outer,
-                inner: inner_rect(*outer, borders),
+                pane: leaf.pane.0,
+                outer: leaf.rect,
+                inner: inner_rect(leaf.rect, borders),
                 borders,
                 overlay: false,
+                collapsed: leaf.collapsed,
+            });
+        }
+        // 浮动层叠在分屏之上：pin 的排最后画，其余按 z 序。
+        let mut floating = self
+            .workspace()
+            .and_then(Workspace::tab)
+            .map(|tab| tab.floating.clone())
+            .unwrap_or_default();
+        floating.retain(|_| !self.floating_hidden);
+        floating.sort_by_key(|entry| (entry.pinned, entry.z));
+        for entry in floating {
+            let outer = entry.rect(content);
+            slots.push(Slot {
+                pane: entry.pane,
+                outer,
+                inner: inner_rect(outer, ratatui::widgets::Borders::ALL),
+                borders: ratatui::widgets::Borders::ALL,
+                overlay: true,
+                collapsed: false,
             });
         }
         // popup 画在所有分屏之上，尺寸由配置的格数或百分比决定。
@@ -821,9 +880,14 @@ impl App {
                 inner: inner_rect(outer, ratatui::widgets::Borders::ALL),
                 borders: ratatui::widgets::Borders::ALL,
                 overlay: true,
+                collapsed: false,
             });
         }
         for slot in &slots {
+            // 折叠的 Pane 沿用上次展开时的终端尺寸，不跟着标题行缩。
+            if slot.collapsed {
+                continue;
+            }
             if let Some(pane) = self.panes.get_mut(&slot.pane) {
                 if slot.inner.width >= 1 && slot.inner.height >= 1 {
                     let _ =
@@ -843,6 +907,9 @@ impl App {
         let mut spawns = Vec::new();
         let mut resizes = Vec::new();
         for slot in self.slots.clone() {
+            if slot.collapsed {
+                continue;
+            }
             if slot.inner.width < 2 || slot.inner.height < 2 {
                 continue;
             }
@@ -1112,6 +1179,7 @@ impl App {
         let Some(slot) = self
             .slots
             .iter()
+            .rev()
             .find(|slot| contains(slot.outer, mouse.column, mouse.row))
             .copied()
         else {
@@ -1120,10 +1188,23 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.set_focus(slot.pane);
-                if !self
-                    .panes
-                    .get(&slot.pane)
-                    .is_some_and(|pane| pane.view.mouse_tracking())
+                if let Some(mode) = self.floating_grab(&slot, mouse) {
+                    self.floating_drag = Some(FloatingDrag {
+                        pane: slot.pane,
+                        mode,
+                        grab: (
+                            mouse.column.saturating_sub(slot.outer.x),
+                            mouse.row.saturating_sub(slot.outer.y),
+                        ),
+                    });
+                    self.dirty = true;
+                    return;
+                }
+                if !slot.collapsed
+                    && !self
+                        .panes
+                        .get(&slot.pane)
+                        .is_some_and(|pane| pane.view.mouse_tracking())
                 {
                     self.drag = Some(Drag {
                         pane: slot.pane,
@@ -1134,6 +1215,10 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.floating_drag.is_some() {
+                    self.drag_floating(mouse);
+                    return;
+                }
                 if let Some(drag) = &mut self.drag {
                     let next = to_inner(slot.inner, mouse);
                     if self.mobile {
@@ -1155,6 +1240,10 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.floating_drag.take().is_some() {
+                    self.mark_layout();
+                    return;
+                }
                 if let Some(drag) = self.drag.take() {
                     if !self.mobile && self.config.copy_on_select && drag.start != drag.current {
                         let text = self
@@ -1468,6 +1557,30 @@ impl App {
             self.zoom = !self.zoom;
             self.note = String::new();
             self.dirty = true;
+            return;
+        }
+        if keys.layout_next.matches_prefix(&key) {
+            self.cycle_layout(1);
+            return;
+        }
+        if keys.layout_previous.matches_prefix(&key) {
+            self.cycle_layout(-1);
+            return;
+        }
+        if keys.stack_panes.matches_prefix(&key) {
+            self.stack_tab_panes();
+            return;
+        }
+        if keys.float_pane.matches_prefix(&key) {
+            self.toggle_float();
+            return;
+        }
+        if keys.float_pin.matches_prefix(&key) {
+            self.toggle_float_pin();
+            return;
+        }
+        if keys.float_hide.matches_prefix(&key) {
+            self.toggle_floating_hidden();
             return;
         }
         if keys.close_pane.matches_prefix(&key) {
@@ -1987,6 +2100,12 @@ impl App {
                 "cycle_pane_previous" => "cycle pane previous",
                 "last_pane" => "last pane",
                 "zoom" => "zoom",
+                "stack_panes" => "stack panes",
+                "layout_next" => "next layout preset",
+                "layout_previous" => "previous layout preset",
+                "float_pane" => "float pane",
+                "float_pin" => "pin floating pane",
+                "float_hide" => "hide floating panes",
                 "close_pane" => "close pane",
                 "rename_pane" => "rename pane",
                 "kill_pane" => "kill terminal",
@@ -2038,6 +2157,12 @@ impl App {
                     "cycle_pane_previous",
                     "last_pane",
                     "zoom",
+                    "stack_panes",
+                    "layout_next",
+                    "layout_previous",
+                    "float_pane",
+                    "float_pin",
+                    "float_hide",
                     "resize_mode",
                     "close_pane",
                     "rename_pane",
@@ -2859,6 +2984,27 @@ impl App {
 
     fn split_focused(&mut self, axis: Axis) {
         let launch = self.new_pane_launch();
+        let floating = self
+            .workspace()
+            .and_then(Workspace::tab)
+            .is_some_and(|tab| tab.floating_of(self.focused()).is_some());
+        if floating {
+            // 浮动的 Pane 分屏：新 Pane 也浮起来，错开压在旁边。
+            let pane = self.focused();
+            let new = self.alloc_pane();
+            self.spawn_pane(new);
+            if let Some(state) = self.panes.get_mut(&new) {
+                state.launch = launch;
+            }
+            if let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) {
+                tab.float_beside(new, pane);
+                tab.focus = new;
+            }
+            self.note = "floating split".to_string();
+            self.mark_layout();
+            self.dirty = true;
+            return;
+        }
         match self.split_new(axis) {
             Some(new) => {
                 self.spawn_pane(new);
@@ -2892,8 +3038,8 @@ impl App {
             }
             tree.layout(content)
         };
-        for (_, rect) in &candidates {
-            let inner = inner_rect(*rect, ratatui::widgets::Borders::ALL);
+        for placement in candidates.iter().filter(|placement| !placement.collapsed) {
+            let inner = inner_rect(placement.rect, ratatui::widgets::Borders::ALL);
             if inner.width < MIN_PANE_WIDTH || inner.height < MIN_PANE_HEIGHT {
                 self.next_pane -= 1;
                 return None;
@@ -2919,22 +3065,195 @@ impl App {
     }
 
     fn move_focus(&mut self, direction: Direction) {
-        let rects = self
+        let rects: Vec<(PaneId, Rect)> = self
             .workspace()
             .and_then(Workspace::tab)
             .map(|tab| tab.tree.layout(self.content_rect()))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(|placement| (placement.pane, placement.rect))
+            .collect();
         let from = PaneId(self.focused());
         if let Some(next) = neighbor(&rects, from, direction) {
             self.set_focus(next.0);
         }
     }
 
+    /// 鼠标按在浮动 Pane 上时判断这一下是移动还是改尺寸。
+    fn floating_grab(&self, slot: &Slot, mouse: MouseEvent) -> Option<FloatingDragMode> {
+        self.workspace()
+            .and_then(Workspace::tab)
+            .and_then(|tab| tab.floating_of(slot.pane))?;
+        grab_zone(slot.outer, mouse.column, mouse.row)
+    }
+
+    fn drag_floating(&mut self, mouse: MouseEvent) {
+        let Some(drag) = self.floating_drag else {
+            return;
+        };
+        let content = self.content_rect();
+        let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
+            return;
+        };
+        let Some(entry) = tab
+            .floating
+            .iter_mut()
+            .find(|entry| entry.pane == drag.pane)
+        else {
+            self.floating_drag = None;
+            return;
+        };
+        let current = entry.rect(content);
+        let rect = match drag.mode {
+            FloatingDragMode::Move => {
+                let x = mouse.column.saturating_sub(drag.grab.0).max(content.x);
+                let y = mouse.row.saturating_sub(drag.grab.1).max(content.y);
+                Rect::new(
+                    x.min(content.x + content.width.saturating_sub(current.width)),
+                    y.min(content.y + content.height.saturating_sub(current.height)),
+                    current.width,
+                    current.height,
+                )
+            }
+            FloatingDragMode::Resize => {
+                let max_width = content
+                    .x
+                    .saturating_add(content.width)
+                    .saturating_sub(current.x);
+                let max_height = content
+                    .y
+                    .saturating_add(content.height)
+                    .saturating_sub(current.y);
+                Rect::new(
+                    current.x,
+                    current.y,
+                    clamp_extent(
+                        mouse.column.saturating_sub(current.x) + 1,
+                        FloatingPane::MIN_WIDTH,
+                        max_width,
+                    ),
+                    clamp_extent(
+                        mouse.row.saturating_sub(current.y) + 1,
+                        FloatingPane::MIN_HEIGHT,
+                        max_height,
+                    ),
+                )
+            }
+        };
+        entry.place(rect, content);
+        self.mark_layout();
+        self.dirty = true;
+    }
+
+    /// 按预设重排当前 Tab 的分屏，`delta` 为 +1/-1 时向后/向前换一个。
+    fn cycle_layout(&mut self, delta: isize) {
+        let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
+            return;
+        };
+        let panes = tab.tree.panes();
+        if panes.len() < 2 {
+            self.note = "布局预设需要至少两个分屏 Pane".to_string();
+            self.dirty = true;
+            return;
+        }
+        let count = crate::layout::preset::NAMES.len() as isize;
+        let index = match tab.layout {
+            Some(index) => (index as isize + delta).rem_euclid(count) as usize,
+            None if delta >= 0 => 0,
+            None => (count - 1) as usize,
+        };
+        tab.tree = crate::layout::preset::build(index, &panes);
+        tab.layout = Some(index);
+        self.mark_layout();
+        self.note = format!("layout · {}", crate::layout::preset::NAMES[index]);
+        self.dirty = true;
+    }
+
+    /// 焦点 Pane 在分屏与浮动层之间切换。
+    fn toggle_float(&mut self) {
+        let pane = self.focused();
+        let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
+            return;
+        };
+        if tab.floating_of(pane).is_some() {
+            tab.unfloat(pane);
+            self.note = "浮动 Pane 回到分屏".to_string();
+        } else if tab.float(pane) {
+            self.note = "Pane 浮起：拖标题行移动，拖右下角改尺寸".to_string();
+        } else {
+            self.note = "分屏里只剩一个 Pane，没有可让出的空间".to_string();
+            self.dirty = true;
+            return;
+        }
+        self.floating_hidden = false;
+        self.mark_layout();
+        self.dirty = true;
+    }
+
+    fn toggle_float_pin(&mut self) {
+        let pane = self.focused();
+        let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
+            return;
+        };
+        let Some(entry) = tab.floating.iter_mut().find(|entry| entry.pane == pane) else {
+            self.note = "这个 Pane 不在浮动层里".to_string();
+            self.dirty = true;
+            return;
+        };
+        entry.pinned = !entry.pinned;
+        self.note = if entry.pinned {
+            "浮动 Pane 已 pin".to_string()
+        } else {
+            "浮动 Pane 取消 pin".to_string()
+        };
+        self.mark_layout();
+        self.dirty = true;
+    }
+
+    fn toggle_floating_hidden(&mut self) {
+        let has_floating = self
+            .workspace()
+            .and_then(Workspace::tab)
+            .is_some_and(|tab| !tab.floating.is_empty());
+        if !has_floating {
+            self.note = "没有浮动 Pane".to_string();
+            self.dirty = true;
+            return;
+        }
+        self.floating_hidden = !self.floating_hidden;
+        self.note = if self.floating_hidden {
+            "浮动层收起".to_string()
+        } else {
+            "浮动层展开".to_string()
+        };
+        self.dirty = true;
+    }
+
+    /// 把当前 Tab 的所有 Pane 收成一个 Stack，焦点那个展开。
+    fn stack_tab_panes(&mut self) {
+        let focus = self.focused();
+        let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
+            return;
+        };
+        let panes = tab.tree.panes();
+        if panes.len() < 2 {
+            self.note = "stack 需要至少两个 pane".to_string();
+            self.dirty = true;
+            return;
+        }
+        let active = panes.iter().position(|pane| pane.0 == focus).unwrap_or(0);
+        tab.tree = SplitNode::stack(panes.clone(), active);
+        self.zoom = false;
+        self.mark_layout();
+        self.note = format!("stacked {} panes · prefix+方向切换", panes.len());
+        self.dirty = true;
+    }
+
     fn cycle_pane(&mut self, delta: isize) {
         let Some(tab) = self.tab() else {
             return;
         };
-        let panes = tab.tree.panes();
+        let panes = tab.panes();
         if panes.len() < 2 {
             return;
         }
@@ -3092,7 +3411,9 @@ impl App {
         });
         if let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) {
             tab.focus = pane;
+            tab.raise_floating(pane);
         }
+        self.reveal_floating(pane);
         self.send(Command::Focus {
             pane,
             focused: true,
@@ -3123,14 +3444,30 @@ impl App {
             state.active = tab;
             if let Some(tab) = state.tab_mut() {
                 tab.focus = pane;
+                tab.raise_floating(pane);
             }
         }
+        self.reveal_floating(pane);
         self.send(Command::Focus {
             pane,
             focused: true,
         });
         self.mark_seen(pane);
         self.dirty = true;
+    }
+
+    /// 焦点落到一个收起的浮动 Pane 上时，把浮动层重新展开。
+    fn reveal_floating(&mut self, pane: u32) {
+        if !self.floating_hidden {
+            return;
+        }
+        let floating = self
+            .workspace()
+            .and_then(Workspace::tab)
+            .is_some_and(|tab| tab.floating_of(pane).is_some());
+        if floating {
+            self.floating_hidden = false;
+        }
     }
 
     fn locate(&self, pane: u32) -> Option<(usize, usize)> {
@@ -3187,7 +3524,7 @@ impl App {
             let Some(tab) = self.tab() else {
                 return;
             };
-            tab.tree.panes()
+            tab.panes()
         };
         if tab_panes.len() <= 1 {
             if self.config.confirm_close {
@@ -3206,15 +3543,22 @@ impl App {
             let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
                 return;
             };
-            let tree = tab.tree.clone();
-            match tree.remove_pane(PaneId(pane)) {
-                Some(tree) => {
-                    tab.tree = tree;
-                    let panes = tab.tree.panes();
-                    tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
-                    Some(tab.focus)
+            if let Some(index) = tab.floating.iter().position(|entry| entry.pane == pane) {
+                tab.floating.remove(index);
+                let panes = tab.tree.panes();
+                tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
+                Some(tab.focus)
+            } else {
+                let tree = tab.tree.clone();
+                match tree.remove_pane(PaneId(pane)) {
+                    Some(tree) => {
+                        tab.tree = tree;
+                        let panes = tab.tree.panes();
+                        tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
+                        Some(tab.focus)
+                    }
+                    None => tab.promote_floating().then_some(tab.focus),
                 }
-                None => None,
             }
         };
         if let Some(next) = remaining {
@@ -3399,20 +3743,34 @@ impl App {
         }
         let target_id = workspace.tabs[target_index].id;
         let previous = workspace.tab().map(|tab| tab.focus).unwrap_or_default();
-        let tree = std::mem::replace(
-            &mut self.workspaces[workspace_index].tabs[source_index].tree,
-            SplitNode::Leaf(PaneId(pane)),
-        );
-        let remaining = tree.remove_pane(PaneId(pane));
-        match remaining {
-            Some(tree) => {
-                let tab = &mut self.workspaces[workspace_index].tabs[source_index];
-                let panes = tree.panes();
-                tab.tree = tree;
-                tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
-            }
-            None => {
-                self.workspaces[workspace_index].tabs.remove(source_index);
+        let floating = self.workspaces[workspace_index].tabs[source_index]
+            .floating
+            .iter()
+            .position(|entry| entry.pane == pane);
+        if let Some(index) = floating {
+            let tab = &mut self.workspaces[workspace_index].tabs[source_index];
+            tab.floating.remove(index);
+            let panes = tab.tree.panes();
+            tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
+        } else {
+            let tree = std::mem::replace(
+                &mut self.workspaces[workspace_index].tabs[source_index].tree,
+                SplitNode::Leaf(PaneId(pane)),
+            );
+            let remaining = tree.remove_pane(PaneId(pane));
+            match remaining {
+                Some(tree) => {
+                    let tab = &mut self.workspaces[workspace_index].tabs[source_index];
+                    let panes = tree.panes();
+                    tab.tree = tree;
+                    tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
+                }
+                None => {
+                    let tab = &mut self.workspaces[workspace_index].tabs[source_index];
+                    if !tab.promote_floating() {
+                        self.workspaces[workspace_index].tabs.remove(source_index);
+                    }
+                }
             }
         }
         // 源 tab 可能已经消失，按 id 重新定位目标。
@@ -3433,7 +3791,19 @@ impl App {
         };
         let workspace = &mut self.workspaces[workspace_index];
         let tab = &mut workspace.tabs[target_index];
-        let focus = tab.focus;
+        let focus = tab
+            .tree
+            .panes()
+            .iter()
+            .find(|id| id.0 == tab.focus)
+            .copied()
+            .or_else(|| tab.tree.panes().last().copied())
+            .map(|id| id.0);
+        let Some(focus) = focus else {
+            self.note = "no room in the target tab".to_string();
+            self.dirty = true;
+            return;
+        };
         if !tab.tree.split_pane(PaneId(focus), axis, PaneId(pane), 0.5) {
             self.note = "no room in the target tab".to_string();
             self.dirty = true;
@@ -3464,20 +3834,33 @@ impl App {
         let Some(source_index) = workspace.tab_of(pane) else {
             return;
         };
-        let tree = std::mem::replace(
-            &mut self.workspaces[workspace_index].tabs[source_index].tree,
-            SplitNode::Leaf(PaneId(pane)),
-        );
-        let remaining = tree.remove_pane(PaneId(pane));
-        match remaining {
-            Some(tree) => {
-                let tab = &mut self.workspaces[workspace_index].tabs[source_index];
-                let panes = tree.panes();
-                tab.tree = tree;
-                tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
-            }
-            None => {
-                self.workspaces[workspace_index].tabs.remove(source_index);
+        let floating = self.workspaces[workspace_index].tabs[source_index]
+            .floating
+            .iter()
+            .position(|entry| entry.pane == pane);
+        if let Some(index) = floating {
+            self.workspaces[workspace_index].tabs[source_index]
+                .floating
+                .remove(index);
+        } else {
+            let tree = std::mem::replace(
+                &mut self.workspaces[workspace_index].tabs[source_index].tree,
+                SplitNode::Leaf(PaneId(pane)),
+            );
+            let remaining = tree.remove_pane(PaneId(pane));
+            match remaining {
+                Some(tree) => {
+                    let tab = &mut self.workspaces[workspace_index].tabs[source_index];
+                    let panes = tree.panes();
+                    tab.tree = tree;
+                    tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
+                }
+                None => {
+                    let tab = &mut self.workspaces[workspace_index].tabs[source_index];
+                    if !tab.promote_floating() {
+                        self.workspaces[workspace_index].tabs.remove(source_index);
+                    }
+                }
             }
         }
         let id = self.alloc_tab();
@@ -4421,6 +4804,8 @@ impl App {
                             label: tab.label.clone(),
                             focus: tab.focus,
                             tree: SavedNode::from(&tab.tree),
+                            floating: tab.floating.clone(),
+                            layout: tab.layout,
                         })
                         .collect(),
                 })
@@ -4457,6 +4842,16 @@ impl App {
                 }
                 let tree: SplitNode = (&node).into();
                 let tab_id = self.alloc_tab();
+                let mut floating = Vec::with_capacity(saved_tab.floating.len());
+                for entry in &saved_tab.floating {
+                    let fresh = counter;
+                    counter += 1;
+                    mapping.insert(entry.pane, fresh);
+                    floating.push(FloatingPane {
+                        pane: fresh,
+                        ..entry.clone()
+                    });
+                }
                 let focus = mapping
                     .get(&saved_tab.focus)
                     .copied()
@@ -4467,8 +4862,15 @@ impl App {
                     label: saved_tab.label.clone(),
                     tree,
                     focus,
+                    floating,
+                    layout: saved_tab.layout,
                 });
-                for original in saved_tab.tree.panes() {
+                for original in saved_tab
+                    .tree
+                    .panes()
+                    .into_iter()
+                    .chain(saved_tab.floating.iter().map(|entry| entry.pane))
+                {
                     let Some(fresh) = mapping.get(&original).copied() else {
                         continue;
                     };
@@ -4982,6 +5384,7 @@ fn borders_for(
     let mut borders = match mode {
         PaneBorders::Off => Borders::NONE,
         PaneBorders::Always => Borders::ALL,
+        PaneBorders::Titles => Borders::TOP,
         PaneBorders::Auto => {
             if leaves.len() > 1 {
                 Borders::ALL
@@ -5014,7 +5417,7 @@ fn borders_for(
         if outer.x == left {
             borders.remove(Borders::LEFT);
         }
-        if outer.y == top {
+        if outer.y == top && mode != PaneBorders::Titles {
             borders.remove(Borders::TOP);
         }
         if outer.x + outer.width == right {
@@ -5042,7 +5445,7 @@ fn borders_for(
             }
         }
         if horizontal_overlap {
-            if other.y + other.height == outer.y {
+            if other.y + other.height == outer.y && mode != PaneBorders::Titles {
                 borders.remove(Borders::TOP);
             }
             if other.y == outer.y + outer.height {
@@ -5051,6 +5454,24 @@ fn borders_for(
         }
     }
     borders
+}
+
+/// 浮动 Pane 上按下鼠标时的操作：右下角改尺寸，标题行移动，其余交给拖选。
+fn grab_zone(outer: Rect, column: u16, row: u16) -> Option<FloatingDragMode> {
+    let right = outer.x + outer.width.saturating_sub(1);
+    let bottom = outer.y + outer.height.saturating_sub(1);
+    if column == right && row == bottom {
+        return Some(FloatingDragMode::Resize);
+    }
+    (row == outer.y).then_some(FloatingDragMode::Move)
+}
+
+/// 把拖拽得到的长宽夹进 `[min, max]`；`max` 比 `min` 还小时以 `max` 为准。
+fn clamp_extent(value: u16, min: u16, max: u16) -> u16 {
+    if max <= min {
+        return max;
+    }
+    value.clamp(min, max)
 }
 
 fn inner_rect(outer: Rect, borders: ratatui::widgets::Borders) -> Rect {
@@ -5173,6 +5594,35 @@ mod tests {
             borders_for(leaves[0].1, &leaves, PaneBorders::Always, true, true),
             Borders::ALL
         );
+    }
+
+    #[test]
+    fn titles_mode_keeps_one_top_line_per_pane() {
+        use ratatui::widgets::Borders;
+        let leaves = vec![
+            (PaneId(1), Rect::new(0, 0, 10, 10)),
+            (PaneId(2), Rect::new(0, 10, 10, 10)),
+        ];
+        // 无 gap 时下方面具靠上的边会被去掉，标题行不能跟着丢。
+        for (_, rect) in &leaves {
+            assert_eq!(
+                borders_for(*rect, &leaves, PaneBorders::Titles, false, true),
+                Borders::TOP
+            );
+        }
+        // 顶部 Pane 在 `pane_outer_borders = false` 下仍然保留标题。
+        assert_eq!(
+            borders_for(leaves[0].1, &leaves, PaneBorders::Titles, true, false),
+            Borders::TOP
+        );
+    }
+
+    #[test]
+    fn floating_grab_covers_title_row_and_corner() {
+        let outer = Rect::new(20, 5, 40, 12);
+        assert_eq!(grab_zone(outer, 30, 5), Some(FloatingDragMode::Move));
+        assert_eq!(grab_zone(outer, 59, 16), Some(FloatingDragMode::Resize));
+        assert_eq!(grab_zone(outer, 30, 10), None);
     }
 
     #[test]
