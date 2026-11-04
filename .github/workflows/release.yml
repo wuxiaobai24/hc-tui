@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      macos:
+        description: 同时构建 macOS 产物（aarch64 / x86_64）
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -52,6 +57,7 @@ jobs:
 
   macos:
     name: macOS (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -96,6 +102,7 @@ jobs:
   publish:
     name: publish
     needs: [linux-musl, macos]
+    if: ${{ !cancelled() && needs.linux-musl.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

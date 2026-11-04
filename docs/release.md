@@ -40,9 +40,9 @@ git tag -a v<version> -m "hc-tui v<version>"
 git push origin main --tags
 ```
 
-- [ ] 推送标签后 `.github/workflows/release.yml` 三平台构建成功。
-- [ ] GitHub Release 资产齐全：Linux musl、macOS aarch64、macOS x86_64，
-      每个都有对应的 `.sha256`。
+- [ ] 推送标签后 `.github/workflows/release.yml` 的 Linux musl 构建成功。
+- [ ] GitHub Release 资产齐全：Linux musl 及其 `.sha256`。
+      需要 macOS 产物时手动触发该工作流并勾选 `macos`，两个 target 各自也要有 `.sha256`。
 - [ ] Release 正文取自 `CHANGELOG.md`。
 
 ## 5. 发布后

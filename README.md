@@ -219,7 +219,7 @@ Copy Mode：`h j k l` 移动，`w`/`b` 按词，`0`/`$` 行首行尾，`g`/`G` �
 
 - 插件系统（herdr 自有 API 与运行沙箱）。
 - Agent 会话续接（依赖各 Agent 的 `integration install` 钩子与它自己记录的 session 引用）。
-- 发行：`just release-musl` 与 `just dist` 已就绪，CI 有 musl 任务；macOS 产物需要在 macOS runner 上构建。
+- 发行：`just release-musl` 与 `just dist` 已就绪，CI 有 musl 任务；macOS 产物只在手动触发并勾选 `macos` 时构建。
 
 **暂缓的具体理由**
 
@@ -251,8 +251,8 @@ sha256sum -c hc-tui-*.tar.gz.sha256
 tar -xzf hc-tui-*.tar.gz && ./hc-tui --version
 ```
 
-macOS（aarch64 / x86_64）由 CI 在 macOS runner 上构建，触发方式是推送 `v*` 标签：
-`.github/workflows/release.yml` 会构建三平台产物并创建 GitHub Release。
+macOS（aarch64 / x86_64）默认不构建。需要时在 Actions 页手动触发 `release` 工作流并勾选
+`macos` 输入，产物会一起进同一个 GitHub Release。
 发布前的最低检查清单见 [docs/release.md](docs/release.md)。
 
 运行时只需要 `hc`（>= 0.1.17）在 `PATH` 里；Zig 只在从源码构建时需要。
