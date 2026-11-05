@@ -30,6 +30,7 @@
 | serde / serde_json | MIT / Apache-2.0 |
 | tracing / tracing-subscriber | MIT |
 | thiserror | MIT / Apache-2.0 |
+| unicode-width | MIT / Apache-2.0 |
 | base64 | MIT / Apache-2.0 |
 | png | MIT / Apache-2.0 |
 | libc | MIT / Apache-2.0 |

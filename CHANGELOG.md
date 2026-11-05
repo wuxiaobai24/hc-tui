@@ -1,5 +1,27 @@
 # 变更记录
 
+## 0.3.0 — 2026-11-05
+
+### Chat 视图
+
+- 新增 `chat` 模块：跟随 pi 的会话 JSONL（`~/.pi/agent/sessions/--<cwd>--/*.jsonl`），
+  沿 `parentId` 只走当前叶子，增量读取、文件重写时整体重读、`/new` 换文件时自动跟过去。
+- `ui::chat` 把会话渲染成一列：正文按当前宽度重折（宽字符算 2 列）、
+  思考内容折成两行、工具调用收成一行并可展开、内容不足一屏时贴底。
+- `prefix+shift+a` 打开/关闭（手机 `switch` 面板里是 `chat 视图`）；
+  手机上额外有 `发送 / 中断 / 命令 / 终端` 动作条，点击工具卡展开结果。
+- 输入行走 Pane 的 attach 流（文本 + 回车）发回同一个终端，pi 自己的权限、
+  模型、扩展与上下文照旧生效；`Ctrl+C` 中断、`Ctrl+N` `/new`、`Ctrl+Y` 复制最后回复、
+  `Ctrl+O` 退回终端、`Ctrl+U` 清空输入、`Ctrl+E` 回到底部，`↑`/`↓` 选块或翻输入历史，
+  `PgUp`/`PgDn` 翻页。
+- `chat::commands`：输入 `/` 打开命令面板，内置斜杠命令加上 `~/.pi/agent/prompts`
+  里的模板与标准位置发现的技能；标为需要浮层的命令（设置、会话选择器、登录等）
+  采纳后先关掉 Chat 再发，由终端显示。
+- `chat::hook`：命令面板里的 `安装会话映射 hook`（本地动作）往
+  `<agent-dir>/extensions/` 写一个 pi 扩展，由它在 `session_start` / `agent_start`
+  把会话文件路径报到 `hc label <t> session=<path>`；hc-tui 读 `labels.session`
+  得到确定映射，读不到时退回「目录里最新文件」并在顶栏标 `· 推断`。
+
 ## 0.2.0 — 2026-11-05
 
 ### herdr 体验对齐

@@ -171,6 +171,8 @@ pub struct Pane {
     pub foreground: Option<String>,
     /// 前台程序的工作目录，自定义命令沿用。
     pub cwd: Option<String>,
+    /// agent 自报的会话文件路径（`labels.session`），Chat 视图首选它。
+    pub agent_session: Option<String>,
     pub agent: Agent,
     /// 命令退出后自动移除视图（`type = "pane"` 与 popup）。
     pub transient: bool,
@@ -189,6 +191,7 @@ impl Pane {
             title: String::new(),
             foreground: None,
             cwd: None,
+            agent_session: None,
             agent: Agent::default(),
             transient: false,
             launch: None,

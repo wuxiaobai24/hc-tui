@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "hc-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -231,6 +231,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

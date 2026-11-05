@@ -8,6 +8,7 @@
 //! - [`tui`]：外层终端的进入与恢复
 
 pub mod app;
+pub mod chat;
 pub mod clipboard;
 pub mod config;
 pub mod copy;

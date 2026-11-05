@@ -18,6 +18,8 @@ use crossterm::event::{
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
 
+use crate::chat::commands::{Kind, Local};
+use crate::chat::{hook, Chat, ChatAction};
 use crate::clipboard;
 use crate::config::{AgentSort, CommandKind, Config, Delivery, PaneBorders, Span};
 use crate::copy::CopyMode;
@@ -284,6 +286,7 @@ pub enum MobileAction {
     ClosePane,
     CopyMode,
     NextAgent,
+    Chat,
     Detach,
 }
 
@@ -324,6 +327,8 @@ pub struct App {
     pub workspace_mode: bool,
     pub prompt: Option<Prompt>,
     pub copy: Option<CopyMode>,
+    /// 打开的 Chat 视图；覆盖内容区，但 Pane 照常 attach。
+    pub chat: Option<Chat>,
     pub drag: Option<Drag>,
     pub toast: Option<Toast>,
     pub popup: Option<PopupPane>,
@@ -430,6 +435,7 @@ impl App {
             workspace_mode: false,
             prompt: None,
             copy: None,
+            chat: None,
             drag: None,
             toast: None,
             popup: None,
@@ -658,6 +664,31 @@ impl App {
             self.note_seen.clear();
             self.note_until = None;
             self.dirty = true;
+        }
+        if self.chat.is_some() {
+            let label = self
+                .chat
+                .as_ref()
+                .and_then(|chat| self.panes.get(&chat.pane))
+                .and_then(|pane| pane.agent_session.clone());
+            if let (Some(label), Some(chat)) = (label, self.chat.as_mut()) {
+                if !chat.exact {
+                    chat.adopt(label.into());
+                    self.dirty = true;
+                }
+            }
+            let changed = self.chat.as_mut().is_some_and(Chat::poll);
+            if changed {
+                self.dirty = true;
+            }
+            let stale = self
+                .chat
+                .as_ref()
+                .is_some_and(|chat| !self.panes.contains_key(&chat.pane));
+            if stale {
+                self.chat = None;
+                self.dirty = true;
+            }
         }
         self.refresh_tab_commands(now);
         if self.seen_dirty
@@ -976,6 +1007,10 @@ impl App {
             self.on_copy_key(key);
             return;
         }
+        if self.chat.is_some() {
+            self.on_chat_key(key);
+            return;
+        }
         if self.switcher && key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
             self.close_switcher();
             return;
@@ -1045,6 +1080,11 @@ impl App {
         if self.copy.is_some() {
             return;
         }
+        if let Some(chat) = self.chat.as_mut() {
+            chat.insert(&text);
+            self.dirty = true;
+            return;
+        }
         let pane_id = self.input_pane();
         let Some(pane) = self.panes.get(&pane_id) else {
             return;
@@ -1060,6 +1100,9 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.chat.is_some() && self.on_chat_mouse(mouse) {
+            return;
+        }
         if self.mobile && self.on_mobile_mouse(mouse) {
             return;
         }
@@ -1371,8 +1414,288 @@ impl App {
             MobileAction::ClosePane => self.close_focused_pane(),
             MobileAction::CopyMode => self.enter_copy_mode(),
             MobileAction::NextAgent => self.focus_next_attention(),
+            MobileAction::Chat => self.toggle_chat(),
             MobileAction::Detach => self.quit = true,
         }
+    }
+
+    /// 打开/关闭 Chat 视图。打开时跟随当前输入 Pane 的 cwd 找 pi 会话。
+    fn toggle_chat(&mut self) {
+        if self.chat.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        let pane = self.input_pane();
+        let Some(state) = self.panes.get(&pane) else {
+            self.note = "chat: 没有可用的 pane".to_string();
+            return;
+        };
+        if !state.is_live() {
+            self.note = "chat: pane 还没连上".to_string();
+            return;
+        }
+        let cwd = state
+            .cwd
+            .clone()
+            .or_else(|| self.workspace_cwd(self.active_ws));
+        let session = state.agent_session.clone();
+        let chat = Chat::open(pane, cwd.as_deref(), session.as_deref());
+        self.note = chat.note.clone();
+        self.chat = Some(chat);
+        self.dirty = true;
+    }
+
+    /// 把一段文本当作输入发给 Chat 的 Pane（末尾补回车）。
+    fn send_chat_text(&mut self, text: &str) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let pane = chat.pane;
+        if !self.panes.get(&pane).is_some_and(Pane::is_live) {
+            self.note = "chat: pane 已结束".to_string();
+            return;
+        }
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(b'\r');
+        self.send(Command::Input { pane, bytes });
+        self.dirty = true;
+    }
+
+    /// 发送裸字节（中断、按键）。
+    fn send_chat_keys(&mut self, bytes: Vec<u8>) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let pane = chat.pane;
+        if !self.panes.get(&pane).is_some_and(Pane::is_live) {
+            return;
+        }
+        self.send(Command::Input { pane, bytes });
+        self.dirty = true;
+    }
+
+    /// 发送输入行内容。
+    fn send_chat_input(&mut self) {
+        let Some(text) = self.chat.as_mut().and_then(Chat::take_input) else {
+            self.dirty = true;
+            return;
+        };
+        self.send_chat_text(&text);
+    }
+
+    /// 采纳命令面板当前项：本地动作自己执行，普通命令发送，需要浮层的切回终端。
+    fn accept_chat_command(&mut self) {
+        let command = self.chat.as_ref().and_then(Chat::palette_selected);
+        let Some(command) = command else {
+            return;
+        };
+        if let Some(chat) = self.chat.as_mut() {
+            chat.clear_input();
+        }
+        match command.kind {
+            Kind::Local(local) => self.run_local_command(local),
+            Kind::Terminal => {
+                self.send_chat_text(&command.name);
+                self.chat = None;
+            }
+            Kind::Prompt => self.send_chat_text(&command.name),
+        }
+    }
+
+    /// hc-tui 自己的命令面板动作。
+    fn run_local_command(&mut self, local: Local) {
+        match local {
+            Local::InstallHook => match hook::install() {
+                Ok(path) => {
+                    self.note = format!("已写入 {}，发送 /reload 生效", path.display());
+                    self.send_chat_text("/reload");
+                }
+                Err(error) => self.note = format!("安装 hook 失败：{error}"),
+            },
+            Local::RemoveHook => match hook::remove() {
+                Ok(true) => {
+                    self.note = "已删除会话映射 hook".to_string();
+                    self.send_chat_text("/reload");
+                }
+                Ok(false) => self.note = "没有可删除的 hook".to_string(),
+                Err(error) => self.note = format!("删除 hook 失败：{error}"),
+            },
+        }
+        if let Some(chat) = self.chat.as_mut() {
+            chat.close_palette();
+        }
+        self.dirty = true;
+    }
+
+    fn run_chat_action(&mut self, action: ChatAction) {
+        match action {
+            ChatAction::Send => self.send_chat_input(),
+            ChatAction::Interrupt => {
+                self.send_chat_keys(vec![3]);
+                self.note = "chat: 已发送中断".to_string();
+            }
+            ChatAction::Palette => {
+                if let Some(chat) = self.chat.as_mut() {
+                    // 已有文本当作过滤词，不丢内容。
+                    if !chat.input.starts_with('/') {
+                        chat.cursor = 0;
+                        chat.insert("/");
+                    }
+                    chat.cursor = chat.input.len();
+                    chat.open_palette();
+                }
+                self.dirty = true;
+            }
+            ChatAction::Terminal => {
+                self.chat = None;
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn on_chat_key(&mut self, key: KeyEvent) {
+        let Some(chat) = self.chat.as_mut() else {
+            return;
+        };
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                if chat.palette.is_some() {
+                    chat.close_palette();
+                } else {
+                    self.chat = None;
+                }
+            }
+            KeyCode::Enter => {
+                if chat.palette.is_some() {
+                    self.accept_chat_command();
+                } else if chat.input.is_empty() {
+                    if let Some(index) = chat.selected_tool() {
+                        chat.toggle_expanded(index);
+                    } else {
+                        self.send_chat_input();
+                    }
+                } else {
+                    self.send_chat_input();
+                }
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.send_chat_keys(vec![3]);
+                self.note = "chat: 已发送中断".to_string();
+            }
+            KeyCode::Char('n') if ctrl => self.send_chat_text("/new"),
+            KeyCode::Char('p') if ctrl => self.run_chat_action(ChatAction::Palette),
+            KeyCode::Char('o') if ctrl => self.run_chat_action(ChatAction::Terminal),
+            KeyCode::Char('y') if ctrl => {
+                let reply = chat.last_reply().map(str::to_string);
+                match reply {
+                    Some(text) => {
+                        let note = clipboard::copy(&text);
+                        self.note = format!("chat: {note}");
+                    }
+                    None => self.note = "chat: 还没有回复".to_string(),
+                }
+            }
+            KeyCode::Char('u') if ctrl => chat.clear_input(),
+            KeyCode::Char('e') if ctrl => chat.scroll = 0,
+            KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                chat.insert(&ch.to_string());
+            }
+            KeyCode::Backspace => chat.backspace(),
+            KeyCode::Delete => chat.delete(),
+            KeyCode::Left => chat.move_cursor(-1),
+            KeyCode::Right => chat.move_cursor(1),
+            KeyCode::Home => chat.cursor = 0,
+            KeyCode::End => chat.cursor = chat.input.len(),
+            KeyCode::Up => {
+                if chat.palette.is_some() {
+                    chat.palette_move(-1);
+                } else if chat.input.is_empty() {
+                    chat.select(-1);
+                    chat.reveal_selected();
+                } else {
+                    chat.recall(-1);
+                }
+            }
+            KeyCode::Down => {
+                if chat.palette.is_some() {
+                    chat.palette_move(1);
+                } else if chat.input.is_empty() {
+                    chat.select(1);
+                    chat.reveal_selected();
+                } else {
+                    chat.recall(1);
+                }
+            }
+            KeyCode::PageUp => {
+                chat.scroll = chat.scroll.saturating_add(chat.view_height.max(1) / 2)
+            }
+            KeyCode::PageDown => {
+                chat.scroll = chat.scroll.saturating_sub(chat.view_height.max(1) / 2)
+            }
+            KeyCode::Tab => {
+                if let Some(command) = chat.palette_selected() {
+                    chat.clear_input();
+                    chat.insert(&command.name);
+                    chat.close_palette();
+                }
+            }
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Chat 打开时的鼠标：滚轮翻消息、点工具块展开、点动作条。
+    fn on_chat_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.mobile
+            && (contains(self.mobile_switch, mouse.column, mouse.row)
+                || contains(self.mobile_close, mouse.column, mouse.row))
+        {
+            return false;
+        }
+        // 点内容区之外（侧栏、Tab 栏）先退回终端视图，再按常规处理这次点击。
+        if !self.mobile
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !contains(self.content, mouse.column, mouse.row)
+        {
+            self.chat = None;
+            self.dirty = true;
+            return false;
+        }
+        let Some(chat) = self.chat.as_mut() else {
+            return false;
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => chat.scroll = chat.scroll.saturating_add(1),
+            MouseEventKind::ScrollDown => chat.scroll = chat.scroll.saturating_sub(1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let action = chat
+                    .actions
+                    .iter()
+                    .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                    .map(|(action, _)| *action);
+                match action {
+                    Some(action) => self.run_chat_action(action),
+                    None => {
+                        let block = chat
+                            .hits
+                            .iter()
+                            .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                            .map(|(block, _)| *block);
+                        if let Some(block) = block {
+                            chat.toggle_expanded(block);
+                            chat.selected = Some(block);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        true
     }
 
     fn on_prefix_key(&mut self, key: KeyEvent) {
@@ -1639,6 +1962,10 @@ impl App {
         }
         if keys.next_agent.matches_prefix(&key) {
             self.focus_next_attention();
+            return;
+        }
+        if keys.chat.matches_prefix(&key) {
+            self.toggle_chat();
             return;
         }
         if keys.send_text.matches_prefix(&key) {
@@ -2115,6 +2442,7 @@ impl App {
                 "scroll_bottom" => "scroll to bottom",
                 "copy_mode" => "copy mode",
                 "next_agent" => "next agent needing attention",
+                "chat" => "chat view of the agent session",
                 "send_text" => "send text to pane",
                 "interrupt" => "interrupt turn",
                 "toggle_keep" => "toggle keep",
@@ -2194,6 +2522,7 @@ impl App {
                 "agents and terminals",
                 &[
                     "next_agent",
+                    "chat",
                     "send_text",
                     "send_keys",
                     "wait_output",
@@ -4983,15 +5312,20 @@ impl App {
                     .as_deref()
                     .and_then(|terminal| self.pane_by_terminal(terminal))
                 {
-                    let name = event
-                        .data
-                        .get("labels")
-                        .and_then(|labels| labels.get("hctui"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .filter(|name| !name.is_empty());
+                    let label = |key: &str| {
+                        event
+                            .data
+                            .get("labels")
+                            .and_then(|labels| labels.get(key))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .filter(|value| !value.is_empty())
+                    };
+                    let name = label("hctui");
+                    let session = label("session");
                     if let Some(state) = self.panes.get_mut(&pane) {
                         state.name = name;
+                        state.agent_session = session;
                     }
                     self.dirty = true;
                 }
@@ -5322,7 +5656,7 @@ fn short(text: &str) -> String {
     out
 }
 
-fn prev_char_boundary(text: &str, index: usize) -> usize {
+pub(crate) fn prev_char_boundary(text: &str, index: usize) -> usize {
     text[..index]
         .char_indices()
         .next_back()
@@ -5330,7 +5664,7 @@ fn prev_char_boundary(text: &str, index: usize) -> usize {
         .unwrap_or(0)
 }
 
-fn next_char_boundary(text: &str, index: usize) -> usize {
+pub(crate) fn next_char_boundary(text: &str, index: usize) -> usize {
     text[index..]
         .char_indices()
         .nth(1)

@@ -195,9 +195,10 @@ impl TerminalView {
             None => event.clear_button(),
         }
         event.set_mods(input::to_mods(mouse.modifiers));
+        // 事件坐标是 surface 像素；编码器按 cell 尺寸换算回单元格。
         event.set_position(
-            mouse.column.saturating_sub(origin.0) as f32,
-            mouse.row.saturating_sub(origin.1) as f32,
+            f32::from(mouse.column.saturating_sub(origin.0)) * CELL_WIDTH_PX as f32,
+            f32::from(mouse.row.saturating_sub(origin.1)) * CELL_HEIGHT_PX as f32,
         );
         self.mouse_encoder.set_from_terminal(&self.terminal);
         self.mouse_encoder.set_size(
@@ -579,6 +580,23 @@ mod tests {
     fn encoded(view: &mut TerminalView, code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
         view.encode_key(KeyEvent::new(code, modifiers))
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn mouse_coordinates_are_cells_not_pixels() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut view = TerminalView::new(80, 24, 1 << 20).unwrap();
+        view.write(b"\x1b[?1000h\x1b[?1006h");
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        let bytes = view.encode_mouse(mouse, (0, 0)).expect("encoded");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("[<0;13;9M"), "{text:?}");
     }
 
     #[test]

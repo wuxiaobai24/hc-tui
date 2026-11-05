@@ -21,6 +21,8 @@ use crate::model::{Badge, PaneState, Slot};
 use crate::term::view::PlacementImage;
 use crate::theme::Theme;
 
+mod chat;
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let theme = app.config.theme.clone();
@@ -131,6 +133,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_pane(frame, app, *slot, &theme);
     }
     render_overlays(frame, app, &theme);
+    if app.chat.is_some() {
+        chat::render(frame, app, body, &theme);
+    }
     if let Some(reader) = &app.reader {
         render_reader(frame, reader, app.content, &theme);
     }
@@ -173,6 +178,10 @@ fn draw_mobile(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     app.reflow(content);
     if app.switcher {
         render_mobile_switcher(frame, app, content, theme);
+        return;
+    }
+    if app.chat.is_some() {
+        chat::render(frame, app, content, theme);
         return;
     }
     let slots = app.slots.clone();
@@ -409,6 +418,7 @@ const MOBILE_ACTIONS: &[(&str, MobileAction)] = &[
     ("关闭当前 pane", MobileAction::ClosePane),
     ("复制模式", MobileAction::CopyMode),
     ("下一个待处理", MobileAction::NextAgent),
+    ("chat 视图", MobileAction::Chat),
     ("退出（detach）", MobileAction::Detach),
 ];
 

@@ -45,6 +45,7 @@ HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach -- --nocapture   # 真实 cor
 | `config` | `~/.config/hc-tui/config.toml`（XDG 优先）的 TOML 子集解析、键位绑定、`--default-config` |
 | `theme` | 12 套内置主题 + `[theme.custom]` 逐 token 覆盖 |
 | `copy` / `clipboard` | Copy Mode 的移动/选区/搜索，OSC 52 + 平台剪贴板工具 |
+| `chat` | pi 会话 JSONL 的跟随与解析、命令面板；Chat 视图渲染在 `ui::chat` |
 | `tui` | raw mode / alt screen / 鼠标 / bracketed paste 的进入与 RAII 恢复 |
 
 测试里有两条防线：`tests/fixtures/core-first-paint.bin`（真实 core 首帧）锁住
@@ -235,6 +236,52 @@ MOVE 或出现提示时才在底部占一行。窗口标题按 `window_title` �
   手机布局下拖选复制不启用，选字走 Copy Mode。
 
 `mobile_width_threshold = 0` 或 `mouse_capture = false` 时保持常规布局（侧栏 + Tab 栏 + 状态栏）。
+
+## Chat 视图
+
+`prefix+shift+a`（手机上在 `switch` 面板里点 `chat 视图`）把当前 Pane 的 pi 会话
+渲染成一列消息：正文按当前宽度重折、思考内容折成两行、工具调用收成一行（`Enter`
+或点击展开结果）。Chat 只是同一份 transcript 的另一种渲染，Pane 的终端照常 attach，
+`Ctrl+O` 随时退回终端，两边不会分叉。
+
+数据直接读 pi 自己写的会话文件 `~/.pi/agent/sessions/--<cwd>--/<时间>_<id>.jsonl`
+（`PI_CODING_AGENT_SESSION_DIR` 可改根目录），沿 `parentId` 只走当前叶子，所以
+`/tree`、`/fork` 之后被放弃的分支不会出现在视图里。`/new`、`/resume` 换了会话文件时
+会自动跟过去。
+
+| 按键 | 作用 |
+|---|---|
+| `Enter` | 发送输入行；输入为空时展开/收起选中的工具卡 |
+| `Ctrl+C` | 给 Pane 发 `Ctrl+C` |
+| `Ctrl+N` | 发送 `/new` |
+| `Ctrl+P` | 命令面板 |
+| `Ctrl+O` | 退回终端视图 |
+| `Ctrl+Y` | 复制最后一条回复 |
+| `Ctrl+U` / `Ctrl+E` | 清空输入 / 回到底部 |
+| `↑` `↓` | 输入为空时在块之间移动；有输入时翻输入历史 |
+| `PgUp` `PgDn` | 翻消息 |
+| `Esc` | 关命令面板，或退出 Chat |
+
+输入行写回 Pane 的 attach 流（文本 + 回车），所以 pi 自己的权限、模型、扩展与项目
+上下文都照原样生效。输入 `/` 打开命令面板：pi 的内置斜杠命令，加上 `~/.pi/agent/prompts`
+里的模板与各标准位置发现的技能；标了 `终端` 的命令（设置、会话选择器、登录等）会先
+关掉 Chat 再发，因为它们的浮层只有终端能画。
+
+### 会话映射
+
+同一目录可能有多个 pi 会话，按「最近写入」挑文件会挑错。hc 不提供 agent 会话的接口，
+所以让 agent 自己报：命令面板里的 `安装会话映射 hook`（标 `本地`）会在
+`<agent-dir>/extensions/hc-tui-session.ts` 写一个 pi 扩展（`<agent-dir>` 默认
+`~/.pi/agent`，可用 `PI_CODING_AGENT_DIR` 改），它每次开轮都把会话文件路径报到
+`hc label <t> session=<path>`。hc-tui 读到这个 label 就用它，顶栏只写会话名。
+
+没装 hook 时按目录里最新的 `.jsonl` 推断，顶栏标 `· 推断`。两者都可用；装了之后
+同一目录多个活跃会话也不会串。删掉扩展就是面板里那条 `移除会话映射 hook`。
+
+手机上除了快捷键，Chat 底部还有一条 `发送 / 中断 / 命令 / 终端` 动作条。
+Agent 处于 `blocked` 或 `error` 时顶栏变红，提示需要回终端处理。
+
+找不到会话文件、或 Pane 的 cwd 对不上时，顶栏写明原因，其它视图不受影响。
 
 每个 Pane attach 的是它自己的终端，因此不同 Pane 的尺寸不会互相抢；
 同一个终端被两个客户端 attach 时才会出现「最后活动者定尺寸」。
