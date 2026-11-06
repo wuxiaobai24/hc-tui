@@ -10,6 +10,24 @@ core 持有程序，TUI 负责界面；远程传输直接复用 core 的 machine
 运行需要 [herdr-core](https://github.com/herdrdev/herdr-core) 的 `hc` 在 PATH 中；
 已验证的协议基线为 core 0.1.18。**发行二进制不需要 Rust 或 Zig。**
 
+一键安装，自动识别 Linux/macOS 和 amd64/arm64，默认安装到 `~/.local/bin`：
+
+```sh
+curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/install.sh | sh
+```
+
+指定版本或安装目录：
+
+```sh
+curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/install.sh | sh -s -- --version 0.4.1 --bin-dir "$HOME/.local/bin"
+```
+
+也可用 `HC_TUI_INSTALL_DIR` 环境变量指定目录，或先下载 [安装脚本](install.sh) 检查后运行。
+脚本下载正式发行包，验证 SHA-256 和版本，成功后原子安装；不会改动现有配置或 core 中的程序。
+
+<details>
+<summary>手动下载发行包</summary>
+
 从 [Releases](https://github.com/wuxiaobai24/hc-tui/releases) 选择平台：
 
 | 平台 | 发行 target |
@@ -35,7 +53,9 @@ hc-tui probe
 hc-tui
 ```
 
-确保 `~/.local/bin` 在 PATH 中。macOS 包独立携带 VT 静态库，仍使用系统库；不是完全静态的 Mach-O。
+</details>
+
+确保 `~/.local/bin` 在 PATH 中（需要时执行 `export PATH="$HOME/.local/bin:$PATH"`）。macOS 包独立携带 VT 静态库，仍使用系统库；不是完全静态的 Mach-O。
 
 ```sh
 hc-tui update --check          # 查询发行版本

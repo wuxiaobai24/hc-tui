@@ -256,3 +256,16 @@ Spaces 与 Agents 分区独立滚动，将鼠标移到相应区域滚动即可�
 `ssh -t box 'hc-tui --session work'` 仍读取 box 上的同一 core/session 文档；直接用 `hc-tui --session work` 则通过该 core 已配置的 machine 链路汇总远端工作区。
 
 远端 Chat 的命令面板只列内置 Pi 命令，不把本机的 prompt/skill 扫描结果冒充远端可用命令。
+
+## 安装与升级
+
+```sh
+curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/install.sh | sh
+hc-tui update --check
+hc-tui update
+```
+
+首次安装自动选择 Linux/macOS、amd64/arm64 的正式发行包，默认写入 `~/.local/bin`。
+可用 `sh -s -- --bin-dir /chosen/bin --version 0.4.1` 指定目录和版本，或设置 `HC_TUI_INSTALL_DIR`。
+安装器和更新器均验证发行包 SHA-256 与可执行版本，使用原子替换；失败时不会覆盖原安装。
+`hc-tui update` 更新当前正在执行的二进制所在位置，重开客户端后生效，core 中的程序和配置保留。

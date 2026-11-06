@@ -13,7 +13,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p dist
 cp "$executable" "$stage/hc-tui"
-cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md README.md "$stage/"
+cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md README.md install.sh "$stage/"
 archive="hc-tui-$version-$target.tar.gz"
 tar -czf "dist/$archive" -C "$stage" .
 if command -v sha256sum >/dev/null 2>&1; then

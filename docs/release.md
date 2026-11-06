@@ -4,6 +4,7 @@
 
 ## 发布前
 
+- 安装脚本变更先运行 `sh -n install.sh` 和 `python3 scripts/test-install.py`；发行包与 Release 均携带脚本。
 - 更新 Cargo.toml / Cargo.lock 版本和 CHANGELOG，tag 必须是 `v<package version>`。
 - 以 Zig 0.16.0 构建当前 vendored VT，四平台 CI 统一固定；不要让使用者自行安装它。
 - `cargo fmt -p hc-tui -- --check`、Clippy、单元测试通过。
@@ -24,7 +25,8 @@
 | macOS Apple Silicon | aarch64-apple-darwin | 原生 --version/default-config |
 
 macOS 的 VT 静态链接，但系统库不是完全静态。四套包都不依赖用户机器上的 Zig。
-统一通过 `scripts/package-release.sh TARGET` 生成 tar.gz 及 `.sha256`，包内含二进制、许可、第三方声明、变更记录和 README。
+统一通过 `scripts/package-release.sh TARGET` 生成 tar.gz 及 `.sha256`，包内含二进制、许可、第三方声明、变更记录、README 和 install.sh。
+Release 另外发布 `install.sh` / `install.sh.sha256`，固定入口为 `releases/latest/download/install.sh`；发布前在 Linux/macOS 跑安装器的隔离回归。
 **四个构建全部成功且八个资产校验完整才发布**，不再因为 Linux 一项成功就发布缺平台的 Release。
 
 推送 `v<version>` tag 触发发布；也可手动选择已存在的 tag 重跑。不移动已经公开发布的 tag。

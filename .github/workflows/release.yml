@@ -101,6 +101,13 @@ jobs:
             test -s "$archive"
             sha256sum -c "$archive.sha256"
           done
+      - name: include one-command installer
+        run: |
+          sh -n install.sh
+          python3 scripts/test-install.py
+          cp install.sh artifacts/install.sh
+          cd artifacts
+          sha256sum install.sh > install.sh.sha256
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}

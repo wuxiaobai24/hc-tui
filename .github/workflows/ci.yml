@@ -9,6 +9,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  installer:
+    name: installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh -n install.sh
+      - run: python3 scripts/test-install.py
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
