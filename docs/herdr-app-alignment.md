@@ -1,4 +1,6 @@
-# herdr-app 对齐契约
+# herdr-app 行为对照
+
+稳定的必须同步清单与本地边界以 [同步契约](sync-contract.md) 为准；本文件是当前实现的行为记录，不能据此扩展为逐个镜像 Desktop 按钮的要求。
 
 基准是 2026-11-06 本机 herdr-app 的 `commands`、`herdr.d.ts`、
 `mods/agents/main.js`、`mods/spaces/main.js`，以及 core 0.1.18 的 schema 和真实记录。
@@ -21,7 +23,8 @@
 ## Agents
 
 仅上报过非空状态的会话进入 Agents，普通 shell 不因打开、命名或置顶进入。
-Space 第二行直接展示所有 Tab/Pane 的数量、待处理数及分支，未选中也可见。
+Space 使用单行名称和彩色首字母标识；待处理数或分支右对齐显示，Tab/Pane 数量保留在详细切换视图。
+机器标题可整组折叠并记住状态；Spaces 与 Agents 分区独立滚动。
 
 
 | 行为 | 实现 |
@@ -100,6 +103,9 @@ TUI 用脚本面板提供扩展。GUI 全局 chrome 树和 TUI Pane 布局不是
 它们属于宿主终端或 GUI 产品。`commands` 是 TUI 可操作能力的准确边界。
 
 ## 图片
+
+- Ctrl+V 检测本机剪贴板 PNG 并经 `terminal.put` 上传；无图片时转发原按键。前缀 Shift+V 可显式触发并显示失败原因。
+- 图片路径回填绑定原始 Pane 和终端身份，上传期间切换或关闭 Pane 不会误贴到其他终端。
 
 - 解析 Kitty PNG/RGB/RGBA 和 Unicode 虚拟 placement，保留源裁剪、透明度、位置和层级。
 - Kitty/Ghostty/Herdr/WezTerm 宿主自动使用原生像素输出；可显式设置

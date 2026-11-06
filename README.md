@@ -1,24 +1,64 @@
 # hc-tui
 
-基于 [herdr-core](https://github.com/herdrdev/herdr-core)（`hc`）的 Rust 原生终端工作台。
-在一个终端里管理工作区、Tab、分屏和编码 Agent，可与 herdr-app 共享多台机器的布局。
+**接 herdr-core、与 herdr-app 共享布局的终端工作台。**
 
-## 安装与启动
+这个仓库是 `wuxiaobai24/hc-tui`，主线是多机工作区、Pi 会话和可靠的终端输入/渲染。
+core 持有程序，TUI 负责界面；远程传输直接复用 core 的 machine 链路。
 
-运行需要 `hc` 在 `PATH` 中；本轮完整契约验收使用 core 0.1.18。
-从源码构建还需要 Rust stable 和 **Zig 0.16.0**，Zig 0.17 不兼容当前 vendored VT。
+## 安装与升级
+
+运行需要 [herdr-core](https://github.com/herdrdev/herdr-core) 的 `hc` 在 PATH 中；
+已验证的协议基线为 core 0.1.18。**发行二进制不需要 Rust 或 Zig。**
+
+从 [Releases](https://github.com/wuxiaobai24/hc-tui/releases) 选择平台：
+
+| 平台 | 发行 target |
+|---|---|
+| Linux amd64，musl 静态 | `x86_64-unknown-linux-musl` |
+| Linux arm64，musl 静态 | `aarch64-unknown-linux-musl` |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+
+例如 Linux amd64：
 
 ```sh
-mise install                   # 按 mise.toml 安装 Zig 0.16.0
-mise exec -- cargo build --release -p hc-tui
-mkdir -p ~/.local/bin
-install -m 755 target/release/hc-tui ~/.local/bin/hc-tui
-hc-tui probe                   # 验证与 core 的连接；未运行的 core 会自动启动
-hc-tui                         # 恢复工作区；没有布局时创建 shell
+version=0.4.0
+target=x86_64-unknown-linux-musl
+archive="hc-tui-$version-$target.tar.gz"
+curl -fLO "https://github.com/wuxiaobai24/hc-tui/releases/download/v$version/$archive"
+curl -fLO "https://github.com/wuxiaobai24/hc-tui/releases/download/v$version/$archive.sha256"
+sha256sum -c "$archive.sha256"  # macOS: shasum -a 256 -c "$archive.sha256"
+mkdir -p hc-tui-unpacked ~/.local/bin
+tar -xzf "$archive" -C hc-tui-unpacked
+install -m 755 hc-tui-unpacked/hc-tui ~/.local/bin/hc-tui
+hc-tui probe
+hc-tui
 ```
 
-确保 `~/.local/bin` 在 `PATH` 中。没有 mise 时安装 Zig 0.16.0，必要时用
-`ZIG=/path/to/zig-0.16.0` 指定编译器。发行包和原子升级见 [开发与部署](docs/development.md)。
+确保 `~/.local/bin` 在 PATH 中。macOS 包独立携带 VT 静态库，仍使用系统库；不是完全静态的 Mach-O。
+
+```sh
+hc-tui update --check          # 查询发行版本
+hc-tui update                  # 下载当前平台的最新正式版，校验后原子替换
+hc-tui update --version 0.4.0   # 指定版本
+hc-tui update --from ./hc-tui-0.4.0-x86_64-unknown-linux-musl.tar.gz
+```
+
+升级使用 curl、tar 及 sha256sum（macOS 为 shasum），本地包也必须有同名 `.sha256`。
+已运行的客户端继续用旧版本，重开后生效。源码构建见文末附录。
+
+## 多机与 Pi
+
+```sh
+ssh box 'hc-tui --session work'    # 在 box 上恢复该 core/session 的同一共享文档
+hc-tui --session work             # 在已配置 hc machine 的 core 上浏览机器与布局
+ssh box 'hc-tui session-hook install'  # 在 Pi 实际运行的机器安装会话映射
+```
+
+Pi 需在 core 管理的终端中启动，让 hook 获得 `HC_TERMINAL_ID`；安装后在 Pi 执行 `/reload`。
+Chat 对 `machine/t7` 使用 core `file.read` 读取 **machine 上** session label 指定的 JSONL。
+没有远端 label 时明确显示“远端会话未映射”，不猜本机同目录会话。本机回退发现会明确标注“本机推断”。
+没有独立的 TUI remote 协议；机器登录、重连和传输由 `hc machine` 管理。
 
 ## 先认识界面
 
@@ -27,8 +67,8 @@ hc-tui                         # 恢复工作区；没有布局时创建 shell
 - **Pane**：一个终端视图或脚本面板。进程由 core 持有，视图由 TUI 管理。
 - **Agent**：上报过状态的终端会话；普通 shell 不会因打开、命名或置顶就成为 Agent。
 
-侧栏 `spaces` 在每个工作区下显示 `2 tabs · 4 panes`，未选中也能看到；有分支时接在后面。
-计数包含该工作区的所有 Tab（含 settled）与 Pane（含浮动和模块）。
+侧栏 `Spaces` 使用单行名称、彩色标识与分支/待处理提示；点击机器标题折叠整组，折叠状态会保留。
+Spaces 与 Agents 分区独立滚动，Tab/Pane 数量保留在详细切换视图。
 `agents` 展示状态、父子关系、分组与共享已读；普通终端从工作区或 Go to 搜索访问。
 
 ## 常用操作
@@ -79,8 +119,8 @@ hc-tui                         # 恢复工作区；没有布局时创建 shell
 | 自动化 | 命令面板、action 快捷键、`commands` / `ls` / `do` 本地控制 |
 
 显式真彩色和程序通过 OSC 指定的颜色由程序控制。Sixel/iTerm 图片协议、GPUI JS
-模块运行时、专门的 worktree 管理、通用 Agent 会话续接尚未实现。pi Chat 读取本机会话文件，
-不能当作任意 Agent 或远端会话的通用聊天协议。英文输入/滚动时的重复字符报告尚未稳定复现，
+模块运行时、专门的 worktree 管理、通用 Agent 会话续接尚未实现。pi Chat 支持本机 JSONL 和 core machine 路由下的远端映射 JSONL，
+不是任意 Agent 的通用聊天协议。英文输入/滚动时的重复字符报告尚未稳定复现，
 本版补充真实后端回放测试并改为整帧同步输出；不将它列为已确认修复。
 
 ## 配置与自动化
@@ -115,3 +155,23 @@ hc-tui do pane.split '{"direction":"right"}' --session work
 
 `plan-v1.0.md`、`plan-v1.1.md`、`review-v1.0.md`、`gap-vs-herdr.md` 是历史资料，
 不作为当前功能清单。许可：Apache-2.0；见 [第三方组件](THIRD-PARTY-NOTICES.md)。
+
+## 项目定位与同名项目
+
+- 本仓库：`wuxiaobai24/hc-tui`。重点是现有 core 多机链路、herdr-app 共享布局和 Pi JSONL 会话；同步边界见 [共享契约](docs/sync-contract.md)。
+- [followcat/hc-tui](https://github.com/followcat/hc-tui)：其 README 将旧 herdr 0.9.5-followcat 的界面、按键与行为一致性作为目标。本仓库按多机/Pi 的实际工作流取舍，不以逐个镜像旧 Desktop 控件为目标。
+- [HerdR Terminal](https://github.com/ChyuWei/herdr-terminal)：`ht` 客户端采用独立的 `herdr-terminal` 文档和自己的屏幕组织。本仓库直接与 herdr-app 的结构文档互通。
+
+代码 diff 审阅通过 `mod.open` / 自定义外部 Pane 接 revdiff 或 Plannotator；不在 TUI 核心实现审阅器。
+输入、渲染与 SSH 延迟可靠性优先于主题扩展和手机界面，详见 [工作主线](docs/priorities.md)。
+
+## 附录：源码构建
+
+贡献代码或维护 VT 时才需要 Rust stable 与 Zig 0.16.0（当前 vendored VT 不支持 0.17）。
+
+```sh
+mise install
+mise exec -- cargo build --release -p hc-tui
+```
+
+模块结构、测试与发行打包见 [开发与部署](docs/development.md)。

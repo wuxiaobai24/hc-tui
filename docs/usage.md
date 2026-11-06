@@ -172,8 +172,10 @@ Kitty / Ghostty / Herdr / WezTerm 宿主自动选原生 Kitty 像素输出；tmu
 不再依赖宿主的另一套调色板。ANSI 16–255 的标准色立方保留，显式 24 位真彩色和程序 OSC
 改色尊重程序；因此自行设置主题的 nvim / Agent 不会被强行统一着色。
 
-前缀 Shift+V 读取本机剪贴板图片，通过 core 上传并把文件路径粘贴给目标程序。
-依赖 wl-paste / xclip / pngpaste 等本机工具，不是把图片二进制直接输进 shell。
+Ctrl+V 在本机剪贴板有 PNG 图片时，通过 core 上传到目标终端所在机器，并将文件路径粘贴给发起上传的 Pane；上传期间切换 Pane 不会改变目标。无图片时 Ctrl+V 仍交给终端程序。
+也可用前缀 Shift+V 或命令 `terminal.paste_image` 显式粘贴，失败时显示原因。
+宿主的 Ctrl+Shift+V 通常只发送文本粘贴事件，无法保证传入图片；这时请用上述按键。
+依赖 TUI 所在机器的 wl-paste / xclip / pngpaste；通过 SSH 运行时读取的是远端剪贴板。
 
 ## 手机与窄屏
 
@@ -219,9 +221,9 @@ Kitty / Ghostty / Herdr / WezTerm 宿主自动选原生 Kitty 像素输出；tmu
 所以让 agent 自己报：命令面板里的 `安装会话映射 hook`（标 `本地`）会在
 `<agent-dir>/extensions/hc-tui-session.ts` 写一个 pi 扩展（`<agent-dir>` 默认
 `~/.pi/agent`，可用 `PI_CODING_AGENT_DIR` 改），它每次开轮都把会话文件路径报到
-`hc label <t> session=<path>`。hc-tui 读到这个 label 就用它，顶栏只写会话名。
+`hc label <t> session=<path>`。hc-tui 读到这个 label 就用它，顶栏标明“本机映射”。
 
-没装 hook 时按目录里最新的 `.jsonl` 推断，顶栏标 `· 推断`。两者都可用；装了之后
+仅本机会话在没装 hook 时按目录里最新的 `.jsonl` 推断，顶栏标 `· 本机推断`。两者都可用；装了之后
 同一目录多个活跃会话也不会串。删掉扩展就是面板里那条 `移除会话映射 hook`。
 
 手机上除了快捷键，Chat 底部还有一条 `发送 / 中断 / 命令 / 终端` 动作条。
@@ -239,3 +241,18 @@ Agent 处于 `blocked` 或 `error` 时顶栏变红，提示需要回终端处理
 - **看到 another TUI already accepts commands？** 同一状态目录和 session 只允许一个控制 socket 服务；第二个客户端可能仍可打开，但 CLI 控制对应首个服务。
 - **英文输入或滚动时疑似重复？** 本版加入真实后端回放和整帧同步输出，尚未稳定复现该报告。区分程序输出实际重复与显示暂留；保留程序名、宿主和复现步骤便于继续定位。
 - **退出再进布局变了？** 检查 session、restore 配置、core 文档和是否同时有 GUI 写入；同字段冲突用 layout.reload 明确接受共享版本。
+
+## 侧栏导航
+
+点击机器标题左侧的 ▾ / ▸ 或整行标题，可折叠/展开该机器的全部 Spaces，状态保存在本地并在重启后恢复。
+Spaces 与 Agents 分区独立滚动，将鼠标移到相应区域滚动即可。空间以单行显示，彩色首字母标识和整行背景突出当前空间；分支在有足够宽度时显示，Tab/Pane 数量仍可在详细切换视图查看。
+
+### 远端 Pi Chat
+
+`machine/t7` 的 Chat 通过现有 core 的 `file.read {on: machine}` 异步、按行增量读取 session label 指定的路径，不直接打开本机同名文件。上限保留最近 6000 行；读取失败保留已加载内容并明确标明失败；半行 JSONL 等写完再显示，会话切换后丢弃旧请求的回包。
+
+在 Pi 实际运行的机器执行 `hc-tui session-hook install`，然后在 Pi `/reload`。Pi 必须运行在 core 管理的终端内。也可以用 `hc label <terminal> session=/absolute/path.jsonl` 显式映射。
+远端没有 label 时显示“远端会话未映射”，不会推断本机路径；无法读取时显示“远端读取失败”。Chat 面板里的本地 hook 操作不会写到错误机器。
+`ssh box 'hc-tui --session work'` 仍读取 box 上的同一 core/session 文档；直接用 `hc-tui --session work` 则通过该 core 已配置的 machine 链路汇总远端工作区。
+
+远端 Chat 的命令面板只列内置 Pi 命令，不把本机的 prompt/skill 扫描结果冒充远端可用命令。

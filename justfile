@@ -32,6 +32,9 @@ smoke: build-smoke
 parity: build-smoke
     python3 scripts/herdr-parity-smoke.py
 
+# Stable shared-data contract for core/App upgrades.
+contract: parity
+
 build-smoke:
     cargo build -p hc-tui
 
@@ -39,15 +42,9 @@ build-smoke:
 release-musl:
     cargo zigbuild --release --target x86_64-unknown-linux-musl -p hc-tui
 
-# 发行包与校验和：tar.gz 内含二进制、LICENSE、第三方声明与变更记录
+# Package a Linux static executable with the same script used by four-platform CI.
 dist: release-musl
-    rm -rf dist
-    mkdir -p dist/stage
-    cp target/x86_64-unknown-linux-musl/release/hc-tui dist/stage/hc-tui
-    cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md dist/stage/
-    cd dist && tar -czf hc-tui-{{version}}-x86_64-unknown-linux-musl.tar.gz -C stage .
-    cd dist && sha256sum hc-tui-{{version}}-x86_64-unknown-linux-musl.tar.gz > hc-tui-{{version}}-x86_64-unknown-linux-musl.tar.gz.sha256
-    @ls -l dist
+    bash scripts/package-release.sh x86_64-unknown-linux-musl
 
 # 升级 vendored libghostty-vt（流程见 docs/adr/0001-ghostty-vt.md §5）
 vendor *ARGS:

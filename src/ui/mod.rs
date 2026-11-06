@@ -8,9 +8,11 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
+
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     App, Chooser, Connection, GotoOverlay, HelpOverlay, MobileAction, MobileTarget, NavigationRow,
@@ -619,135 +621,195 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         return;
     }
     let width = inner.width as usize;
-    let title = |text: String| {
-        Line::from(Span::styled(
-            text,
-            Style::default()
-                .fg(theme.color("sidebar_title"))
-                .add_modifier(Modifier::BOLD),
-        ))
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-    let mut row = inner.y;
-    lines.push(title(" spaces".to_string()));
-    row = row.saturating_add(1);
-
-    // 每个 space 两行：名字，以及 Tab/Pane 数量与分支。
-    let mut spaces: Vec<_> = (0..app.workspaces.len())
-        .map(|index| {
-            (
-                app.workspace_machine(index),
-                index,
-                app.workspace_label(index),
-            )
-        })
+    let muted = Style::default().fg(theme.color("dim"));
+    let mut lines = vec![nav_title(" Spaces", "+ ", width, theme), Line::default()];
+    let mut row = inner.y + 2;
+    let mut space_lines = Vec::new();
+    let mut space_hits = Vec::new();
+    let mut machine_hits = Vec::new();
+    let mut machine_groups = Vec::new();
+    let mut machines: Vec<String> = (0..app.workspaces.len())
+        .map(|index| app.workspace_machine(index))
+        .chain(app.machines.iter().map(|machine| machine.name.clone()))
         .collect();
-    spaces.sort_by(|a, b| (a.0 != "local", &a.0, a.1).cmp(&(b.0 != "local", &b.0, b.1)));
-    let grouped = spaces.iter().any(|(machine, _, _)| machine != "local");
-    let mut previous_machine = String::new();
-    for (machine, index, label) in spaces {
-        if grouped && previous_machine != machine {
-            if row >= inner.y + inner.height {
-                break;
-            }
-            lines.push(title(format!(
-                " {}",
-                if machine == "local" {
-                    "This computer"
+    machines.sort_by(|a, b| (a != "local", a).cmp(&(b != "local", b)));
+    machines.dedup();
+    for machine in machines {
+        if !space_lines.is_empty() {
+            space_lines.push(Line::default());
+        }
+        let state = app
+            .machines
+            .iter()
+            .find(|m| m.name == machine)
+            .map(|m| m.state.as_str());
+        let connected = machine == "local" || state == Some("connected");
+        let name = if machine == "local" {
+            "This computer"
+        } else {
+            &machine
+        };
+        let group_id = format!("machine:{machine}");
+        let folded = app.folded_agent_groups.contains(&group_id);
+        let chevron = if folded { "▸" } else { "▾" };
+        machine_groups.push((group_id, space_lines.len()));
+        let status = if connected { "●" } else { "○" };
+        let name = truncate(name, width.saturating_sub(7));
+        let pad = width.saturating_sub(UnicodeWidthStr::width(name.as_str()) + 6);
+        space_lines.push(Line::from(vec![
+            Span::styled(format!(" {chevron} {name}{}", " ".repeat(pad)), muted),
+            Span::styled(
+                status,
+                Style::default().fg(theme.color(if connected { "agent_done" } else { "dim" })),
+            ),
+            Span::styled("  ", muted),
+        ]));
+        if folded {
+            continue;
+        }
+        let indices: Vec<_> = (0..app.workspaces.len())
+            .filter(|&i| app.workspace_machine(i) == machine)
+            .collect();
+        if indices.is_empty() {
+            machine_hits.push((machine.clone(), space_lines.len()));
+            space_lines.push(Line::from(Span::styled(
+                if connected {
+                    " + New space there"
                 } else {
-                    &machine
-                }
+                    " ↻ Reconnect"
+                },
+                muted,
             )));
-            row = row.saturating_add(1);
-            previous_machine = machine.clone();
         }
-        if row + 2 > inner.y + inner.height {
-            break;
-        }
-        let active = index == app.active_ws;
-        let attention = app.attention_count(index);
-        let text = format!(
-            " {} {}",
-            if active { "·" } else { " " },
-            truncate(
-                &label,
-                width
-                    .saturating_sub(5)
-                    .saturating_sub(if attention > 0 { 2 } else { 0 })
-            )
-        );
-        let style = if active {
-            Style::default()
-                .bg(theme.color("selection_bg"))
-                .fg(theme.color("selection_fg"))
-        } else {
-            Style::default().fg(theme.color("fg"))
-        };
-        app.workspace_hits
-            .push((index, Rect::new(inner.x, row, inner.width, 2)));
-        lines.push(Line::from(Span::styled(text, style)));
-        row = row.saturating_add(1);
-
-        if machine == "local" {
-            if let Some(cwd) = app.workspace_cwd(index) {
-                app.refresh_branch(&cwd);
+        for index in indices {
+            let label = app.workspace_label(index);
+            let active = index == app.active_ws;
+            let style = if active {
+                Style::default()
+                    .bg(theme.color("sidebar_selected_bg"))
+                    .fg(theme.color("fg"))
+            } else {
+                Style::default().fg(theme.color("fg"))
+            };
+            let attention = app.attention_count(index);
+            if machine == "local" {
+                if let Some(cwd) = app.workspace_cwd(index) {
+                    app.refresh_branch(&cwd);
+                }
             }
+            let branch = app
+                .workspace_cwd(index)
+                .and_then(|cwd| app.branch(&cwd))
+                .unwrap_or_default();
+            let name = truncate(
+                &label,
+                width.saturating_sub(5 + if attention > 0 { 3 } else { 0 }),
+            );
+            let name_width = UnicodeWidthStr::width(name.as_str());
+            let detail_width = width.saturating_sub(name_width + 6);
+            let detail = if attention > 0 {
+                format!("{attention}!")
+            } else {
+                truncate(&branch, detail_width)
+            };
+            let detail_width = UnicodeWidthStr::width(detail.as_str());
+            let pad = width.saturating_sub(name_width + detail_width + 5);
+            let initial = label.chars().next().unwrap_or(' ').to_ascii_uppercase();
+            let icon = truncate(&initial.to_string(), 1);
+            let colors = [
+                "space_teal",
+                "space_green",
+                "space_blue",
+                "space_pink",
+                "space_orange",
+                "space_purple",
+            ];
+            let identity = app.workspaces[index].origin.as_deref().unwrap_or(&label);
+            let color = identity.bytes().fold(0usize, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(byte as usize)
+            }) % colors.len();
+            space_hits.push((index, space_lines.len()));
+            space_lines.push(
+                Line::from(vec![
+                    Span::styled(" ", style),
+                    Span::styled(
+                        format!(" {icon} "),
+                        Style::default()
+                            .bg(theme.color(colors[color]))
+                            .fg(theme.color("space_icon_fg"))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!(" {name}"), style.add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{}{detail}", " ".repeat(pad)),
+                        style.fg(theme.color(if attention > 0 {
+                            "agent_working"
+                        } else {
+                            "dim"
+                        })),
+                    ),
+                ])
+                .style(style),
+            );
         }
-        let branch = app
-            .workspace_cwd(index)
-            .and_then(|cwd| app.branch(&cwd))
-            .unwrap_or_default();
-        let workspace = &app.workspaces[index];
-        let mut detail = workspace_summary(workspace);
-        if attention > 0 {
-            detail.push_str(&format!(" · {attention}!"));
-        }
-        if !branch.is_empty() {
-            detail.push_str(&format!(" · {branch}"));
-        }
-        let detail = format!("   {}", truncate(&detail, width.saturating_sub(3)));
-        let detail_style = if active {
-            Style::default()
-                .bg(theme.color("selection_bg"))
-                .fg(theme.color("dim"))
-        } else {
-            Style::default().fg(theme.color("dim"))
-        };
-        lines.push(Line::from(Span::styled(detail, detail_style)));
-        row = row.saturating_add(1);
     }
-
-    if row < inner.y + inner.height {
-        lines.push(Line::from(""));
-        row = row.saturating_add(1);
-    }
-
-    let empty_machines: Vec<_> = app
-        .machines
-        .iter()
-        .filter(|m| !(0..app.workspaces.len()).any(|wi| app.workspace_machine(wi) == m.name))
-        .cloned()
-        .collect();
-    for machine in empty_machines {
-        if row + 2 > inner.bottom() {
-            break;
+    // Spaces and Agents scroll independently, so a long machine list cannot hide Agents.
+    let space_height = space_lines
+        .len()
+        .min(inner.height.saturating_sub(10).max(3) as usize);
+    app.space_scroll = app
+        .space_scroll
+        .min(space_lines.len().saturating_sub(space_height));
+    app.spaces_area = Rect::new(inner.x, row, inner.width, space_height as u16);
+    app.agent_group_hits.clear();
+    for (group, offset) in machine_groups {
+        if offset >= app.space_scroll && offset < app.space_scroll + space_height {
+            app.agent_group_hits.push((
+                group,
+                Rect::new(
+                    inner.x,
+                    row + (offset - app.space_scroll) as u16,
+                    inner.width,
+                    1,
+                ),
+            ));
         }
-        lines.push(title(format!(" {} · {}", machine.name, machine.state)));
-        row += 1;
-        let text = if machine.state == "connected" {
-            " + New space there"
-        } else {
-            " ↻ Reconnect"
-        };
-        lines.push(Line::from(Span::styled(
-            text,
-            Style::default().fg(theme.color("accent")),
-        )));
-        app.machine_hits
-            .push((machine.name, Rect::new(inner.x, row, inner.width, 1)));
-        row += 1;
     }
+    for (index, offset) in space_hits {
+        if offset >= app.space_scroll && offset < app.space_scroll + space_height {
+            app.workspace_hits.push((
+                index,
+                Rect::new(
+                    inner.x,
+                    row + (offset - app.space_scroll) as u16,
+                    inner.width,
+                    1,
+                ),
+            ));
+        }
+    }
+    for (machine, offset) in machine_hits {
+        if offset >= app.space_scroll && offset < app.space_scroll + space_height {
+            app.machine_hits.push((
+                machine,
+                Rect::new(
+                    inner.x,
+                    row + (offset - app.space_scroll) as u16,
+                    inner.width,
+                    1,
+                ),
+            ));
+        }
+    }
+    lines.extend(
+        space_lines
+            .into_iter()
+            .skip(app.space_scroll)
+            .take(space_height),
+    );
+    row += space_height as u16;
+    lines.push(Line::default());
+    row += 1;
 
     // `new` 与 `menu`：与 herdr 的侧栏底行同位置同含义。
     if row < inner.y + inner.height {
@@ -800,11 +862,10 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             crate::config::AgentSort::Priority => "priority",
         };
         app.agent_sort_hit = Rect::new(inner.x, row, inner.width, 1);
-        lines.push(nav_title(" agents", sort, width, theme));
+        lines.push(nav_title(" Agents", sort, width, theme));
         row = row.saturating_add(1);
     }
 
-    app.agent_group_hits.clear();
     let mut entries = Vec::new();
     let mut previous = String::new();
     for NavigationRow {
@@ -839,9 +900,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     {
         let focused = pane.is_some_and(|pane| pane == app.focused());
         let style = if *header {
-            Style::default()
-                .fg(theme.color("sidebar_title"))
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.color("dim"))
         } else if focused {
             Style::default()
                 .bg(theme.color("selection_bg"))
@@ -885,7 +944,11 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         } else if let Some(terminal) = terminal {
             app.terminal_hits.push((terminal.clone(), hit));
         }
-        lines.push(Line::from(Span::styled(text, style)));
+        let pad = width.saturating_sub(UnicodeWidthStr::width(text.as_str()));
+        lines.push(Line::from(Span::styled(
+            format!("{text}{}", " ".repeat(pad)),
+            style,
+        )));
         row = row.saturating_add(1);
     }
     if total == 0 && row < inner.y + inner.height {
@@ -923,7 +986,7 @@ fn nav_title(left: &str, right: &str, width: usize, theme: &Theme) -> Line<'stat
         Span::styled(
             left.to_string(),
             Style::default()
-                .fg(theme.color("sidebar_title"))
+                .fg(theme.color("dim"))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(pad)),
@@ -1017,6 +1080,10 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme.color("bg")))
         .title(Span::styled(title, Style::default().fg(border_color)));
+    // Floating panes and popups may cover terminal cells with active SGR attributes.
+    if slot.overlay {
+        frame.render_widget(Clear, slot.outer);
+    }
     frame.render_widget(block, slot.outer);
 
     if slot.collapsed {
@@ -1141,6 +1208,7 @@ fn render_toast(frame: &mut Frame, toast: &Toast, content: Rect, theme: &Theme) 
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.color("accent")))
         .style(Style::default().bg(theme.color("toast_bg")));
+    clear_area(frame, area, theme);
     frame.render_widget(block.clone(), area);
     frame.render_widget(
         Paragraph::new(truncate(&toast.text, width.saturating_sub(3) as usize))
@@ -1207,12 +1275,13 @@ fn clear_area(frame: &mut Frame, area: Rect, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let blank = " ".repeat(area.width as usize);
-    let lines: Vec<Line> = (0..area.height)
-        .map(|_| Line::from(Span::raw(blank.clone())))
-        .collect();
+    frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.color("sidebar_bg"))),
+        Block::default().style(
+            Style::default()
+                .bg(theme.color("sidebar_bg"))
+                .fg(theme.color("fg")),
+        ),
         area,
     );
 }
@@ -1239,6 +1308,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, content: Rect, theme: &Them
         .border_style(Style::default().fg(theme.color("accent")))
         .style(Style::default().bg(theme.color("sidebar_bg")));
     let inner = block.inner(area);
+    clear_area(frame, area, theme);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -1391,105 +1461,91 @@ fn render_settings(
     content: Rect,
     theme: &Theme,
 ) {
-    let area = Rect::new(
-        content.x + 1,
-        content.y,
-        content.width.saturating_sub(2),
-        content.height.saturating_sub(1),
-    );
-    if area.width < 24 || area.height < 8 {
+    let len = app.settings_len(settings.section);
+    let panel_width = content.width.saturating_sub(4).min(60);
+    let panel_height = content.height.saturating_sub(2).min(len as u16 + 9);
+    if panel_width < 24 || panel_height < 8 {
         return;
     }
+    let area = Rect::new(
+        content.x + (content.width - panel_width) / 2,
+        content.y + (content.height - panel_height) / 2,
+        panel_width,
+        panel_height,
+    );
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.color("accent")))
-        .style(Style::default().bg(theme.color("sidebar_bg")));
+        .border_style(Style::default().fg(theme.color("border")))
+        .style(
+            Style::default()
+                .bg(theme.color("sidebar_bg"))
+                .fg(theme.color("fg")),
+        );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
-
-    let sections = App::SETTINGS_SECTIONS;
-    let mut tabs = String::new();
-    for (index, name) in sections.iter().enumerate() {
-        if index > 0 {
-            tabs.push_str("   ");
-        }
-        tabs.push_str(name);
+    let mut tabs = vec![Span::raw(" ")];
+    for (index, name) in App::SETTINGS_SECTIONS.iter().enumerate() {
+        let style = if index == settings.section {
+            Style::default()
+                .bg(theme.color("selection_bg"))
+                .fg(theme.color("selection_fg"))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.color("dim"))
+        };
+        tabs.push(Span::styled(format!(" {name} "), style));
+        tabs.push(Span::raw(" "));
     }
-    let mut tab_spans = vec![Span::styled(
-        " settings",
-        Style::default()
-            .fg(theme.color("accent"))
-            .add_modifier(Modifier::BOLD),
-    )];
-    tab_spans.push(Span::styled(
-        " ".repeat(width.saturating_sub(" settings".chars().count() + 1)),
-        Style::default(),
-    ));
-    let tab_line = Line::from(vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(tabs, Style::default().fg(theme.color("sidebar_title"))),
-    ]);
-    let _ = tab_spans;
-    let rule = Line::from(Span::styled(
-        "─".repeat(width),
-        Style::default().fg(theme.color("border")),
-    ));
-
-    let len = app.settings_len(settings.section);
     let mut lines = vec![
         Line::from(Span::styled(
-            " settings",
+            " Settings",
             Style::default()
-                .fg(theme.color("accent"))
+                .fg(theme.color("fg"))
                 .add_modifier(Modifier::BOLD),
         )),
-        tab_line,
-        rule,
+        Line::default(),
+        Line::from(tabs),
+        Line::from(Span::styled(
+            "─".repeat(width),
+            Style::default().fg(theme.color("border")),
+        )),
     ];
-    for index in 0..len {
+    let available = inner.height.saturating_sub(6) as usize;
+    let offset = settings
+        .selected
+        .saturating_sub(available.saturating_sub(1));
+    for index in offset..len.min(offset + available) {
         let selected = index == settings.selected;
         let (label, active) = settings_item(app, settings.section, index);
-        let marker = if selected { "▸" } else { " " };
-        let check = if active { "✓" } else { " " };
-        let text = format!(
-            " {marker} {label}{}",
-            if active {
-                format!(" {check}")
-            } else {
-                String::new()
-            }
-        );
         let style = if selected {
             Style::default()
                 .bg(theme.color("selection_bg"))
                 .fg(theme.color("selection_fg"))
-        } else if active {
-            Style::default()
-                .fg(theme.color("accent"))
-                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.color("fg"))
         };
-        lines.push(Line::from(Span::styled(text, style)));
+        let marker = if selected { "▸" } else { " " };
+        let check = if active { "✓" } else { " " };
+        let label = truncate(&label, width.saturating_sub(7));
+        let pad = width.saturating_sub(UnicodeWidthStr::width(label.as_str()) + 6);
+        lines.push(
+            Line::from(Span::styled(
+                format!(" {marker} {label}{} {check} ", " ".repeat(pad)),
+                style,
+            ))
+            .style(style),
+        );
     }
-    let footer_left = "↑↓ select  tab section";
-    let footer_right = "↵ apply     esc close";
-    let pad = width.saturating_sub(footer_left.chars().count() + footer_right.chars().count() + 2);
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" {footer_left}"),
-            Style::default().fg(theme.color("dim")),
-        ),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(
-            footer_right.to_string(),
-            Style::default().fg(theme.color("dim")),
-        ),
-    ]));
+    frame.render_widget(Paragraph::new(lines), inner);
+    let footer = if width >= 48 {
+        " ↑↓ select   ←→ section   ↵ apply   esc close"
+    } else {
+        " ↑↓ select  tab section  ↵ apply  esc close"
+    };
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.color("sidebar_bg"))),
-        inner,
+        Paragraph::new(truncate(footer, width)).style(Style::default().fg(theme.color("dim"))),
+        Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
     );
 }
 
@@ -1724,6 +1780,7 @@ fn render_reader(frame: &mut Frame, reader: &Reader, content: Rect, theme: &Them
             Style::default().fg(theme.color("accent")),
         ));
     let inner = block.inner(area);
+    clear_area(frame, area, theme);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
         return;
@@ -1770,6 +1827,7 @@ fn render_chooser(frame: &mut Frame, chooser: &Chooser, content: Rect, theme: &T
             Style::default().fg(theme.color("accent")),
         ));
     let inner = block.inner(area);
+    clear_area(frame, area, theme);
     frame.render_widget(block, area);
     let visible = inner.height as usize;
     let start = if chooser.selected >= visible {
@@ -1952,11 +2010,23 @@ fn hostname() -> String {
         .unwrap_or_default()
 }
 
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+fn truncate(text: &str, max_columns: usize) -> String {
+    if text.width() <= max_columns {
         return text.to_string();
     }
-    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    if max_columns == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut columns = 0;
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0);
+        if columns + width > max_columns - 1 {
+            break;
+        }
+        out.push(ch);
+        columns += width;
+    }
     out.push('…');
     out
 }
@@ -1970,9 +2040,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_counts_characters_not_bytes() {
-        assert_eq!(truncate("宽字符", 2), "宽…");
-        assert_eq!(truncate("宽字符", 3), "宽字符");
+    fn overlay_clear_removes_underlying_terminal_attributes() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let theme = crate::theme::builtin("catppuccin").unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new("terminal text").style(
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::DIM | Modifier::ITALIC | Modifier::REVERSED),
+                    ),
+                    frame.area(),
+                );
+                clear_area(frame, frame.area(), &theme);
+                frame.render_widget(
+                    Paragraph::new("settings text").style(Style::default().fg(theme.color("fg"))),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        for x in 0..13 {
+            let cell = &terminal.backend().buffer()[(x, 0)];
+            assert_eq!(cell.modifier, Modifier::empty());
+            assert_eq!(cell.fg, theme.color("fg"));
+            assert_eq!(cell.bg, theme.color("sidebar_bg"));
+        }
+    }
+
+    #[test]
+    fn truncate_counts_terminal_columns() {
+        assert_eq!(truncate("宽字符", 2), "…");
+        assert_eq!(truncate("宽字符", 3), "宽…");
+        assert_eq!(truncate("宽字符", 6), "宽字符");
+        assert_eq!(truncate("abc", 0), "");
         assert_eq!(truncate("abc", 5), "abc");
     }
 }

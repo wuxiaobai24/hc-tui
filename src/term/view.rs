@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
@@ -38,6 +39,8 @@ pub struct TerminalView {
     /// kitty graphics 已解码的 RGBA 缓存：fingerprint → 像素。
     image_cache: HashMap<u64, Arc<Vec<u8>>>,
     theme: Option<crate::theme::Theme>,
+    committed: Option<Buffer>,
+    sync_started: Option<Instant>,
 }
 
 /// 一张要绘制到单元格上的 kitty 图像。
@@ -77,6 +80,8 @@ impl TerminalView {
             responses,
             image_cache: HashMap::new(),
             theme: None,
+            committed: None,
+            sync_started: None,
         })
     }
 
@@ -112,6 +117,15 @@ impl TerminalView {
     /// 喂原始 VT 字节。首帧与流内重绘都走这里。
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.write(bytes);
+        if self
+            .terminal
+            .mode_get(ghostty_vt::MODE_SYNCHRONIZED_OUTPUT)
+            .unwrap_or(false)
+        {
+            self.sync_started.get_or_insert_with(Instant::now);
+        } else {
+            self.sync_started = None;
+        }
         // OSC 52 剪贴板与 OSC 7 目录变化不回传宿主终端；取走它们，既做了过滤，
         // 也避免内部回调状态随运行时间无限累积。
         let _ = self.terminal.take_clipboard_writes();
@@ -306,6 +320,21 @@ impl TerminalView {
         if area.width == 0 || area.height == 0 {
             return Ok(());
         }
+        // Keep the last complete frame while an application builds a synchronized
+        // update across network chunks. A broken writer cannot freeze the pane forever.
+        if self
+            .sync_started
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+        {
+            if let Some(committed) = &self.committed {
+                for y in 0..area.height.min(committed.area.height) {
+                    for x in 0..area.width.min(committed.area.width) {
+                        buf[(area.x + x, area.y + y)].clone_from(&committed[(x, y)]);
+                    }
+                }
+            }
+            return Ok(());
+        }
         self.render_state.update(&self.terminal)?;
 
         let colors = self.render_state.colors().ok();
@@ -328,11 +357,12 @@ impl TerminalView {
                     // 宽字符占两列：主 cell 画字，尾 cell 留空。跳过会错位。
                     CellWide::SpacerTail | CellWide::SpacerHead => {
                         cell.set_symbol(" ");
-                        cell.set_style(
-                            Style::default()
-                                .fg(default_fg.unwrap_or(Color::Reset))
-                                .bg(default_bg.unwrap_or(Color::Reset)),
-                        );
+                        cell.set_style(style_of(
+                            &basic.style,
+                            default_fg,
+                            default_bg,
+                            colors.as_ref().map(|c| &c.palette),
+                        ));
                     }
                     _ => {
                         let symbol = cells.grapheme_text().unwrap_or_default();
@@ -380,6 +410,14 @@ impl TerminalView {
                 );
             }
             y += 1;
+        }
+        let local = Rect::new(0, 0, area.width, area.height);
+        let committed = self.committed.get_or_insert_with(|| Buffer::empty(local));
+        committed.resize(local);
+        for y in 0..area.height {
+            for x in 0..area.width {
+                committed[(x, y)].clone_from(&buf[(area.x + x, area.y + y)]);
+            }
         }
         Ok(())
     }
@@ -659,6 +697,45 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_redraws_do_not_expose_half_frames_and_have_a_timeout() {
+        let area = Rect::new(0, 0, 20, 3);
+        let mut view = TerminalView::new(20, 3, 1 << 20).unwrap();
+        let mut buffer = Buffer::empty(area);
+        view.write(b"complete");
+        view.render(&mut buffer, area).unwrap();
+        let complete = buffer.clone();
+        for bytes in [b"\x1b[?2026h\x1b[2J\x1b[H".as_slice(), b"par", b"tial"] {
+            view.write(bytes);
+            buffer.reset();
+            view.render(&mut buffer, area).unwrap();
+            assert_eq!(buffer, complete);
+        }
+        view.write(b"\x1b[?2026l");
+        view.render(&mut buffer, area).unwrap();
+        assert_eq!(buffer[(0, 0)].symbol(), "p");
+        view.write(b"\x1b[?2026h\rtimeout");
+        view.sync_started = Some(Instant::now() - Duration::from_secs(2));
+        view.render(&mut buffer, area).unwrap();
+        assert_eq!(buffer[(0, 0)].symbol(), "t");
+    }
+
+    #[test]
+    fn wide_selection_keeps_highlight_on_both_columns() {
+        let area = Rect::new(0, 0, 12, 2);
+        let mut view = TerminalView::new(12, 2, 1 << 20).unwrap();
+        view.write("\x1b[48;2;40;65;90m中文\x1b[0m".as_bytes());
+        let mut buffer = Buffer::empty(area);
+        view.render(&mut buffer, area).unwrap();
+        for x in 0..4 {
+            assert_eq!(
+                buffer[(x, 0)].bg,
+                Color::Rgb(40, 65, 90),
+                "wide glyph column {x}"
+            );
+        }
+    }
+
+    #[test]
     fn truecolor_and_reverse_are_preserved() {
         let buf = rendered();
         assert_eq!(buf[(0, 2)].style().fg, Some(Color::Rgb(12, 34, 56)));
@@ -707,8 +784,9 @@ mod tests {
             }
         }
         let output = Output::default();
-        let outer = Rect::new(0, 0, 40, 10);
-        let area = Rect::new(3, 2, 30, 6);
+        use base64::Engine;
+        crossterm::style::force_color_output(true);
+        let outer = Rect::new(0, 0, 110, 36);
         let mut terminal = ratatui::Terminal::with_options(
             CrosstermBackend::new(output.clone()),
             TerminalOptions {
@@ -717,9 +795,9 @@ mod tests {
         )
         .unwrap();
         let mut view = TerminalView::new(30, 6, 1 << 20).unwrap();
-        let mut host = TerminalView::new(40, 10, 1 << 20).unwrap();
+        let mut host = TerminalView::new(110, 36, 1 << 20).unwrap();
         let mut offset = 0;
-        for bytes in [
+        let mut cases: Vec<_> = [
             b"prompt> abcdef".as_slice(),
             b"\x08\x08XY",
             b"\r\x1b[2Kprompt> x",
@@ -727,8 +805,30 @@ mod tests {
             b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n",
             b"\x1b[2;1H\x1b[2Kupdated",
             b"\x1b[2J\x1b[Hclear",
-        ] {
-            view.write(bytes);
+            b"\x1b[H\x1b[2J\x1b[1;2mBD\x1b[22mnormal\x1b[2mDIM\x1b[1mBOTH\x1b[22mplain",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, bytes)| (format!("ASCII edit {i}"), 30, 6, bytes.to_vec()))
+        .collect();
+        let capture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/nvim-redraw.json")).unwrap();
+        for entry in capture["frames"].as_array().unwrap() {
+            cases.push((
+                entry["label"].as_str().unwrap().to_string(),
+                entry["cols"].as_u64().unwrap() as u16,
+                entry["rows"].as_u64().unwrap() as u16,
+                base64::engine::general_purpose::STANDARD
+                    .decode(entry["data"].as_str().unwrap())
+                    .unwrap(),
+            ));
+        }
+        for (label, cols, rows, bytes) in cases {
+            let area = Rect::new(3, 2, cols, rows);
+            view.resize(cols, rows, 8, 16).unwrap();
+            for chunk in bytes.chunks(31) {
+                view.write(chunk);
+            }
             terminal
                 .draw(|frame| {
                     view.render(frame.buffer_mut(), area).unwrap();
@@ -746,7 +846,24 @@ mod tests {
                     assert_eq!(
                         actual[(x, y)].symbol(),
                         expected[(x, y)].symbol(),
-                        "at {x},{y} after {bytes:?}"
+                        "at {x},{y} after {label}"
+                    );
+                    if expected[(x, y)].symbol() != " " {
+                        assert_eq!(
+                            actual[(x, y)].fg,
+                            expected[(x, y)].fg,
+                            "foreground at {x},{y} after {label}"
+                        );
+                    }
+                    assert_eq!(
+                        actual[(x, y)].modifier,
+                        expected[(x, y)].modifier,
+                        "attributes at {x},{y} after {label}"
+                    );
+                    assert_eq!(
+                        actual[(x, y)].bg,
+                        expected[(x, y)].bg,
+                        "background at {x},{y} after {label}"
                     );
                 }
             }

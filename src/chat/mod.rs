@@ -40,6 +40,10 @@ pub struct Chat {
     pub path: Option<PathBuf>,
     /// 会话文件是 agent 自报的（`true`）还是按写入时间推断的（`false`）。
     pub exact: bool,
+    /// Remote transcripts are read through core file.read, never local filesystem inference.
+    pub machine: Option<String>,
+    pub request_tag: String,
+    remote_next_line: usize,
     /// 顶栏用的状态说明：会话标签、找不到的原因、读取错误。
     pub note: String,
     /// 由 transcript 切出来的消息块。
@@ -88,12 +92,38 @@ impl Chat {
     /// 按 cwd 找到 pi 会话文件并读入。`session` 是 agent 通过 label 自报的路径，
     /// 有就用它（确定映射），没有才按 cwd 目录里最新的文件推断。
     pub fn open(pane: u32, cwd: Option<&str>, session: Option<&str>) -> Self {
+        let mut chat = Self::empty(pane, cwd);
+        if let Some(path) = session.filter(|path| !path.is_empty()).map(PathBuf::from) {
+            chat.adopt(path);
+            return chat;
+        }
+        if chat.cwd.is_empty() {
+            chat.note = "pane 没有 cwd".to_string();
+            return chat;
+        }
+        match pi::session_file(&chat.cwd) {
+            Some(path) => {
+                chat.note = format!("{} · 本机推断", pi::file_label(&path));
+                chat.path = Some(path);
+                if let Err(error) = chat.reload() {
+                    chat.note = format!("读取会话失败：{error}");
+                }
+            }
+            None => chat.note = format!("{} 下没有本机 pi 会话", chat.cwd),
+        }
+        chat
+    }
+
+    fn empty(pane: u32, cwd: Option<&str>) -> Self {
         let cwd = cwd.unwrap_or_default().to_string();
-        let mut chat = Self {
+        Self {
             pane,
-            cwd: cwd.clone(),
+            cwd,
             path: None,
             exact: false,
+            machine: None,
+            request_tag: crate::shared::identity("chat:"),
+            remote_next_line: 1,
             note: String::new(),
             blocks: Vec::new(),
             input: String::new(),
@@ -114,26 +144,121 @@ impl Chat {
             lines: Vec::new(),
             last_poll: None,
             last_session_check: None,
-        };
-        if let Some(path) = session.map(PathBuf::from).filter(|path| path.exists()) {
-            chat.adopt(path);
-            return chat;
         }
-        if cwd.is_empty() {
-            chat.note = "pane 没有 cwd".to_string();
-            return chat;
-        }
-        match pi::session_file(&cwd) {
-            Some(path) => {
-                chat.note = format!("{} · 推断", pi::file_label(&path));
-                chat.path = Some(path);
-                if let Err(error) = chat.reload() {
-                    chat.note = format!("读取会话失败：{error}");
-                }
-            }
-            None => chat.note = format!("{cwd} 下没有 pi 会话"),
-        }
+    }
+
+    pub fn open_remote(pane: u32, machine: &str, cwd: Option<&str>, session: Option<&str>) -> Self {
+        let mut chat = Self::empty(pane, cwd);
+        chat.machine = Some(machine.to_string());
+        chat.set_remote_session(session);
         chat
+    }
+
+    /// A missing remote label must never fall back to a same-named local file.
+    pub fn set_remote_session(&mut self, session: Option<&str>) {
+        let path = session.filter(|path| !path.is_empty()).map(PathBuf::from);
+        if self.path == path && !self.note.is_empty() {
+            return;
+        }
+        self.path = path;
+        self.exact = self.path.is_some();
+        self.remote_next_line = 1;
+        self.last_poll = None;
+        self.partial.clear();
+        self.lines.clear();
+        self.rebuild();
+        let machine = self.machine.as_deref().unwrap_or_default();
+        self.note = match &self.path {
+            Some(path) => format!("{machine} · 远端映射 · {} · 读取中", pi::file_label(path)),
+            None => format!("{machine} · 远端会话未映射；需在该机器安装 session hook"),
+        };
+    }
+
+    pub fn remote_request(&mut self) -> Option<(String, serde_json::Value)> {
+        let machine = self.machine.as_ref()?;
+        let path = self.path.as_ref()?;
+        let now = Instant::now();
+        if self
+            .last_poll
+            .is_some_and(|at| now.duration_since(at) < SESSION_CHECK)
+        {
+            return None;
+        }
+        self.last_poll = Some(now);
+        Some((
+            self.request_tag.clone(),
+            serde_json::json!({
+                "on": machine, "path":path, "offset":self.remote_next_line.saturating_sub(1).max(1), "limit": MAX_LINES,
+            }),
+        ))
+    }
+
+    pub fn remote_reply(
+        &mut self,
+        tag: &str,
+        request: &serde_json::Value,
+        result: Result<serde_json::Value, String>,
+    ) -> bool {
+        if tag != self.request_tag
+            || self.machine.as_deref() != request["on"].as_str()
+            || self.path.as_ref().and_then(|p| p.to_str()) != request["path"].as_str()
+        {
+            return false;
+        }
+        let machine = self.machine.clone().unwrap_or_default();
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.note = format!("{machine} · 远端读取失败：{error}");
+                return true;
+            }
+        };
+        let Some(text) = value["text"].as_str() else {
+            self.note = format!("{machine} · 远端读取失败：响应缺少 text");
+            return true;
+        };
+        let total = value["lines"].as_u64().unwrap_or(0) as usize;
+        let first = value["first"].as_u64().unwrap_or(1) as usize;
+        if total < self.remote_next_line.saturating_sub(1) {
+            self.lines.clear();
+            self.remote_next_line = 1;
+            self.rebuild();
+            self.last_poll = None;
+            return true;
+        }
+        // Start a long transcript at its bounded tail rather than repeatedly transferring it all.
+        if self.remote_next_line == 1 && total > MAX_LINES {
+            self.remote_next_line = total - MAX_LINES + 1;
+            self.last_poll = None;
+            return true;
+        }
+        let mut partial = Vec::new();
+        let mut incoming = split_lines(&mut partial, text.as_bytes(), false);
+        if first < self.remote_next_line && !incoming.is_empty() {
+            let anchor = incoming.remove(0);
+            if self.lines.last().is_some_and(|last| *last != anchor) {
+                self.lines.clear();
+                self.remote_next_line = 1;
+                self.rebuild();
+                self.last_poll = None;
+                return true;
+            }
+        }
+        let count = incoming.len();
+        self.remote_next_line += count;
+        self.lines.extend(incoming);
+        if self.lines.len() > MAX_LINES {
+            self.lines.drain(..self.lines.len() - MAX_LINES);
+        }
+        self.rebuild();
+        self.note = format!(
+            "{machine} · 远端映射 · {}",
+            self.path
+                .as_ref()
+                .map(|p| pi::file_label(p))
+                .unwrap_or_default()
+        );
+        true
     }
 
     /// 换成 agent 自报的会话文件（label 到了之后调用）。
@@ -141,12 +266,13 @@ impl Chat {
         if Some(&path) == self.path.as_ref() && self.exact {
             return;
         }
-        self.note = pi::file_label(&path);
+        self.note = format!("{} · 本机映射", pi::file_label(&path));
         self.path = Some(path);
         self.exact = true;
         self.offset = 0;
         self.partial.clear();
         self.lines.clear();
+        self.rebuild();
         if let Err(error) = self.reload() {
             self.note = format!("读取会话失败：{error}");
         }
@@ -249,7 +375,11 @@ impl Chat {
 
     /// 打开命令面板：内置命令 + 当前项目里发现的模板与技能。
     pub fn open_palette(&mut self) {
-        let items = commands::all(&self.cwd);
+        let items = if self.machine.is_some() {
+            commands::builtin()
+        } else {
+            commands::all(&self.cwd)
+        };
         let query = self.input.strip_prefix('/').unwrap_or_default().to_string();
         self.palette = Some(Palette {
             items,
@@ -420,13 +550,19 @@ impl Chat {
         file.read_to_end(&mut bytes)?;
         self.offset = bytes.len() as u64;
         self.partial.clear();
-        self.lines = split_lines(&mut self.partial, &bytes, true);
+        self.lines = split_lines(&mut self.partial, &bytes, false);
+        if self.lines.len() > MAX_LINES {
+            self.lines.drain(..self.lines.len() - MAX_LINES);
+        }
         self.rebuild();
         Ok(())
     }
 
     /// 增量读文件；有变化返回 `true`。
     pub fn poll(&mut self) -> bool {
+        if self.machine.is_some() {
+            return false;
+        }
         let changed = self.check_session();
         let Some(path) = self.path.clone() else {
             return changed;
@@ -494,7 +630,7 @@ impl Chat {
             return false;
         }
         self.path = Some(path.clone());
-        self.note = format!("{} · 推断", pi::file_label(&path));
+        self.note = format!("{} · 本机推断", pi::file_label(&path));
         self.offset = 0;
         self.partial.clear();
         self.lines.clear();
@@ -577,6 +713,65 @@ mod tests {
             .open(path)
             .expect("session file");
         writeln!(file, "{line}").expect("append");
+    }
+
+    #[test]
+    fn remote_transcript_never_falls_back_to_local_files_and_ignores_stale_replies() {
+        let root = temp_root("remote");
+        let path = root.join("session.jsonl");
+        append(
+            &path,
+            r#"{"type":"message","id":"local","parentId":null,"message":{"role":"user","content":"local decoy"}}"#,
+        );
+        let mut chat = Chat::open_remote(7, "dev", Some("/repo"), Some(path.to_str().unwrap()));
+        assert!(chat.blocks.is_empty());
+        assert!(!chat.poll());
+        let (tag, request) = chat.remote_request().unwrap();
+        assert_eq!(request["on"], "dev");
+        let text = "{\"type\":\"message\",\"id\":\"a\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"remote message\"}}\n";
+        assert!(chat.remote_reply(
+            &tag,
+            &request,
+            Ok(serde_json::json!({"first":1,"last":1,"lines":1,"text":text}))
+        ));
+        assert_eq!(chat.blocks[0].text, "remote message");
+        chat.set_remote_session(Some("/other/session.jsonl"));
+        assert!(chat.blocks.is_empty());
+        assert!(!chat.remote_reply(&tag, &request, Ok(serde_json::json!({"text":text}))));
+        chat.set_remote_session(None);
+        assert!(chat.remote_request().is_none());
+        assert!(chat.note.contains("远端会话未映射"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_line_polling_handles_partial_appends_truncation_and_errors() {
+        let mut chat = Chat::open_remote(3, "peer", Some("/repo"), Some("/session.jsonl"));
+        let (tag, request) = chat.remote_request().unwrap();
+        let a = r#"{"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"first"}}"#;
+        let b = r#"{"type":"message","id":"b","parentId":"a","message":{"role":"assistant","content":[{"type":"text","text":"second"}]}}"#;
+        chat.remote_reply(&tag,&request,Ok(serde_json::json!({"first":1,"last":2,"lines":2,"text":format!("{a}\n{}",&b[..30])})));
+        assert_eq!(chat.blocks.len(), 1);
+        chat.last_poll = None;
+        let (_, request) = chat.remote_request().unwrap();
+        assert_eq!(request["offset"], 1);
+        chat.remote_reply(
+            &tag,
+            &request,
+            Ok(serde_json::json!({"first":1,"last":2,"lines":2,"text":format!("{a}\n{b}\n")})),
+        );
+        assert_eq!(chat.blocks.len(), 2);
+        assert_eq!(chat.remote_next_line, 3);
+        chat.remote_reply(&tag, &request, Err("machine unavailable".into()));
+        assert!(chat.note.contains("远端读取失败"));
+        assert_eq!(chat.blocks.len(), 2);
+        chat.remote_reply(
+            &tag,
+            &request,
+            Ok(serde_json::json!({"first":2,"last":0,"lines":0,"text":""})),
+        );
+        assert!(chat.blocks.is_empty());
+        assert_eq!(chat.remote_next_line, 1);
     }
 
     #[test]

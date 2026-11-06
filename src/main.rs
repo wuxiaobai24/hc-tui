@@ -11,6 +11,19 @@ fn main() -> Result<()> {
             println!("hc-tui {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Some("session-hook") => {
+            use hc_tui::chat::hook;
+            match args.get(1).map(String::as_str) {
+                Some("install") => println!("installed {}", hook::install()?.display()),
+                Some("remove") => println!("removed: {}", hook::remove()?),
+                Some("status") => println!("{}", hook::describe(hook::status())),
+                _ => anyhow::bail!(
+                    "usage: hc-tui session-hook install|remove|status (runs on this machine)"
+                ),
+            }
+            Ok(())
+        }
+        Some("update") => hc_tui::update::run(&args[1..]),
         Some("probe") => probe(&args[1..]),
         Some("commands") => {
             println!(
@@ -71,6 +84,8 @@ fn usage() {
     println!();
     println!("usage: hc-tui [options]");
     println!("       hc-tui probe [options]");
+    println!("       hc-tui update [--version X.Y.Z] [--check] [--from archive.tar.gz]");
+    println!("       hc-tui session-hook install|remove|status");
     println!("       hc-tui --default-config");
     println!("       hc-tui commands | ls [options]");
     println!("       hc-tui do <command> [JSON arguments] [options]");

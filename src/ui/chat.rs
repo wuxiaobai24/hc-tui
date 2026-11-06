@@ -65,6 +65,7 @@ fn paint(frame: &mut Frame, chat: &mut Chat, meta: &Meta, area: Rect, theme: &Th
     if area.width == 0 || area.height == 0 {
         return;
     }
+    frame.render_widget(ratatui::widgets::Clear, area);
     frame.render_widget(
         Paragraph::new(blank_lines(area)).style(Style::default().bg(theme.color("bg"))),
         area,

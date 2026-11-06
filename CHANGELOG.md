@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.4.0 — 2026-11-06
+
+- Pi Chat 跟随 machine/ 终端，通过 core file.read 增量读取该机器上 session label 指定的 JSONL；远端未映射或失败明确显示，不猜本机会话。新增 session-hook CLI，正确跟随会话切换并忽略旧请求回包。
+- 输入/渲染 P0：修复中文双宽字尾列丢失高亮；遵守程序同步重绘帧，网络分块期间保留完整画面。加入真实 nvim 的选区、滚动、分屏、缩放和编辑固定回放，逐格比对文字与颜色。
+- 修复浮层继承终端 DIM 等属性造成文字明暗不一；侧栏机器可折叠并记忆，Spaces/Agents 独立滚动，空间使用单行和彩色标识。
+- Ctrl+V 支持本机剪贴板 PNG；图片回填绑定原始 Pane，避免上传时切换窗口后误贴。
+- 固定共享布局/名称及 agent 已读/置顶的同步契约，屏幕焦点、zoom、settle、主题和命令面板保持本地。
+- 发布 Linux amd64/arm64 musl 静态包、macOS Intel/Apple Silicon 独立包，所有平台成功后才发布；新增 hc-tui update，校验 SHA-256、版本后原子替换。
+
 ## 0.3.1 — 2026-11-06
 
 - Agents 仅展示上报过状态的会话，普通 shell 不再混入；每个 Space 直接展示 Tab/Pane 数量。

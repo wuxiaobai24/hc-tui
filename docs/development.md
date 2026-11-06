@@ -61,6 +61,8 @@ parity 启动两套隔离 core，验证远端布局、新建、GUI 双向 CAS、
 
 ## 安装、升级与回滚
 
+普通用户优先安装 Release 包并用 `hc-tui update`，无需下面的源码工具链。四平台打包统一使用 `scripts/package-release.sh TARGET`，发布门槛见 [发布清单](release.md)。
+
 先完成验证，安装 release 产物。为兼容仍在运行的旧进程，使用新文件加 rename 原子替换：
 
 ```sh

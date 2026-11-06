@@ -257,6 +257,14 @@ async fn g1_single_pane_end_to_end() -> Result<()> {
         return Ok(());
     }
     isolated_environment();
+    struct CoreGuard;
+    impl Drop for CoreGuard {
+        fn drop(&mut self) {
+            stop_core();
+        }
+    }
+    let _core_guard = CoreGuard;
+    stop_core();
     let mut screen = Vec::new();
     let mut link = connect().await?;
 
@@ -361,6 +369,70 @@ async fn g1_single_pane_end_to_end() -> Result<()> {
         reason.is_some(),
         "core must send CLOSE after the program exits"
     );
+
+    if std::process::Command::new("nvim")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        let path = Path::new("/tmp/hc-tui-e2e/nvim-input.txt");
+        std::fs::write(path, "original line\n")?;
+        let run = second
+            .rpc(
+                "terminal.run",
+                json!({
+                    "argv":["nvim","--clean","-u","NONE","-i","NONE","-n",path],
+                    "cols":COLS,"rows":ROWS,
+                }),
+                &mut screen,
+            )
+            .await?;
+        let address = run["address"]
+            .as_str()
+            .context("nvim returned no address")?;
+        attach(&mut second, address, &mut screen).await?;
+        let mut view = TerminalView::new(COLS, ROWS, 1 << 20)?;
+        wait_for_first_paint(&mut second, &mut view, &mut screen).await?;
+        wait_for_screen(&mut second, &mut view, &mut screen, "original line").await?;
+        second.input(b"i").await?;
+        let prefix = "HCTUI-NVIM-abc";
+        for byte in prefix.bytes() {
+            second.input(&[byte]).await?;
+        }
+        let paste = "中文-input-abc ".repeat(256);
+        second.input(&view.encode_paste(&paste)).await?;
+        wait_for_screen(&mut second, &mut view, &mut screen, "-input-abc").await?;
+        second.input(b"\x1b").await?;
+        second
+            .write(&codec::resize(second.attach_channel.unwrap(), 62, 19)?)
+            .await?;
+        view.resize(62, 19, 8, 16)?;
+        second.input(b":wq!\r").await?;
+        let mut closed = false;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline && !closed {
+            let frame = second.read(&mut screen).await?;
+            if Some(frame.channel) == second.attach_channel {
+                if frame.kind == codec::DATA {
+                    view.write(&frame.payload);
+                    let mut buffer = Buffer::empty(Rect::new(0, 0, 62, 19));
+                    view.render(&mut buffer, Rect::new(0, 0, 62, 19))?;
+                    let response = view.take_responses();
+                    if !response.is_empty() {
+                        second.input(&response).await?;
+                    }
+                }
+                closed = frame.kind == codec::CLOSE;
+            }
+        }
+        assert!(closed, "nvim must save and exit after resize and paste");
+        assert_eq!(
+            std::fs::read_to_string(path)?,
+            format!("{prefix}{paste}original line\n"),
+            "typed ASCII and multilingual bracketed paste must reach nvim exactly once"
+        );
+        eprintln!("nvim real core: ASCII typing, multilingual paste, resize and save passed");
+    }
 
     stop_core();
     Ok(())

@@ -391,6 +391,22 @@ mod tests {
         );
     }
     #[test]
+    fn screen_only_state_never_changes_the_shared_document() {
+        let raw = json!({"spaces":[{"id":"space","name":"A","folder":"/repo","tabs":[{"id":"tab","name":"one","root":{"type":"row","children":[{"id":"pane","type":"block","content":{"terminal":"t1"}}]}}]}],"custom":{"desktop":"preserve"}});
+        let mut state = decode(&raw, "").unwrap();
+        let baseline = encode(&state, "", &raw);
+        state.active_workspace = 99;
+        state.workspaces[0].active_tab = 99;
+        state.workspaces[0].tabs[0].focus = 99;
+        state.workspaces[0].tabs[0].settled = true;
+        assert_eq!(encode(&state, "", &raw), baseline);
+        state.workspaces[0].label = "renamed".into();
+        let changed = encode(&state, "", &raw);
+        assert_eq!(changed["spaces"][0]["name"], "renamed");
+        assert_eq!(changed["custom"], raw["custom"]);
+    }
+
+    #[test]
     fn conflict_rebases_different_spaces_but_refuses_same_field() {
         let b = json!({"spaces":[{"id":"a","name":"A"},{"id":"b","name":"B"}]});
         let mut o = b.clone();

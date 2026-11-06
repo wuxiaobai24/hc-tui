@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布为哪个标签（例如 v0.1.0）"
-        required: false
+        description: "Existing release tag, e.g. v0.4.0"
+        required: true
 
 permissions:
   contents: write
@@ -16,53 +16,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux-musl:
-    name: linux x86_64 (musl, static)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      # libghostty-vt 只认 Zig 0.16.0（见 docs/adr/0001-ghostty-vt.md）。
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - uses: taiki-e/install-action@cargo-zigbuild
-      - uses: Swatinem/rust-cache@v2
-
-      - name: build
-        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p hc-tui
-
-      - name: package
-        run: |
-          set -euo pipefail
-          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
-          mkdir -p stage
-          cp target/x86_64-unknown-linux-musl/release/hc-tui stage/hc-tui
-          cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md stage/
-          tar -czf "hc-tui-${version}-x86_64-unknown-linux-musl.tar.gz" -C stage .
-          sha256sum "hc-tui-${version}-x86_64-unknown-linux-musl.tar.gz" \
-            > "hc-tui-${version}-x86_64-unknown-linux-musl.tar.gz.sha256"
-          file stage/hc-tui
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-musl
-          path: hc-tui-*.tar.gz*
-
-  macos:
-    name: macOS (${{ matrix.target }})
+  build:
+    name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-15-intel
@@ -71,53 +35,76 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-
+      - name: verify release version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          test "$RELEASE_TAG" = "v$version"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
+      - uses: taiki-e/install-action@cargo-zigbuild
+        if: runner.os == 'Linux'
       - uses: Swatinem/rust-cache@v2
-
-      - name: build
-        run: cargo build --release --target ${{ matrix.target }} -p hc-tui
-
-      - name: package
+        with:
+          key: ${{ matrix.target }}
+      - name: build Linux static executable
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }} -p hc-tui
+      - name: build macOS executable
+        if: runner.os == 'macOS'
+        run: cargo build --locked --release --target ${{ matrix.target }} -p hc-tui
+      - name: verify native executable
+        if: matrix.target != 'aarch64-unknown-linux-musl'
         run: |
-          set -euo pipefail
-          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
-          mkdir -p stage
-          cp target/${{ matrix.target }}/release/hc-tui stage/hc-tui
-          cp LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md stage/
-          tar -czf "hc-tui-${version}-${{ matrix.target }}.tar.gz" -C stage .
-          shasum -a 256 "hc-tui-${version}-${{ matrix.target }}.tar.gz" \
-            > "hc-tui-${version}-${{ matrix.target }}.tar.gz.sha256"
-
+          target/${{ matrix.target }}/release/hc-tui --version
+          target/${{ matrix.target }}/release/hc-tui --default-config > /dev/null
+      - name: verify Linux arm64 executable
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+          qemu-aarch64 target/${{ matrix.target }}/release/hc-tui --version
+      - name: verify static Linux linkage
+        if: runner.os == 'Linux'
+        run: file target/${{ matrix.target }}/release/hc-tui | grep -E 'statically linked|static-pie linked'
+      - name: package
+        run: bash scripts/package-release.sh ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: hc-tui-*.tar.gz*
+          path: dist/hc-tui-*.tar.gz*
+          if-no-files-found: error
 
   publish:
-    name: publish
-    needs: [linux-musl, macos]
-    if: ${{ !cancelled() && needs.linux-musl.result == 'success' }}
+    needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: list assets
-        run: ls -l artifacts
-
+      - name: require all four archives and checksums
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          cd artifacts
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
+            archive="hc-tui-$version-$target.tar.gz"
+            test -s "$archive"
+            sha256sum -c "$archive.sha256"
+          done
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: artifacts/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
           body_path: CHANGELOG.md

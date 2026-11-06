@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated core/TUI contract checks. Never reads or writes the default session."""
 import json
+import base64
 import os
 from pathlib import Path
 import shlex
@@ -91,6 +92,31 @@ try:
     do("space.select",{"id":"peer/remote-space"})
     do("tab.new",{"name":"remote-child"})
     wait("new remote tab starts on the same machine",lambda:any(p["terminal"] and p["terminal"].startswith("peer/") for w in tui("ls")["state"]["workspaces"] if w.get("origin")=="peer/remote-space" for t in w["tabs"] if t["label"]=="remote-child" for p in [tui("ls")["state"]["panes"][str(t["focus"])]]))
+    # A remote Pi mapping must use file.read on the terminal's core machine.
+    transcript = str(ROOT / "remote-pi.jsonl")
+    message = {"type":"message","id":"a","parentId":None,"message":{"role":"user","content":"REMOTE-PI-CHAT-PROOF"}}
+    payload = json.dumps(message)+"\n"
+    rpc("file.write",{"on":"peer","path":transcript,"data":base64.b64encode(payload.encode()).decode()})
+    rpc("terminal.label",{"terminal":remote_terminal,"labels":{"session":transcript}})
+    wait("remote session label reaches TUI",lambda:any(t["address"]==remote_terminal and t.get("session")==transcript for t in tui("ls")["terminals"]))
+    do("pane.focus",{"terminal":remote_terminal})
+    def screen():
+        return subprocess.check_output(["tmux","-L",SESSION,"capture-pane","-p","-t","tui"],text=True)
+    wait("remote pane attached",lambda:"starting" not in screen())
+    subprocess.check_call(["tmux","-L",SESSION,"send-keys","-t","tui","C-b","A"])
+    wait("remote Pi transcript visible",lambda:"REMOTE-PI-CHAT-PROOF" in screen())
+    extra = {"type":"message","id":"b","parentId":"a","message":{"role":"assistant","content":[{"type":"text","text":"REMOTE-PI-APPEND-PROOF"}]}}
+    payload += json.dumps(extra)+"\n"
+    rpc("file.write",{"on":"peer","path":transcript,"data":base64.b64encode(payload.encode()).decode()})
+    wait("remote Pi incremental append visible",lambda:"REMOTE-PI-APPEND-PROOF" in screen())
+    rpc("terminal.label",{"terminal":remote_terminal,"labels":{"session":""}})
+    wait("unmapped remote never displays stale local transcript",lambda:"远端会话未映射" in screen() and "REMOTE-PI-CHAT-PROOF" not in screen())
+    subprocess.check_call(["tmux","-L",SESSION,"send-keys","-t","tui","Escape"])
+    # Shared labels travel both directions; plain shells still remain out of Agents.
+    rpc("terminal.label",{"terminal":one,"labels":{"herdr.pinned":"1","herdr.seen":"7"}})
+    wait("GUI pinned/seen labels reach TUI",lambda:any(t["address"]==one and t.get("pinned") and t.get("seen_turn")==7 for t in tui("ls")["terminals"]))
+    do("terminal.pin",{"terminal":one,"pinned":False})
+    wait("TUI unpin reaches shared terminal labels",lambda:json.loads(hc("get",one)).get("labels",{}).get("herdr.pinned","")!="1")
     do("space.rename", {"id": "spa", "name": "renamed"})
     result = wait("rename reaches GUI document through CAS", lambda: (lambda d: d if any(w["id"] == "spa" and w["name"] == "renamed" for w in d["value"]["spaces"]) else None)(rpc("doc.get", {"name": "herdr-app"})))
     preserved = next(w for w in result["value"]["spaces"] if w["id"] == "spa")

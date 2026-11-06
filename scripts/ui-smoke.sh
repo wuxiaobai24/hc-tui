@@ -81,8 +81,14 @@ expect_tabs() {
 }
 
 start
-expect "首次绘制" "spaces"
-expect "侧栏 agents 段" "agents"
+expect "首次绘制" "Spaces"
+expect "侧栏 agents 段" "Agents"
+
+# Machine headers collapse the entire Spaces group and expand on a second click.
+key -l $'\e[<0;2;3M\e[<0;2;3m'; sleep 0.3
+expect "折叠机器空间" "▸ This computer"
+key -l $'\e[<0;2;3M\e[<0;2;3m'; sleep 0.3
+expect "展开机器空间" "▾ This computer"
 
 # 新 Tab（默认先问名字）与左右分屏
 key C-b c; sleep 0.5

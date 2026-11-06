@@ -385,6 +385,8 @@ pub struct App {
     pub command_output: HashMap<String, String>,
     /// 侧栏滚动偏移（行）。
     pub sidebar_scroll: usize,
+    pub space_scroll: usize,
+    pub spaces_area: Rect,
     /// 侧栏区域，鼠标滚轮用。
     pub sidebar_area: Rect,
     /// 上次绘制进入了手机单列布局。
@@ -515,6 +517,8 @@ impl App {
             machine_hits: Vec::new(),
             command_output: HashMap::new(),
             sidebar_scroll: 0,
+            space_scroll: 0,
+            spaces_area: Rect::default(),
             sidebar_area: Rect::new(0, 0, 0, 0),
             mobile: false,
             mobile_switch: Rect::new(0, 0, 0, 0),
@@ -688,7 +692,7 @@ impl App {
         for request in requests {
             let response = match request.body["method"].as_str() {
                 Some("snapshot") => {
-                    json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent})).collect::<Vec<_>>()})
+                    json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session})).collect::<Vec<_>>()})
                 }
                 Some("do") if self.restore_pending => json!({"error":"layout is still loading"}),
                 Some("do") => {
@@ -765,15 +769,25 @@ impl App {
                 .as_ref()
                 .and_then(|chat| self.panes.get(&chat.pane))
                 .and_then(|pane| pane.agent_session.clone());
-            if let (Some(label), Some(chat)) = (label, self.chat.as_mut()) {
-                if !chat.exact {
-                    chat.adopt(label.into());
+            if let Some(chat) = self.chat.as_mut() {
+                if chat.machine.is_some() {
+                    chat.set_remote_session(label.as_deref());
+                } else if let Some(label) = label {
+                    if !chat.exact
+                        || chat.path.as_ref().and_then(|path| path.to_str()) != Some(label.as_str())
+                    {
+                        chat.adopt(label.into());
+                        self.dirty = true;
+                    }
+                }
+                if chat.poll() {
                     self.dirty = true;
                 }
             }
-            let changed = self.chat.as_mut().is_some_and(Chat::poll);
-            if changed {
-                self.dirty = true;
+            if let Some((tag, params)) = self.chat.as_mut().and_then(Chat::remote_request) {
+                if !self.inflight.contains_key(&tag) {
+                    self.call_rpc(&tag, "file.read", params);
+                }
             }
             let stale = self
                 .chat
@@ -1218,6 +1232,18 @@ impl App {
                 return;
             }
         }
+        // Host text paste remains Event::Paste. Ctrl+V can request image data
+        // directly when the host cannot represent it as a paste event.
+        if key.kind == KeyEventKind::Press
+            && matches!(key.code, KeyCode::Char('v' | 'V'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            if let Ok(bytes) = clipboard_image() {
+                self.upload_image(bytes);
+                return;
+            }
+        }
         self.forward_key(key);
     }
 
@@ -1353,13 +1379,18 @@ impl App {
 
         if contains(self.sidebar_area, mouse.column, mouse.row) {
             let step = self.config.mouse_scroll_lines;
+            let scroll = if contains(self.spaces_area, mouse.column, mouse.row) {
+                &mut self.space_scroll
+            } else {
+                &mut self.sidebar_scroll
+            };
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(step);
+                    *scroll = scroll.saturating_sub(step);
                     self.dirty = true;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(step);
+                    *scroll = scroll.saturating_add(step);
                     self.dirty = true;
                 }
                 _ => {}
@@ -1760,7 +1791,15 @@ impl App {
             .clone()
             .or_else(|| self.workspace_cwd(self.active_ws));
         let session = state.agent_session.clone();
-        let chat = Chat::open(pane, cwd.as_deref(), session.as_deref());
+        let machine = state
+            .terminal
+            .as_deref()
+            .and_then(|address| address.split_once('/'))
+            .map(|(machine, _)| machine);
+        let chat = match machine {
+            Some(machine) => Chat::open_remote(pane, machine, cwd.as_deref(), session.as_deref()),
+            None => Chat::open(pane, cwd.as_deref(), session.as_deref()),
+        };
         self.note = chat.note.clone();
         self.chat = Some(chat);
         self.dirty = true;
@@ -1825,6 +1864,14 @@ impl App {
 
     /// hc-tui 自己的命令面板动作。
     fn run_local_command(&mut self, local: Local) {
+        if let Some(machine) = self.chat.as_ref().and_then(|chat| chat.machine.as_deref()) {
+            self.note = format!("hook 操作需在 {machine} 上运行 hc-tui session-hook install/remove，然后在 Pi /reload");
+            if let Some(chat) = self.chat.as_mut() {
+                chat.close_palette();
+            }
+            self.dirty = true;
+            return;
+        }
         match local {
             Local::InstallHook => match hook::install() {
                 Ok(path) => {
@@ -5090,8 +5137,18 @@ impl App {
         self.dirty = true;
     }
 
-    /// 剪贴板里的图片：存成本地文件后交给 `terminal.put`，再把路径贴进程序。
+    /// 上传本机剪贴板图片，再将目标机器上的路径贴给原程序。
     fn paste_image(&mut self) {
+        match clipboard_image() {
+            Ok(bytes) => self.upload_image(bytes),
+            Err(error) => {
+                self.note = error;
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn upload_image(&mut self, bytes: Vec<u8>) {
         let pane = self.input_pane();
         let Some(terminal) = self
             .panes
@@ -5102,23 +5159,14 @@ impl App {
             self.dirty = true;
             return;
         };
-        let Some(bytes) = clipboard_image() else {
-            self.note = "no image in the clipboard".to_string();
-            self.dirty = true;
-            return;
-        };
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
+            .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         self.call_rpc(
-            "put-image",
+            &format!("put-image:{pane}:{stamp}"),
             "terminal.put",
-            json!({
-                "terminal": terminal,
-                "name": format!("paste-{stamp}.png"),
-                "data": crate::clipboard::base64(&bytes),
-            }),
+            json!({ "terminal": terminal, "name": format!("paste-{stamp}.png"), "data": crate::clipboard::base64(&bytes) }),
         );
         self.note = "pasting clipboard image".to_string();
         self.dirty = true;
@@ -5259,7 +5307,17 @@ impl App {
         tag: &str,
         result: std::result::Result<Value, crate::hc::net::RpcFailure>,
     ) {
-        if let Some((method, params)) = self.inflight.remove(tag) {
+        let request = self.inflight.remove(tag);
+        let chat_request = tag
+            .starts_with("chat:")
+            .then(|| request.as_ref().map(|(_, params)| params.clone()))
+            .flatten();
+        let image_terminal = request
+            .as_ref()
+            .and_then(|(_, params)| params.get("terminal"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some((method, params)) = request {
             if let Err(error) = &result {
                 // 连接层失败：连接恢复后重放同一条请求。
                 if matches!(error.kind.as_str(), "offline" | "io" | "closed") {
@@ -5273,6 +5331,13 @@ impl App {
                     }
                 }
             }
+        }
+        if tag.starts_with("chat:") {
+            if let (Some(chat), Some(params)) = (self.chat.as_mut(), chat_request) {
+                self.dirty |=
+                    chat.remote_reply(tag, &params, result.map_err(|error| error.message));
+            }
+            return;
         }
         if let Some(id) = tag
             .strip_prefix("panel:")
@@ -5289,6 +5354,39 @@ impl App {
         }
         if tag.starts_with("shared.") {
             self.shared_reply(tag, result);
+            return;
+        }
+        if let Some(pane) = tag
+            .strip_prefix("put-image:")
+            .and_then(|rest| rest.split(':').next())
+            .and_then(|id| id.parse::<u32>().ok())
+        {
+            match result {
+                Ok(value) => {
+                    let path = value
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .filter(|path| !path.is_empty());
+                    if let Some(path) = path {
+                        if let Some(state) = self
+                            .panes
+                            .get_mut(&pane)
+                            .filter(|state| state.terminal == image_terminal && state.is_live())
+                        {
+                            state.view.scroll_bottom();
+                            let bytes = state.view.encode_paste(path);
+                            self.send(Command::Input { pane, bytes });
+                            self.note = format!("image sent · {path}");
+                        } else {
+                            self.note = format!("image uploaded · target pane closed · {path}");
+                        }
+                    } else {
+                        self.note = "send image failed: core returned no file path".to_string();
+                    }
+                }
+                Err(error) => self.note = format!("send image failed: {}", error.message),
+            }
+            self.dirty = true;
             return;
         }
         match tag {
@@ -5422,25 +5520,6 @@ impl App {
                     self.note = format!("file delivered to {path}");
                 }
                 Err(error) => self.note = format!("send file failed: {}", error.message),
-            },
-            "put-image" => match result {
-                Ok(value) => {
-                    let path = value
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let pane = self.input_pane();
-                    let bytes = self
-                        .panes
-                        .get(&pane)
-                        .map(|state| state.view.encode_paste(&path));
-                    if let Some(bytes) = bytes {
-                        self.send(Command::Input { pane, bytes });
-                    }
-                    self.note = format!("image sent · {path}");
-                }
-                Err(error) => self.note = format!("send image failed: {}", error.message),
             },
             "templates" => match result {
                 Ok(value) => {
@@ -6525,8 +6604,8 @@ fn parse_machines(value: &Value) -> Vec<MachineInfo> {
         .unwrap_or_default()
 }
 
-/// 读剪贴板里的 PNG。`None` 表示环境里没有可用的剪贴板工具或内容不是图片。
-fn clipboard_image() -> Option<Vec<u8>> {
+/// 读取本机剪贴板 PNG；区分工具缺失与无可用图片。
+fn clipboard_image() -> std::result::Result<Vec<u8>, String> {
     let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pngpaste", &["-"])]
     } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -6540,15 +6619,22 @@ fn clipboard_image() -> Option<Vec<u8>> {
             ("wl-paste", &["--no-newline", "--type", "image/png"]),
         ]
     };
+    let mut available = false;
     for (program, args) in tools {
         let Ok(output) = std::process::Command::new(program).args(*args).output() else {
             continue;
         };
-        if output.status.success() && output.stdout.starts_with(b"\x89PNG") {
-            return Some(output.stdout);
+        available = true;
+        if output.status.success() && output.stdout.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Ok(output.stdout);
         }
     }
-    None
+    Err(if available {
+        "no PNG image available in the local clipboard".to_string()
+    } else {
+        "image paste needs wl-paste (Wayland), xclip (X11), or pngpaste (macOS) on the TUI machine"
+            .to_string()
+    })
 }
 
 /// 目录路径的最后一段；空路径时用 fallback。
@@ -6857,6 +6943,83 @@ mod tests {
             events,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn sidebar_machine_folding_and_scrolling_keep_agents_reachable() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = offline_app();
+        app.config.theme = crate::theme::builtin("catppuccin").unwrap();
+        app.workspaces[0].label = "hc-tui".into();
+        app.workspaces[0].machine = Some("arch".into());
+        for index in 0..28 {
+            app.new_workspace(Some(format!("space-{index}")));
+            app.workspaces.last_mut().unwrap().machine = Some("arch".into());
+        }
+        app.active_ws = 0;
+        let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let (_, hit) = app
+            .agent_group_hits
+            .iter()
+            .find(|(id, _)| id == "machine:arch")
+            .unwrap()
+            .clone();
+        assert!(app.agent_sort_hit.height > 0, "Agents must remain visible");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x + 1,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click);
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        assert!(app.folded_agent_groups.contains("machine:arch"));
+        assert!(app.workspace_hits.is_empty());
+        app.on_mouse(click);
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        assert!(!app.workspace_hits.is_empty());
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: app.spaces_area.x + 2,
+            row: app.spaces_area.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        assert!(app.space_scroll > 0);
+        assert_eq!(app.sidebar_scroll, 0);
+        assert!(!app.workspace_hits.iter().any(|(index, _)| *index == 0));
+    }
+
+    #[test]
+    fn image_upload_reply_uses_original_pane_after_focus_changes() {
+        let mut app = offline_app();
+        let original = app.input_pane();
+        app.panes.get_mut(&original).unwrap().terminal = Some("arch/t1".into());
+        app.panes.get_mut(&original).unwrap().state = PaneState::Live { channel: 1 };
+        app.upload_image(b"png".to_vec());
+        let tag = app
+            .inflight
+            .keys()
+            .find(|tag| tag.starts_with("put-image:"))
+            .unwrap()
+            .clone();
+        app.new_workspace(Some("other".into()));
+        assert_ne!(app.input_pane(), original);
+        app.on_reply(&tag, Ok(json!({"path":"/tmp/image.png"})));
+        assert_eq!(app.note, "image sent · /tmp/image.png");
+        // Replacing the original terminal must not insert the path into its replacement.
+        app.active_ws = 0;
+        app.upload_image(b"png".to_vec());
+        let tag = app
+            .inflight
+            .keys()
+            .find(|tag| tag.starts_with("put-image:"))
+            .unwrap()
+            .clone();
+        app.panes.get_mut(&original).unwrap().terminal = Some("arch/t2".into());
+        app.on_reply(&tag, Ok(json!({"path":"/tmp/second.png"})));
+        assert!(app.note.contains("target pane closed"));
     }
 
     #[test]
