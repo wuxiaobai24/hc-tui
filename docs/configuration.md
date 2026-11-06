@@ -254,5 +254,5 @@ refresh = 5
 notifications.delivery 为 off / toast / system，system 另调用 notify-send。
 sound=true 时可分别设置 sound_path、done_path、request_path；可用播放器优先
 paplay，其次 ffplay / afplay / mpv，无法播放回落终端响铃。
-复制同时尝试 OSC 52 和平台剪贴板工具；图片读取需要 wl-paste / xclip / pngpaste 等。
+复制同时尝试 OSC 52 和平台剪贴板工具；图片读取在 macOS 使用系统接口，Linux 需要 wl-paste / xclip。
 `HC_TUI_GRAPHICS=kitty|blocks` 控制图形模式，tmux 默认 blocks。

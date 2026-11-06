@@ -51,6 +51,10 @@ jobs:
       - name: test
         run: cargo test -p hc-tui
 
+      - name: native macOS screenshot clipboard
+        if: runner.os == 'macOS'
+        run: cargo test -p hc-tui --lib clipboard::image_tests::macos_clipboard_roundtrip -- --ignored --exact
+
   # 静态发行构建：本机已验证产出静态链接产物（见 README「发行」）。
   musl:
     name: build (x86_64-unknown-linux-musl)

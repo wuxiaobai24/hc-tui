@@ -8,6 +8,100 @@ use std::process::{Command, Stdio};
 
 use crossterm::execute;
 
+/// Read PNG bytes on the machine running the TUI, before terminal.put uploads them.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn image() -> std::result::Result<Vec<u8>, String> {
+    let tools: &[(&str, &[&str])] = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &[("wl-paste", &["--no-newline", "--type", "image/png"])]
+    } else {
+        &[
+            (
+                "xclip",
+                &["-selection", "clipboard", "-t", "image/png", "-o"],
+            ),
+            ("wl-paste", &["--no-newline", "--type", "image/png"]),
+        ]
+    };
+    let mut available = false;
+    for (program, args) in tools {
+        let Ok(output) = std::process::Command::new(program).args(*args).output() else {
+            continue;
+        };
+        available = true;
+        if output.status.success() && output.stdout.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return checked_png(output.stdout);
+        }
+    }
+    Err(if available {
+        "no PNG image available in the local clipboard".to_string()
+    } else {
+        "image paste needs wl-paste (Wayland) or xclip (X11) on the TUI machine".to_string()
+    })
+}
+
+fn checked_png(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("image was not uploaded: core accepts at most 8 MiB".into());
+    }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("no PNG image available in the local clipboard".into());
+    }
+    Ok(bytes)
+}
+
+/// Standard Additions reads screenshot PNG data without Homebrew or GUI automation.
+#[cfg(target_os = "macos")]
+pub(crate) fn image() -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::DirBuilderExt;
+
+    let directory = std::env::temp_dir().join(crate::shared::identity("hc-tui-clipboard-"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|error| format!("cannot prepare clipboard image: {error}"))?;
+    let path = directory.join("screenshot.png");
+    let result = (|| {
+        let output = Command::new("/usr/bin/osascript")
+            .args(["-e", MAC_READ_PNG])
+            .arg(&path)
+            .output()
+            .map_err(|error| format!("cannot read macOS clipboard: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "no PNG image available in the local clipboard: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|file| {
+                file.take(MAX_IMAGE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|error| format!("cannot read clipboard image: {error}"))?;
+        checked_png(bytes)
+    })();
+    let _ = std::fs::remove_dir_all(&directory);
+    result
+}
+
+#[cfg(target_os = "macos")]
+const MAC_READ_PNG: &str = r#"
+on run argv
+    set imageData to the clipboard as «class PNGf»
+    set outputFile to open for access (POSIX file (item 1 of argv)) with write permission
+    try
+        set eof outputFile to 0
+        write imageData to outputFile
+        close access outputFile
+    on error errorMessage number errorNumber
+        close access outputFile
+        error errorMessage number errorNumber
+    end try
+end run
+"#;
+
 /// 复制文本，返回一句给状态栏用的人话。
 pub fn copy(text: &str) -> String {
     if text.is_empty() {
@@ -236,6 +330,61 @@ pub(crate) fn image_file_paste(text: &str) -> Option<Result<ImageAttachment, Str
 #[cfg(test)]
 mod image_tests {
     use super::*;
+
+    #[test]
+    fn clipboard_png_rejects_invalid_and_oversized_data() {
+        assert!(checked_png(b"text".to_vec())
+            .unwrap_err()
+            .contains("no PNG"));
+        let mut oversized = vec![0; MAX_IMAGE_BYTES + 1];
+        oversized[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        assert!(checked_png(oversized).unwrap_err().contains("8 MiB"));
+    }
+
+    // Explicit opt-in: this test replaces the host clipboard. Run only on a disposable Mac runner.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "replaces the host clipboard; macOS CI only"]
+    fn macos_clipboard_roundtrip() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[20, 40, 60, 255])
+                .unwrap();
+        }
+        let directory = std::env::temp_dir().join(crate::shared::identity("clipboard-test-"));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("系统 截图.png");
+        std::fs::write(&path, &bytes).unwrap();
+        let output = Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                r#"on run argv
+                set the clipboard to (read (POSIX file (item 1 of argv)) as «class PNGf»)
+            end run"#,
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(image().unwrap(), bytes);
+        let output = Command::new("/usr/bin/osascript")
+            .args(["-e", r#"set the clipboard to "ordinary text""#])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(image().unwrap_err().contains("no PNG"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn image_paths_quotes_escapes_and_file_urls_read_the_original_bytes() {

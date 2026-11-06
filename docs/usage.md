@@ -175,7 +175,9 @@ Kitty / Ghostty / Herdr / WezTerm 宿主自动选原生 Kitty 像素输出；tmu
 Ctrl+V 在本机剪贴板有 PNG 图片时，通过 core 上传到目标终端所在机器，并将文件路径粘贴给发起上传的 Pane；上传期间切换 Pane 不会改变目标。无图片时 Ctrl+V 仍交给终端程序。
 也可用前缀 Shift+V 或命令 `terminal.paste_image` 显式粘贴，失败时显示原因。
 宿主的 Ctrl+Shift+V 通常只发送文本粘贴事件，无法保证传入图片；这时请用上述按键。
-依赖 TUI 所在机器的 wl-paste / xclip / pngpaste；通过 SSH 运行时读取的是远端剪贴板。
+macOS 使用系统自带的剪贴板接口，无需安装 pngpaste；Linux 需要 wl-paste / xclip。通过 SSH 运行 TUI 时读取的是远端剪贴板。
+
+Mac 系统截图直接入剪贴板：按 Control+Shift+Command+4 框选，然后在本机运行的 hc-tui 中按 Ctrl+B，松开后按 Shift+V；终端 Pane 和 Chat 都支持。图片先上传到目标 Pane 所在机器，成功后插入那台机器上的路径。普通 Command+V 是否能携带图片由宿主终端决定，不能替代这个专用按键。
 
 ## 手机与窄屏
 

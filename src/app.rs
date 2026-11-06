@@ -1176,7 +1176,11 @@ impl App {
             return;
         }
         if self.chat.is_some() {
-            self.on_chat_key(key);
+            match chat_image_key(key, &self.config.keys, &mut self.prefix) {
+                ChatImageKey::Paste => self.paste_image(),
+                ChatImageKey::Input => self.on_chat_key(key),
+                ChatImageKey::Consumed => self.dirty = true,
+            }
             return;
         }
         if self.switcher && key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
@@ -1239,7 +1243,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            if let Ok(bytes) = clipboard_image() {
+            if let Ok(bytes) = clipboard::image() {
                 self.upload_image(bytes);
                 return;
             }
@@ -5149,7 +5153,7 @@ impl App {
 
     /// 上传本机剪贴板图片，再将目标机器上的路径贴给原程序。
     fn paste_image(&mut self) {
-        match clipboard_image() {
+        match clipboard::image() {
             Ok(bytes) => self.upload_image(bytes),
             Err(error) => {
                 self.note = error;
@@ -6645,37 +6649,42 @@ fn parse_machines(value: &Value) -> Vec<MachineInfo> {
         .unwrap_or_default()
 }
 
-/// 读取本机剪贴板 PNG；区分工具缺失与无可用图片。
-fn clipboard_image() -> std::result::Result<Vec<u8>, String> {
-    let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
-        &[("pngpaste", &["-"])]
-    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        &[("wl-paste", &["--no-newline", "--type", "image/png"])]
-    } else {
-        &[
-            (
-                "xclip",
-                &["-selection", "clipboard", "-t", "image/png", "-o"],
-            ),
-            ("wl-paste", &["--no-newline", "--type", "image/png"]),
-        ]
-    };
-    let mut available = false;
-    for (program, args) in tools {
-        let Ok(output) = std::process::Command::new(program).args(*args).output() else {
-            continue;
+/// Chat owns its input keys; only the image binding shares the terminal prefix.
+#[derive(Debug, PartialEq, Eq)]
+enum ChatImageKey {
+    Input,
+    Consumed,
+    Paste,
+}
+
+fn chat_image_key(key: KeyEvent, keys: &crate::config::Keys, prefix: &mut bool) -> ChatImageKey {
+    if key.kind != KeyEventKind::Press {
+        return if *prefix {
+            ChatImageKey::Consumed
+        } else {
+            ChatImageKey::Input
         };
-        available = true;
-        if output.status.success() && output.stdout.starts_with(b"\x89PNG\r\n\x1a\n") {
-            return Ok(output.stdout);
-        }
     }
-    Err(if available {
-        "no PNG image available in the local clipboard".to_string()
+    if *prefix {
+        *prefix = false;
+        if keys.paste_image.matches_prefix(&key) {
+            return ChatImageKey::Paste;
+        }
+        // Unknown prefix keys are consumed, just like terminal mode.
+        return ChatImageKey::Consumed;
+    }
+    if keys.prefix.matches_direct(&key) {
+        *prefix = true;
+        return ChatImageKey::Consumed;
+    }
+    let ctrl_v = matches!(key.code, KeyCode::Char('v' | 'V'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT);
+    if keys.paste_image.matches_direct(&key) || ctrl_v {
+        ChatImageKey::Paste
     } else {
-        "image paste needs wl-paste (Wayland), xclip (X11), or pngpaste (macOS) on the TUI machine"
-            .to_string()
-    })
+        ChatImageKey::Input
+    }
 }
 
 /// 目录路径的最后一段；空路径时用 fallback。
@@ -6984,6 +6993,82 @@ mod tests {
             events,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn chat_image_shortcuts_do_not_type_v_or_consume_text_paste() {
+        let keys = crate::config::Keys::default();
+        let mut prefix = false;
+        let press = |code, modifiers| KeyEvent::new(code, modifiers);
+        let ctrl_b = press(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert_eq!(
+            chat_image_key(ctrl_b, &keys, &mut prefix),
+            ChatImageKey::Consumed
+        );
+        assert!(prefix);
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let mut key = ctrl_b;
+            key.kind = kind;
+            assert_eq!(
+                chat_image_key(key, &keys, &mut prefix),
+                ChatImageKey::Consumed
+            );
+            assert!(prefix);
+        }
+        assert_eq!(
+            chat_image_key(
+                press(KeyCode::Char('V'), KeyModifiers::SHIFT),
+                &keys,
+                &mut prefix
+            ),
+            ChatImageKey::Paste
+        );
+        assert!(!prefix);
+        assert_eq!(
+            chat_image_key(
+                press(KeyCode::Char('V'), KeyModifiers::SHIFT),
+                &keys,
+                &mut prefix
+            ),
+            ChatImageKey::Input
+        );
+        assert_eq!(
+            chat_image_key(
+                press(KeyCode::Char('v'), KeyModifiers::CONTROL),
+                &keys,
+                &mut prefix
+            ),
+            ChatImageKey::Paste
+        );
+        assert_eq!(
+            chat_image_key(
+                press(
+                    KeyCode::Char('v'),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL
+                ),
+                &keys,
+                &mut prefix
+            ),
+            ChatImageKey::Input
+        );
+        prefix = true;
+        assert_eq!(
+            chat_image_key(press(KeyCode::Esc, KeyModifiers::NONE), &keys, &mut prefix),
+            ChatImageKey::Consumed
+        );
+        assert!(!prefix);
+        let custom = crate::config::Keys {
+            paste_image: crate::config::Binding::parse("alt+i").unwrap(),
+            ..keys
+        };
+        assert_eq!(
+            chat_image_key(
+                press(KeyCode::Char('i'), KeyModifiers::ALT),
+                &custom,
+                &mut prefix
+            ),
+            ChatImageKey::Paste
+        );
     }
 
     #[test]

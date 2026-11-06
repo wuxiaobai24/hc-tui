@@ -2,6 +2,13 @@
 
 运行用户从 [Releases](https://github.com/wuxiaobai24/hc-tui/releases) 获取二进制，再用 `hc-tui update`；Rust/Zig 只属于贡献者的构建环境。
 
+## 版本与节奏
+
+- 后续版本按 `0.4.3 → 0.4.4 → 0.4.5` 递增，即每轮发布只增加 patch（`0.0.1`），不自动增加 minor。
+- 同一轮功能和修复合并、完成验证后统一发布，不为每个修复连续发布补丁版本。
+- 当前已发布的 `0.4.2` 保留；下一轮目标为 `0.4.3`，包含图片剪贴板与 Chat 图片粘贴快捷键修复。
+- 开发期间在 CHANGELOG 的“未发布”中累计变更；准备发布时再统一更新包版本、日期并打 tag。
+
 ## 发布前
 
 - 安装脚本变更先运行 `sh -n install.sh` 和 `python3 scripts/test-install.py`；发行包与 Release 均携带脚本。
