@@ -1,6 +1,5 @@
 //! Verified release archives and atomic replacement; no build toolchain at runtime.
 use anyhow::{bail, Context, Result};
-use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -75,6 +74,51 @@ fn download(url: &str, path: &Path) -> Result<()> {
         bail!("download failed: {url}");
     }
     Ok(())
+}
+
+fn version_from_release_url(url: &str) -> Result<String> {
+    let prefix = format!("https://github.com/{REPOSITORY}/releases/tag/");
+    Ok(version(
+        url.trim()
+            .strip_prefix(&prefix)
+            .context("latest release redirected to an unexpected URL")?,
+    )?
+    .to_string())
+}
+
+fn latest_version() -> Result<String> {
+    // The web redirect is public and avoids the anonymous GitHub API quota.
+    let output = Command::new("curl")
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--head",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{url_effective}",
+        ])
+        .arg(format!("https://github.com/{REPOSITORY}/releases/latest"))
+        .output()
+        .context("update needs curl on PATH")?;
+    if !output.status.success() {
+        bail!(
+            "cannot resolve latest release: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    version_from_release_url(&String::from_utf8(output.stdout)?)
 }
 
 fn checksum(archive: &Path, expected: &Path) -> Result<()> {
@@ -190,17 +234,10 @@ pub fn run(args: &[String]) -> Result<()> {
     let (archive, expected_version) = if let Some(archive) = from {
         (fs::canonicalize(archive)?, requested)
     } else {
-        let endpoint = match &requested {
-            Some(version) => {
-                format!("https://api.github.com/repos/{REPOSITORY}/releases/tags/v{version}")
-            }
-            None => format!("https://api.github.com/repos/{REPOSITORY}/releases/latest"),
+        let latest = match &requested {
+            Some(version) => version.clone(),
+            None => latest_version()?,
         };
-        let metadata = temporary.0.join("release.json");
-        download(&endpoint, &metadata)?;
-        let release: Value = serde_json::from_slice(&fs::read(metadata)?)?;
-        let tag = release["tag_name"].as_str().context("release has no tag")?;
-        let latest = version(tag)?.to_string();
         println!("installed {} · release {latest}", env!("CARGO_PKG_VERSION"));
         if check
             || (requested.is_none()
@@ -209,23 +246,9 @@ pub fn run(args: &[String]) -> Result<()> {
             return Ok(());
         }
         let asset = format!("hc-tui-{latest}-{}.tar.gz", target()?);
-        let assets = release["assets"]
-            .as_array()
-            .context("release has no assets")?;
         for name in [&asset, &format!("{asset}.sha256")] {
-            let found = assets
-                .iter()
-                .find(|a| a["name"].as_str() == Some(name.as_str()))
-                .with_context(|| format!("release is missing {name}; no update performed"))?;
-            let url = found["browser_download_url"]
-                .as_str()
-                .context("asset has no download URL")?;
-            let expected =
-                format!("https://github.com/{REPOSITORY}/releases/download/{tag}/{name}");
-            if url != expected {
-                bail!("unexpected release asset URL");
-            }
-            download(url, &temporary.0.join(name))?;
+            let url = format!("https://github.com/{REPOSITORY}/releases/download/v{latest}/{name}");
+            download(&url, &temporary.0.join(name))?;
         }
         (temporary.0.join(asset), Some(latest))
     };
@@ -274,6 +297,12 @@ mod tests {
             assert!(version(invalid).is_err());
         }
         assert_eq!(version("v0.4.0").unwrap(), "0.4.0");
+        assert_eq!(
+            version_from_release_url("https://github.com/wuxiaobai24/hc-tui/releases/tag/v0.4.1")
+                .unwrap(),
+            "0.4.1"
+        );
+        assert!(version_from_release_url("https://example.com/releases/tag/v0.4.1").is_err());
         assert!(numeric_version("0.10.0").unwrap() > numeric_version("0.9.9").unwrap());
     }
     #[test]

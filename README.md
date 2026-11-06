@@ -22,7 +22,7 @@ core 持有程序，TUI 负责界面；远程传输直接复用 core 的 machine
 例如 Linux amd64：
 
 ```sh
-version=0.4.0
+version=0.4.1
 target=x86_64-unknown-linux-musl
 archive="hc-tui-$version-$target.tar.gz"
 curl -fLO "https://github.com/wuxiaobai24/hc-tui/releases/download/v$version/$archive"
@@ -40,8 +40,8 @@ hc-tui
 ```sh
 hc-tui update --check          # 查询发行版本
 hc-tui update                  # 下载当前平台的最新正式版，校验后原子替换
-hc-tui update --version 0.4.0   # 指定版本
-hc-tui update --from ./hc-tui-0.4.0-x86_64-unknown-linux-musl.tar.gz
+hc-tui update --version 0.4.1   # 指定版本
+hc-tui update --from ./hc-tui-0.4.1-x86_64-unknown-linux-musl.tar.gz
 ```
 
 升级使用 curl、tar 及 sha256sum（macOS 为 shasum），本地包也必须有同名 `.sha256`。
