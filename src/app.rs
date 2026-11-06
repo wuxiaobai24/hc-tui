@@ -1278,6 +1278,16 @@ impl App {
         if self.copy.is_some() {
             return;
         }
+        if let Some(image) = clipboard::image_file_paste(&text) {
+            match image {
+                Ok(image) => self.upload_image_file(image.bytes, image.extension),
+                Err(error) => {
+                    self.note = error;
+                    self.dirty = true;
+                }
+            }
+            return;
+        }
         if let Some(chat) = self.chat.as_mut() {
             chat.insert(&text);
             self.dirty = true;
@@ -5149,13 +5159,27 @@ impl App {
     }
 
     fn upload_image(&mut self, bytes: Vec<u8>) {
-        let pane = self.input_pane();
+        self.upload_image_file(bytes, "png");
+    }
+
+    fn upload_image_file(&mut self, bytes: Vec<u8>, extension: &str) {
+        if bytes.len() > clipboard::MAX_IMAGE_BYTES {
+            self.note = "image was not uploaded: core accepts at most 8 MiB".into();
+            self.dirty = true;
+            return;
+        }
+        let pane = self
+            .chat
+            .as_ref()
+            .map(|chat| chat.pane)
+            .unwrap_or_else(|| self.input_pane());
         let Some(terminal) = self
             .panes
             .get(&pane)
+            .filter(|state| state.is_live())
             .and_then(|state| state.terminal.clone())
         else {
-            self.note = "this pane has no terminal yet".to_string();
+            self.note = "image was not uploaded: target terminal is not connected".to_string();
             self.dirty = true;
             return;
         };
@@ -5163,10 +5187,14 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
+        let mut tag = format!("put-image:{pane}:{stamp}");
+        if let Some(chat) = self.chat.as_ref() {
+            tag.push_str(&format!(":chat:{}", chat.request_tag));
+        }
         self.call_rpc(
-            &format!("put-image:{pane}:{stamp}"),
+            &tag,
             "terminal.put",
-            json!({ "terminal": terminal, "name": format!("paste-{stamp}.png"), "data": crate::clipboard::base64(&bytes) }),
+            json!({ "terminal": terminal, "name": format!("paste-{stamp}.{extension}"), "data": crate::clipboard::base64(&bytes) }),
         );
         self.note = "pasting clipboard image".to_string();
         self.dirty = true;
@@ -5374,9 +5402,22 @@ impl App {
                             .filter(|state| state.terminal == image_terminal && state.is_live())
                         {
                             state.view.scroll_bottom();
-                            let bytes = state.view.encode_paste(path);
-                            self.send(Command::Input { pane, bytes });
-                            self.note = format!("image sent · {path}");
+                            if let Some((_, chat_id)) = tag.split_once(":chat:") {
+                                if let Some(chat) = self
+                                    .chat
+                                    .as_mut()
+                                    .filter(|chat| chat.pane == pane && chat.request_tag == chat_id)
+                                {
+                                    chat.insert(&format!("{path} "));
+                                    self.note = format!("image attached · {path}");
+                                } else {
+                                    self.note = format!("image uploaded · chat closed · {path}");
+                                }
+                            } else {
+                                let bytes = state.view.encode_paste(path);
+                                self.send(Command::Input { pane, bytes });
+                                self.note = format!("image sent · {path}");
+                            }
                         } else {
                             self.note = format!("image uploaded · target pane closed · {path}");
                         }
@@ -6989,6 +7030,81 @@ mod tests {
         assert!(app.space_scroll > 0);
         assert_eq!(app.sidebar_scroll, 0);
         assert!(!app.workspace_hits.iter().any(|(index, _)| *index == 0));
+    }
+
+    #[test]
+    fn pasted_image_files_upload_to_the_remote_terminal_before_inserting_any_path() {
+        let mut app = offline_app();
+        let pane = app.focused();
+        app.panes.get_mut(&pane).unwrap().terminal = Some("dev/t7".into());
+        app.panes.get_mut(&pane).unwrap().state = PaneState::Live { channel: 7 };
+        let path =
+            std::env::temp_dir().join(format!("{}.png", crate::shared::identity("paste-file-")));
+        let bytes = b"\x89PNG\r\n\x1a\noriginal image";
+        std::fs::write(&path, bytes).unwrap();
+        app.on_paste(path.to_string_lossy().into_owned());
+        let (tag, (method, params)) = app
+            .inflight
+            .iter()
+            .find(|(tag, _)| tag.starts_with("put-image:"))
+            .unwrap();
+        assert_eq!(method, "terminal.put");
+        assert_eq!(params["terminal"], "dev/t7");
+        assert_eq!(params["data"], crate::clipboard::base64(bytes));
+        let tag = tag.clone();
+        app.on_reply(&tag, Ok(json!({"path":"/remote/received.png"})));
+        assert_eq!(app.note, "image sent · /remote/received.png");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn image_path_paste_in_chat_waits_for_upload_and_does_not_keep_a_mac_path() {
+        let mut app = offline_app();
+        let pane = app.focused();
+        app.panes.get_mut(&pane).unwrap().terminal = Some("dev/t7".into());
+        app.panes.get_mut(&pane).unwrap().state = PaneState::Live { channel: 7 };
+        app.chat = Some(Chat::from_lines(pane, vec![]));
+        app.on_paste("/Users/missing/mac-only-image.png".into());
+        assert!(app.note.contains("image was not uploaded"));
+        assert!(app.chat.as_ref().unwrap().input.is_empty());
+        assert!(!app.inflight.keys().any(|tag| tag.starts_with("put-image:")));
+        app.upload_image(b"png".to_vec());
+        assert!(app.chat.as_ref().unwrap().input.is_empty());
+        let tag = app
+            .inflight
+            .keys()
+            .find(|tag| tag.starts_with("put-image:"))
+            .unwrap()
+            .clone();
+        app.on_reply(&tag, Ok(json!({"path":"/remote/image.png"})));
+        assert_eq!(app.chat.as_ref().unwrap().input, "/remote/image.png ");
+        let before = app.chat.as_ref().unwrap().input.clone();
+        app.upload_image(b"png".to_vec());
+        let tag = app
+            .inflight
+            .keys()
+            .find(|tag| tag.starts_with("put-image:"))
+            .unwrap()
+            .clone();
+        app.on_reply(
+            &tag,
+            Err(crate::hc::net::RpcFailure {
+                kind: "unavailable".into(),
+                message: "remote unavailable".into(),
+            }),
+        );
+        assert_eq!(app.chat.as_ref().unwrap().input, before);
+        assert!(app.note.contains("send image failed"));
+        app.upload_image(b"png".to_vec());
+        let tag = app
+            .inflight
+            .keys()
+            .find(|tag| tag.starts_with("put-image:"))
+            .unwrap()
+            .clone();
+        app.chat = None;
+        app.on_reply(&tag, Ok(json!({"path":"/remote/late.png"})));
+        assert!(app.note.contains("chat closed"));
     }
 
     #[test]

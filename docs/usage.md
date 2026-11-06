@@ -266,6 +266,15 @@ hc-tui update
 ```
 
 首次安装自动选择 Linux/macOS、amd64/arm64 的正式发行包，默认写入 `~/.local/bin`。
-可用 `sh -s -- --bin-dir /chosen/bin --version 0.4.1` 指定目录和版本，或设置 `HC_TUI_INSTALL_DIR`。
+可用 `sh -s -- --bin-dir /chosen/bin --version 0.4.2` 指定目录和版本，或设置 `HC_TUI_INSTALL_DIR`。
 安装器和更新器均验证发行包 SHA-256 与可执行版本，使用原子替换；失败时不会覆盖原安装。
 `hc-tui update` 更新当前正在执行的二进制所在位置，重开客户端后生效，core 中的程序和配置保留。
+
+### Mac 文件路径粘贴到远端 Pane
+
+Mac 宿主可能把图片复制为 `/Users/.../截图.png`、带引号/转义的路径，或 `file://` URL。
+普通粘贴现在识别这些独立图片路径，读取 **运行 TUI 的本机文件**，通过 `terminal.put` 将字节传给目标终端所在机器，等待成功后再粘贴返回的目标路径。PNG/JPEG/GIF/WebP 都按实际格式保留扩展名，最大 8 MiB。
+Chat 模式下返回路径进入原 Chat 的输入框，不直接输入底层 shell；期间关闭 Chat 时只提示已上传位置。
+不可读、超限、无效图片或 RPC 失败会显示未上传/上传失败，原始本机路径不会继续发给 agent。普通文字及非图片路径维持原处理；`terminal.paste` 可显式发送不作附件识别的字面文本。
+
+这条链路适用于 Mac 本机 TUI + 远端 Pane。若在 SSH 里运行 TUI，远端进程无法读取 Mac 的 `/Users/...`，需要由 Mac 宿主先提供文件字节；单独的路径文本不包含图片。

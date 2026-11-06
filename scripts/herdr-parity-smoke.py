@@ -109,6 +109,16 @@ try:
     payload += json.dumps(extra)+"\n"
     rpc("file.write",{"on":"peer","path":transcript,"data":base64.b64encode(payload.encode()).decode()})
     wait("remote Pi incremental append visible",lambda:"REMOTE-PI-APPEND-PROOF" in screen())
+    # A host file-path paste uploads bytes and only then inserts a remote path.
+    image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMZkAAAAASUVORK5CYII=")
+    local_image = ROOT / "HOST-ONLY-截图.png"
+    local_image.write_bytes(image)
+    subprocess.check_call(["tmux","-L",SESSION,"send-keys","-t","tui","-l",f"\x1b[200~{local_image}\x1b[201~"])
+    def uploaded_image():
+        return next((path for path in ROOT.rglob("paste-*.png") if path.read_bytes()==image),None)
+    delivered = wait("host image bytes reach the remote core",uploaded_image)
+    assert delivered != local_image
+    wait("Chat receives uploaded image path instead of host source path",lambda:"paste-" in screen() and "HOST-ONLY" not in screen())
     rpc("terminal.label",{"terminal":remote_terminal,"labels":{"session":""}})
     wait("unmapped remote never displays stale local transcript",lambda:"远端会话未映射" in screen() and "REMOTE-PI-CHAT-PROOF" not in screen())
     subprocess.check_call(["tmux","-L",SESSION,"send-keys","-t","tui","Escape"])

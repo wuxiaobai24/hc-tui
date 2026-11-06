@@ -19,7 +19,7 @@ curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/instal
 指定版本或安装目录：
 
 ```sh
-curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/install.sh | sh -s -- --version 0.4.1 --bin-dir "$HOME/.local/bin"
+curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/install.sh | sh -s -- --version 0.4.2 --bin-dir "$HOME/.local/bin"
 ```
 
 也可用 `HC_TUI_INSTALL_DIR` 环境变量指定目录，或先下载 [安装脚本](install.sh) 检查后运行。
@@ -40,7 +40,7 @@ curl -fsSL https://github.com/wuxiaobai24/hc-tui/releases/latest/download/instal
 例如 Linux amd64：
 
 ```sh
-version=0.4.1
+version=0.4.2
 target=x86_64-unknown-linux-musl
 archive="hc-tui-$version-$target.tar.gz"
 curl -fLO "https://github.com/wuxiaobai24/hc-tui/releases/download/v$version/$archive"
@@ -60,9 +60,11 @@ hc-tui
 ```sh
 hc-tui update --check          # 查询发行版本
 hc-tui update                  # 下载当前平台的最新正式版，校验后原子替换
-hc-tui update --version 0.4.1   # 指定版本
-hc-tui update --from ./hc-tui-0.4.1-x86_64-unknown-linux-musl.tar.gz
+hc-tui update --version 0.4.2   # 指定版本
+hc-tui update --from ./hc-tui-0.4.2-x86_64-unknown-linux-musl.tar.gz
 ```
+
+Mac 本机运行 TUI 时，粘贴图片文件路径或 `file://` 地址会先读取本机图片、上传到目标 Pane 所在机器，再插入远端路径；不直接把 `/Users/...` 交给远端。图片需在 TUI 所在机器上可读，且不超过 core 的 8 MiB 限制。
 
 升级使用 curl、tar 及 sha256sum（macOS 为 shasum），本地包也必须有同名 `.sha256`。
 已运行的客户端继续用旧版本，重开后生效。源码构建见文末附录。

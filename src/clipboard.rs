@@ -1,4 +1,4 @@
-//! 复制到宿主剪贴板。
+//! 宿主剪贴板复制与图片路径粘贴。
 //!
 //! 两条路一起走：先写 OSC 52（无需任何外部程序，多数终端支持），再尽力调用
 //! 平台剪贴板工具。任一条成立就算成功，调用方只把结果写进状态栏。
@@ -122,5 +122,201 @@ mod tests {
         assert!(base64(b"hello").ends_with('='));
         assert_eq!(base64(b"hello").len(), 8);
         assert_eq!(&base64(b"hello")[..4], &base64(b"hell")[..4]);
+    }
+}
+
+pub(crate) const MAX_IMAGE_BYTES: usize = 8 << 20;
+
+/// A host terminal may paste a file path instead of image bytes (e.g. macOS file copies).
+pub(crate) struct ImageAttachment {
+    pub bytes: Vec<u8>,
+    pub extension: &'static str,
+}
+
+/// None means ordinary text. A recognized image path must upload or report an error;
+/// it must not silently become an inaccessible attachment path in another machine.
+pub(crate) fn image_file_paste(text: &str) -> Option<Result<ImageAttachment, String>> {
+    use std::io::Read;
+    let text = text.trim();
+    if text.contains(['\r', '\n']) {
+        return None;
+    }
+    let text = if text.len() >= 2
+        && ((text.starts_with('\'') && text.ends_with('\''))
+            || (text.starts_with('"') && text.ends_with('"')))
+    {
+        &text[1..text.len().saturating_sub(1)]
+    } else {
+        text
+    };
+    let lower = text.to_ascii_lowercase();
+    if ![".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+    {
+        return None;
+    }
+    let mut path = String::new();
+    if let Some(url) = text.strip_prefix("file://") {
+        let url = url
+            .strip_prefix("localhost/")
+            .map(|path| format!("/{path}"))
+            .unwrap_or_else(|| url.to_string());
+        if !url.starts_with('/') {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut encoded = url.as_bytes().iter().copied();
+        while let Some(byte) = encoded.next() {
+            if byte == b'%' {
+                let high = encoded.next().and_then(|b| (b as char).to_digit(16));
+                let low = encoded.next().and_then(|b| (b as char).to_digit(16));
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Some(Err("invalid image file URL".into()));
+                };
+                bytes.push((high * 16 + low) as u8);
+            } else {
+                bytes.push(byte);
+            }
+        }
+        path = match String::from_utf8(bytes) {
+            Ok(path) => path,
+            Err(_) => return Some(Err("invalid UTF-8 image path".into())),
+        };
+    } else {
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                path.push(chars.next().unwrap_or(ch));
+            } else {
+                path.push(ch);
+            }
+        }
+    }
+    let path = std::path::Path::new(&path);
+    if !path.is_absolute() {
+        return None;
+    }
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        return None;
+    }
+    Some((|| {
+        let unreadable = |error| {
+            format!("image was not uploaded: source is unreadable on the TUI machine ({error})")
+        };
+        let mut bytes = Vec::new();
+        let metadata = std::fs::metadata(path).map_err(unreadable)?;
+        if !metadata.is_file() {
+            return Err("image was not uploaded: source is not a regular file".into());
+        }
+        let file = std::fs::File::open(path).map_err(unreadable)?;
+        // terminal.put accepts at most 8 MiB; bound the read if the file grows.
+        file.take((MAX_IMAGE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("cannot read image: {error}"))?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err("image was not uploaded: core accepts at most 8 MiB".into());
+        }
+        let extension = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "png"
+        } else if bytes.starts_with(b"\xff\xd8\xff") {
+            "jpg"
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            "gif"
+        } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+            "webp"
+        } else {
+            return Err("image was not uploaded: file is not PNG, JPEG, GIF or WebP".into());
+        };
+        Ok(ImageAttachment { bytes, extension })
+    })())
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn image_paths_quotes_escapes_and_file_urls_read_the_original_bytes() {
+        let root = std::env::temp_dir().join(crate::shared::identity("image-paste-"));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("企业微信截图 (one).png");
+        let bytes = b"\x89PNG\r\n\x1a\noriginal";
+        std::fs::write(&path, bytes).unwrap();
+        let plain = path.to_str().unwrap();
+        let encoded: String = plain
+            .bytes()
+            .map(|byte| {
+                if byte == b'/' || byte == b'.' || byte.is_ascii_alphanumeric() {
+                    (byte as char).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect();
+        for text in [
+            plain.to_string(),
+            format!("'{plain}'"),
+            format!("\"{plain}\""),
+            plain
+                .replace(' ', "\\ ")
+                .replace('(', "\\(")
+                .replace(')', "\\)"),
+            format!("file://{encoded}"),
+            format!("file://localhost{encoded}"),
+        ] {
+            let attachment = image_file_paste(&text).unwrap().unwrap();
+            assert_eq!(attachment.bytes, bytes);
+            assert_eq!(attachment.extension, "png");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unavailable_mac_images_are_errors_and_ordinary_text_is_untouched() {
+        let path = format!(
+            "/Users/no-such-user/{}/企业微信截图.png",
+            crate::shared::identity("clipboard-")
+        );
+        let error = image_file_paste(&path).unwrap().err().unwrap();
+        assert!(error.contains("image was not uploaded"));
+        assert!(error.contains("TUI machine"));
+        for text in [
+            "",
+            "'",
+            "\"",
+            "normal text",
+            "please inspect /tmp/image.png",
+            "relative.png",
+            "file:///tmp/100%notes.md",
+            "one\ntwo",
+            "/tmp/main.rs",
+        ] {
+            assert!(image_file_paste(text).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_and_oversized_images_are_not_uploaded() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(crate::shared::identity("image-paste-invalid-"));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("image.png");
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(image_file_paste(path.to_str().unwrap())
+            .unwrap()
+            .err()
+            .unwrap()
+            .contains("not PNG"));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"\x89PNG\r\n\x1a\n").unwrap();
+        file.set_len((8 << 20) + 1).unwrap();
+        assert!(image_file_paste(path.to_str().unwrap())
+            .unwrap()
+            .err()
+            .unwrap()
+            .contains("8 MiB"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
