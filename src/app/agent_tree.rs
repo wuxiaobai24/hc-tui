@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::t;
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn arrange(
@@ -61,7 +62,7 @@ pub(super) fn arrange(
     if priority {
         for &i in &roots {
             if rows[i].group != "Pinned" {
-                rows[i].group = attention_section(ranks[&i]).to_string();
+                rows[i].group = t(attention_section(ranks[&i])).to_string();
                 rows[i].group_id = format!("priority:{}", rows[i].group);
             }
         }

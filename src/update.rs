@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::i18n::{t, t1, t2};
+
 const REPOSITORY: &str = "wuxiaobai24/hc-tui";
 
 pub fn target() -> Result<&'static str> {
@@ -13,7 +15,7 @@ pub fn target() -> Result<&'static str> {
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        (os, arch) => bail!("no release archive for {os}/{arch}"),
+        (os, arch) => bail!(t2("no release archive for {}/{}", os, arch)),
     }
 }
 
@@ -25,7 +27,7 @@ fn version(value: &str) -> Result<&str> {
             .iter()
             .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
     {
-        bail!("expected a release version such as 0.4.0");
+        bail!(t("expected a release version such as 0.4.0"));
     }
     Ok(value)
 }
@@ -69,9 +71,9 @@ fn download(url: &str, path: &Path) -> Result<()> {
         .arg(path)
         .arg(url)
         .status()
-        .context("update needs curl on PATH")?;
+        .context(t("update needs curl on PATH"))?;
     if !status.success() {
-        bail!("download failed: {url}");
+        bail!(t1("download failed: {}", url));
     }
     Ok(())
 }
@@ -81,7 +83,7 @@ fn version_from_release_url(url: &str) -> Result<String> {
     Ok(version(
         url.trim()
             .strip_prefix(&prefix)
-            .context("latest release redirected to an unexpected URL")?,
+            .context(t("latest release redirected to an unexpected URL"))?,
     )?
     .to_string())
 }
@@ -111,24 +113,27 @@ fn latest_version() -> Result<String> {
         ])
         .arg(format!("https://github.com/{REPOSITORY}/releases/latest"))
         .output()
-        .context("update needs curl on PATH")?;
+        .context(t("update needs curl on PATH"))?;
     if !output.status.success() {
         bail!(
-            "cannot resolve latest release: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{}",
+            t1(
+                "cannot resolve latest release: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         );
     }
     version_from_release_url(&String::from_utf8(output.stdout)?)
 }
 
 fn checksum(archive: &Path, expected: &Path) -> Result<()> {
-    let text = fs::read_to_string(expected).context("archive needs its .sha256 file")?;
+    let text = fs::read_to_string(expected).context(t("archive needs its .sha256 file"))?;
     let expected = text
         .split_whitespace()
         .next()
-        .context("empty SHA-256 file")?;
+        .context(t("empty SHA-256 file"))?;
     if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("invalid SHA-256 file");
+        bail!(t("invalid SHA-256 file"));
     }
     let output = if cfg!(target_os = "macos") {
         Command::new("shasum")
@@ -138,10 +143,10 @@ fn checksum(archive: &Path, expected: &Path) -> Result<()> {
     } else {
         Command::new("sha256sum").arg(archive).output()
     }
-    .context("cannot calculate SHA-256")?;
+    .context(t("cannot calculate SHA-256"))?;
     let actual = String::from_utf8(output.stdout)?;
     if !output.status.success() || actual.split_whitespace().next() != Some(expected) {
-        bail!("SHA-256 mismatch; installed executable was not changed");
+        bail!(t("SHA-256 mismatch; installed executable was not changed"));
     }
     Ok(())
 }
@@ -151,15 +156,15 @@ fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
         .arg("-tzf")
         .arg(archive)
         .output()
-        .context("update needs tar on PATH")?;
+        .context(t("update needs tar on PATH"))?;
     if !listing.status.success() {
-        bail!("cannot list release archive");
+        bail!(t("cannot list release archive"));
     }
     let listing = String::from_utf8(listing.stdout)?;
     let name = listing
         .lines()
         .find(|line| *line == "./hc-tui" || *line == "hc-tui")
-        .context("archive has no hc-tui executable at its root")?;
+        .context(t("archive has no hc-tui executable at its root"))?;
     let status = Command::new("tar")
         .arg("-xzf")
         .arg(archive)
@@ -169,7 +174,7 @@ fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
         .status()?;
     let candidate = directory.join("hc-tui");
     if !status.success() || !fs::symlink_metadata(&candidate)?.file_type().is_file() {
-        bail!("archive executable is not a regular file");
+        bail!(t("archive executable is not a regular file"));
     }
     Ok(candidate)
 }
@@ -177,7 +182,7 @@ fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
 fn install(candidate: &Path, executable: &Path) -> Result<()> {
     let parent = executable
         .parent()
-        .context("executable has no parent directory")?;
+        .context(t("executable has no parent directory"))?;
     let staged = parent.join(crate::shared::identity(".hc-tui-update-"));
     let result = (|| -> Result<()> {
         let mut input = fs::File::open(candidate)?;
@@ -185,7 +190,9 @@ fn install(candidate: &Path, executable: &Path) -> Result<()> {
             .write(true)
             .create_new(true)
             .open(&staged)
-            .context("cannot stage update beside executable; check directory permissions")?;
+            .context(t(
+                "cannot stage update beside executable; check directory permissions",
+            ))?;
         std::io::copy(&mut input, &mut output)?;
         #[cfg(unix)]
         {
@@ -194,7 +201,7 @@ fn install(candidate: &Path, executable: &Path) -> Result<()> {
         }
         output.flush()?;
         output.sync_all()?;
-        fs::rename(&staged, executable).context("cannot atomically replace executable")?;
+        fs::rename(&staged, executable).context(t("cannot atomically replace executable"))?;
         Ok(())
     })();
     if result.is_err() {
@@ -212,23 +219,26 @@ pub fn run(args: &[String]) -> Result<()> {
         match arg.as_str() {
             "--version" => {
                 requested =
-                    Some(version(args.next().context("--version needs a value")?)?.to_string())
+                    Some(version(args.next().context(t("--version needs a value"))?)?.to_string())
             }
             "--from" => {
                 from = Some(PathBuf::from(
-                    args.next().context("--from needs a .tar.gz archive")?,
+                    args.next().context(t("--from needs a .tar.gz archive"))?,
                 ))
             }
             "--check" => check = true,
             "--help" | "-h" => {
-                println!("hc-tui update [--version X.Y.Z] [--check] [--from archive.tar.gz]\nArchives require a matching archive.tar.gz.sha256. Updates replace this executable atomically.");
+                println!(
+                    "{}",
+                    t("hc-tui update [--version X.Y.Z] [--check] [--from archive.tar.gz]\nArchives require a matching archive.tar.gz.sha256. Updates replace this executable atomically.")
+                );
                 return Ok(());
             }
-            arg => bail!("unknown update option: {arg}"),
+            arg => bail!(t1("unknown update option: {}", arg)),
         }
     }
     if check && from.is_some() {
-        bail!("--check cannot be combined with --from");
+        bail!(t("--check cannot be combined with --from"));
     }
     let temporary = Temporary::new()?;
     let (archive, expected_version) = if let Some(archive) = from {
@@ -238,7 +248,14 @@ pub fn run(args: &[String]) -> Result<()> {
             Some(version) => version.clone(),
             None => latest_version()?,
         };
-        println!("installed {} · release {latest}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{}",
+            t2(
+                "installed {} · release {}",
+                env!("CARGO_PKG_VERSION"),
+                &latest
+            )
+        );
         if check
             || (requested.is_none()
                 && numeric_version(&latest)? <= numeric_version(env!("CARGO_PKG_VERSION"))?)
@@ -260,23 +277,29 @@ pub fn run(args: &[String]) -> Result<()> {
     let output = Command::new(&candidate)
         .arg("--version")
         .output()
-        .context("downloaded executable cannot run on this machine")?;
+        .context(t("downloaded executable cannot run on this machine"))?;
     let output_version = String::from_utf8(output.stdout)?;
     let value = version(
         output_version
             .trim()
             .strip_prefix("hc-tui ")
-            .context("invalid executable version output")?,
+            .context(t("invalid executable version output"))?,
     )?;
     if !output.status.success()
         || expected_version
             .as_deref()
             .is_some_and(|expected| expected != value)
     {
-        bail!("executable version does not match release");
+        bail!(t("executable version does not match release"));
     }
     install(&candidate, &std::env::current_exe()?)?;
-    println!("updated hc-tui to {value}; reopen running clients to use it");
+    println!(
+        "{}",
+        t1(
+            "updated hc-tui to {}; reopen running clients to use it",
+            value
+        )
+    );
     Ok(())
 }
 

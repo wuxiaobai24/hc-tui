@@ -20,6 +20,8 @@ use tokio::process::Child;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
+use crate::i18n::{t, t1};
+
 use super::client::{self, OpenError, Parts};
 use super::codec::{self, Frame, DATA};
 use super::proto::{self, AttachResult, Display, Event, SubscribeResult, TerminalSummary};
@@ -34,7 +36,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKOFF_MIN: Duration = Duration::from_millis(200);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
-/// 单个 Pane 的待发输入上限。触顶时丢最旧的字节，避免把内存拖爆。
+/// 单个 Pane 的待发输入上限。超限时拒绝整个新批次，保留已排队的字节。
 const OUTBOX_MAX: usize = 4 << 20;
 /// 本地假定的 cell 像素尺寸，FACTS 上报用。
 pub const CELL_PX: [u32; 2] = [8, 16];
@@ -103,6 +105,10 @@ pub enum NetEvent {
     Failed {
         reason: String,
     },
+    InputRejected {
+        pane: u32,
+        bytes: usize,
+    },
     Snapshot {
         seq: u64,
         terminals: Vec<TerminalSummary>,
@@ -152,11 +158,13 @@ pub struct NetConfig {
 pub struct NetHandle {
     commands: UnboundedSender<Command>,
     thread: Option<std::thread::JoinHandle<()>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl NetHandle {
     pub fn spawn(config: NetConfig, events: Sender<NetEvent>) -> Self {
         let (commands, command_rx) = mpsc::unbounded_channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
         let thread = std::thread::Builder::new()
             .name("hc-net".to_string())
             .spawn(move || {
@@ -167,15 +175,24 @@ impl NetHandle {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         let _ = events.send(NetEvent::Failed {
-                            reason: format!("cannot start tokio runtime: {error}"),
+                            reason: t1("cannot start tokio runtime: {}", error),
                         });
                         return;
                     }
                 };
-                runtime.block_on(supervise(config, events, command_rx));
+                runtime.block_on(async {
+                    tokio::select! {
+                        _ = supervise(config, events, command_rx) => {}
+                        _ = stopped => {}
+                    }
+                });
             })
             .ok();
-        Self { commands, thread }
+        Self {
+            commands,
+            thread,
+            stop: Some(stop),
+        }
     }
 
     /// 非阻塞投递。线程已经退出时返回 `false`，调用方据此显示错误。
@@ -184,7 +201,10 @@ impl NetHandle {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.commands.send(Command::Shutdown);
+        // 取消整个连接任务：hello、RPC 或写管道阻塞时也能退出。
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -280,6 +300,16 @@ struct Stream {
     /// core 给我们的可写额度，发出去的字节从这里扣。
     credit: i64,
     outbox: Vec<u8>,
+}
+
+impl Stream {
+    fn queue_input(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() > OUTBOX_MAX.saturating_sub(self.outbox.len()) {
+            return false;
+        }
+        self.outbox.extend_from_slice(bytes);
+        true
+    }
 }
 
 /// 重连主循环。只有 UI 明确要求退出或出现致命错误才结束。
@@ -461,10 +491,10 @@ impl Session<'_> {
         // 先订阅事件，再 attach：快照与后续增量之间不会漏变化。
         let subscribe = match self.rpc("events.subscribe", json!({})).await {
             Ok(value) => value,
-            Err(error) => return self.lost(format!("events.subscribe failed: {error}")),
+            Err(error) => return self.lost(t1("events.subscribe failed: {}", error)),
         };
         let Some(subscribe) = SubscribeResult::parse(&subscribe) else {
-            return Outcome::Fatal("events.subscribe result shape changed".to_string());
+            return Outcome::Fatal(t("events.subscribe result shape changed").to_string());
         };
         self.events_channel = subscribe.channel;
         let _ = self.events.send(NetEvent::Snapshot {
@@ -493,7 +523,7 @@ impl Session<'_> {
         loop {
             tokio::select! {
                 message = self.frames.recv() => match message {
-                    None => return self.lost("core closed the connection".to_string()),
+                    None => return self.lost(t("core closed the connection").to_string()),
                     Some(FrameMsg::End(reason)) => return self.lost(reason),
                     Some(FrameMsg::Frame(frame)) => {
                         if let Err(error) = self.on_frame(frame).await {
@@ -513,9 +543,9 @@ impl Session<'_> {
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    if self.last_frame.elapsed() >= LIVENESS_TIMEOUT {return self.lost("no frames for a long time".to_string());}
+                    if self.last_frame.elapsed() >= LIVENESS_TIMEOUT {return self.lost(t("no frames for a long time").to_string());}
                     let expired:Vec<_>=self.pending.iter().filter(|(_,(_,_,deadline))|*deadline<=Instant::now()).map(|(id,_)|*id).collect();
-                    for id in expired {if let Some((tag,method,_))=self.pending.remove(&id){let _=self.events.send(NetEvent::Reply{tag,result:Err(RpcFailure{kind:"timeout".into(),message:format!("{method} timed out")})});}}
+                    for id in expired {if let Some((tag,method,_))=self.pending.remove(&id){let _=self.events.send(NetEvent::Reply{tag,result:Err(RpcFailure{kind:"timeout".into(),message:t1("{} timed out", method)})});}}
                 }
             }
         }
@@ -606,10 +636,12 @@ impl Session<'_> {
                 let Some(index) = self.stream_by_pane(pane) else {
                     return Ok(());
                 };
-                self.streams[index].outbox.extend_from_slice(&bytes);
-                if self.streams[index].outbox.len() > OUTBOX_MAX {
-                    let excess = self.streams[index].outbox.len() - OUTBOX_MAX;
-                    self.streams[index].outbox.drain(..excess);
+                if !self.streams[index].queue_input(&bytes) {
+                    let _ = self.events.send(NetEvent::InputRejected {
+                        pane,
+                        bytes: bytes.len(),
+                    });
+                    return Ok(());
                 }
                 self.flush_stream(index).await?;
             }
@@ -632,7 +664,7 @@ impl Session<'_> {
                     let _ = self.events.send(NetEvent::AttachClosed {
                         pane,
                         channel: stream.channel,
-                        reason: "detached".to_string(),
+                        reason: t("detached").to_string(),
                         program_exit: false,
                     });
                 }
@@ -650,7 +682,7 @@ impl Session<'_> {
                         tag,
                         result: Err(RpcFailure {
                             kind: "busy".into(),
-                            message: "too many pending calls".into(),
+                            message: t("too many pending calls").into(),
                         }),
                     });
                     return Ok(());
@@ -769,7 +801,7 @@ impl Session<'_> {
                     });
                     Ok(None)
                 } else if frame.channel == 0 {
-                    anyhow::bail!("core closed the connection");
+                    anyhow::bail!(t("core closed the connection"));
                 } else {
                     Ok(None)
                 }
@@ -848,13 +880,13 @@ impl Session<'_> {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(RpcError::new("timeout", format!("{method} timed out")));
+                return Err(RpcError::new("timeout", t1("{} timed out", method)));
             }
             let message = match tokio::time::timeout(remaining, self.frames.recv()).await {
                 Ok(Some(message)) => message,
-                Ok(None) => return Err(RpcError::new("closed", "core closed the connection")),
+                Ok(None) => return Err(RpcError::new("closed", t("core closed the connection"))),
                 Err(_) => {
-                    return Err(RpcError::new("timeout", format!("{method} timed out")));
+                    return Err(RpcError::new("timeout", t1("{} timed out", method)));
                 }
             };
             let frame = match message {
@@ -918,7 +950,9 @@ impl Session<'_> {
                     .get("address")
                     .and_then(Value::as_str)
                     .map(str::to_string)
-                    .ok_or_else(|| RpcError::new("protocol", "terminal.run returned no address"))?;
+                    .ok_or_else(|| {
+                        RpcError::new("protocol", t("terminal.run returned no address"))
+                    })?;
                 if let Some(intent) = self.intents.get_mut(&pane) {
                     intent.target = Some(address.clone());
                 }
@@ -940,7 +974,7 @@ impl Session<'_> {
             )
             .await?;
         let attach = AttachResult::parse(&result)
-            .ok_or_else(|| RpcError::new("protocol", "attach result shape changed"))?;
+            .ok_or_else(|| RpcError::new("protocol", t("attach result shape changed")))?;
 
         let label = attach
             .terminal
@@ -1089,5 +1123,35 @@ impl From<codec::CodecError> for RpcError {
 impl From<serde_json::Error> for RpcError {
     fn from(error: serde_json::Error) -> Self {
         Self::new("json", error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_overflow_preserves_queued_bytes_and_rejects_the_whole_paste() {
+        let mut stream = Stream {
+            pane: 1,
+            channel: 2,
+            cols: 80,
+            rows: 24,
+            credit: 0,
+            outbox: Vec::new(),
+        };
+        let original = vec![b'x'; OUTBOX_MAX - 4];
+        assert!(stream.queue_input(&original));
+        let paste = "\x1b[200~中文\x1b[201~".as_bytes();
+        assert!(!stream.queue_input(paste));
+        assert_eq!(stream.outbox, original);
+        assert!(stream.queue_input("中".as_bytes()));
+        assert_eq!(&stream.outbox[OUTBOX_MAX - 4..], "中".as_bytes());
+        assert!(stream.queue_input(b"!"));
+        assert_eq!(stream.outbox.len(), OUTBOX_MAX);
+        assert!(!stream.queue_input(b"overflow"));
+        stream.outbox.clear();
+        assert!(stream.queue_input(paste));
+        assert_eq!(stream.outbox, paste);
     }
 }

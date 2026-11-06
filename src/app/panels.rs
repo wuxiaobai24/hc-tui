@@ -1,5 +1,6 @@
 //! Script-backed TUI modules and built-in workspace panels.
 use super::*;
+use crate::i18n::t;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 pub(super) fn builtin(name: &str) -> Option<&'static str> {
@@ -44,7 +45,7 @@ impl App {
             if let Some(command) = command {
                 self.call_rpc(&tag,"machine.exec",json!({"argv":["sh","-c",command],"cwd":cwd,"on":on,"env":{"HC_TUI_PANEL_PROPS":raw.pointer("/content/props").cloned().unwrap_or(json!({})).to_string()},"timeout":30}));
             } else {
-                let text=format!("{name}\r\n\r\nRegister a [[panels]] command with this name in hc-tui/config.toml to display this GUI module in the terminal.\r\nIts content and props are preserved in the shared layout.");
+                let text=format!("{name}\r\n\r\n{}\r\n{}",t("Register a [[panels]] command with this name in hc-tui/config.toml to display this GUI module in the terminal."),t("Its content and props are preserved in the shared layout."));
                 if let Some(pane) = self.panes.get_mut(&slot.pane) {
                     pane.view.write(b"\x1b[2J\x1b[H");
                     pane.view.write(text.as_bytes());
@@ -71,10 +72,10 @@ impl App {
                 };
                 let mut text = format!("{}{}", decode("stdout"), decode("stderr"));
                 if value["timed_out"] == true {
-                    text.push_str("\nCommand timed out");
+                    text.push_str(&format!("\n{}", t("Command timed out")));
                 }
                 if value["truncated"] == true {
-                    text.push_str("\nOutput truncated");
+                    text.push_str(&format!("\n{}", t("Output truncated")));
                 }
                 text
             }

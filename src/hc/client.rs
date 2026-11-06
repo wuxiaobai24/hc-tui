@@ -9,10 +9,13 @@ use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use super::codec::{self, Frame, DATA};
+use crate::i18n::{t, t1, t2};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct CoreInfo {
@@ -73,27 +76,24 @@ pub async fn open(session: Option<&str>) -> Result<Parts, OpenError> {
         .kill_on_drop(true);
 
     let mut child = command.spawn().map_err(|error| {
-        OpenError::Retry(
-            anyhow::Error::new(error)
-                .context("cannot start `hc connect`; is herdr-core installed and on PATH?"),
-        )
+        OpenError::Retry(anyhow::Error::new(error).context(t(
+            "cannot start `hc connect`; is herdr-core installed and on PATH?",
+        )))
     })?;
     let mut stdin = child
         .stdin
         .take()
-        .context("hc connect has no stdin")
+        .context(t("hc connect has no stdin"))
         .map_err(OpenError::Retry)?;
     let mut stdout = BufReader::new(
         child
             .stdout
             .take()
-            .context("hc connect has no stdout")
+            .context(t("hc connect has no stdout"))
             .map_err(OpenError::Retry)?,
     );
 
-    let hello = hello(&mut stdin, &mut stdout)
-        .await
-        .map_err(OpenError::Fatal)?;
+    let hello = hello(&mut stdin, &mut stdout, std::time::Duration::from_secs(10)).await?;
     Ok(Parts {
         child,
         stdin,
@@ -103,7 +103,22 @@ pub async fn open(session: Option<&str>) -> Result<Parts, OpenError> {
 }
 
 /// 明文一行 `hello` 请求，明文一行回复；之后全是帧。
-async fn hello(stdin: &mut ChildStdin, stdout: &mut BufReader<ChildStdout>) -> Result<Hello> {
+async fn hello<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
+    stdin: &mut W,
+    stdout: &mut R,
+    timeout: std::time::Duration,
+) -> Result<Hello, OpenError> {
+    let line = tokio::time::timeout(timeout, exchange_hello(stdin, stdout))
+        .await
+        .map_err(|_| OpenError::Retry(anyhow::anyhow!(t("core hello timed out"))))?
+        .map_err(OpenError::Retry)?;
+    parse_hello(&line).map_err(OpenError::Fatal)
+}
+
+async fn exchange_hello<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
+    stdin: &mut W,
+    stdout: &mut R,
+) -> Result<String> {
     // features 是「另一个 core 拨入」时声明能力用的，客户端不发；能力看返回值。
     let request = json!({
         "jsonrpc": "2.0",
@@ -118,28 +133,34 @@ async fn hello(stdin: &mut ChildStdin, stdout: &mut BufReader<ChildStdout>) -> R
     let mut line = String::new();
     let read = stdout.read_line(&mut line).await?;
     if read == 0 {
-        bail!("core closed the connection during hello");
+        bail!(t("core closed the connection during hello"));
     }
-    let reply: Value = serde_json::from_str(&line).context("hello reply is not json")?;
+    Ok(line)
+}
+
+fn parse_hello(line: &str) -> Result<Hello> {
+    let reply: Value = serde_json::from_str(line).context(t("hello reply is not json"))?;
     if let Some(error) = reply.get("error") {
-        bail!("hello failed: {}", describe_error(error));
+        bail!(t1("hello failed: {}", describe_error(error)));
     }
-    let result = reply.get("result").context("hello reply has no result")?;
+    let result = reply
+        .get("result")
+        .context(t("hello reply has no result"))?;
     let hello: Hello =
-        serde_json::from_value(result.clone()).context("hello result shape changed")?;
+        serde_json::from_value(result.clone()).context(t("hello result shape changed"))?;
 
     if hello.generation != 1 {
-        bail!(
+        bail!(t1(
             "unsupported protocol generation {} (this client speaks 1); run `hc update`",
             hello.generation
-        );
+        ));
     }
     if !hello.framed {
-        bail!("core refused framed mode; run `hc update`");
+        bail!(t("core refused framed mode; run `hc update`"));
     }
     for required in REQUIRED_METHODS {
         if !hello.methods.iter().any(|method| method == required) {
-            bail!("core is missing `{required}`; run `hc update`");
+            bail!(t1("core is missing `{}`; run `hc update`", required));
         }
     }
     Ok(hello)
@@ -151,13 +172,13 @@ pub async fn read_frame(stdout: &mut BufReader<ChildStdout>) -> Result<Frame> {
     stdout
         .read_exact(&mut header)
         .await
-        .context("core closed the connection")?;
+        .context(t("core closed the connection"))?;
     let (channel, kind, len) = codec::decode_header(&header)?;
     let mut payload = vec![0u8; len];
     stdout
         .read_exact(&mut payload)
         .await
-        .context("core closed the connection mid-frame")?;
+        .context(t("core closed the connection mid-frame"))?;
     Ok(Frame {
         channel,
         kind,
@@ -212,7 +233,7 @@ impl Conn {
                 continue;
             }
             if let Some(error) = reply.get("error") {
-                bail!("{method} failed: {}", describe_error(error));
+                bail!(t2("{} failed: {}", method, describe_error(error)));
             }
             return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
         }
@@ -232,7 +253,7 @@ pub fn describe_error(error: &Value) -> String {
     let message = error
         .get("message")
         .and_then(Value::as_str)
-        .unwrap_or("unknown error");
+        .unwrap_or(t("unknown error"));
     let kind = error
         .pointer("/data/kind")
         .and_then(Value::as_str)
@@ -240,5 +261,43 @@ pub fn describe_error(error: &Value) -> String {
     match error.pointer("/data/hint").and_then(Value::as_str) {
         Some(hint) if !hint.is_empty() => format!("{kind}: {message} ({hint})"),
         _ => format!("{kind}: {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn hello_transport_failures_are_retryable() {
+        let mut input = tokio::io::sink();
+        let mut eof = BufReader::new(tokio::io::empty());
+        assert!(matches!(
+            hello(&mut input, &mut eof, Duration::from_secs(1)).await,
+            Err(OpenError::Retry(_))
+        ));
+        let (_peer, blocked) = tokio::io::duplex(128);
+        let mut blocked = BufReader::new(blocked);
+        assert!(matches!(
+            hello(&mut input, &mut blocked, Duration::from_millis(20)).await,
+            Err(OpenError::Retry(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn hello_incompatible_protocol_is_fatal() {
+        let reply = json!({"result": {
+            "generation": 2, "version": "test", "core": {"id": "test", "name": "test"},
+            "framed": true, "methods": REQUIRED_METHODS
+        }})
+        .to_string()
+            + "\n";
+        let mut input = tokio::io::sink();
+        let mut output = BufReader::new(reply.as_bytes());
+        assert!(matches!(
+            hello(&mut input, &mut output, Duration::from_secs(1)).await,
+            Err(OpenError::Fatal(_))
+        ));
     }
 }

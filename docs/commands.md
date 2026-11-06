@@ -64,6 +64,7 @@ Tab 数量及 Space 概览包含 settled Tab；settle 只是屏幕状态，不�
 | 动作 | 参数与结果 |
 |---|---|
 | pane.split | direction=right（默认）或 down |
+| pane.rename | 可选 pane / terminal 指定目标；name 设置别名，省略弹出输入框，空字符串清除 |
 | pane.close | 关闭目标 Pane 并结束程序；最后一个 Pane 按设置确认 |
 | pane.zoom | 切换当前 Pane 放大 |
 | pane.focus | terminal 指定 core 终端；也可通过通用 pane 参数定位现有 Pane |
@@ -89,8 +90,20 @@ Tab 数量及 Space 概览包含 settled Tab；settle 只是屏幕状态，不�
 | terminal.scroll | 可选 terminal；to=top/bottom，或 lines（有符号）/pages（可为小数）；负值向历史上方 |
 | terminal.search | 可选 terminal、query；进入 Copy Mode 搜索 |
 | terminal.right_click | 可选 terminal；to=program 或 menu，设置右键路由；Shift+右键总是菜单 |
+| agent.rename | 可选 terminal 指定目标；name 设置终端别名，省略弹框，空字符串清除；无需已有 Pane |
 | agent.focus | terminal 指定 Agent，可打开尚未显示的子 Agent |
 | agent.next / agent.prev | 沿当前可见 Agents 顺序循环，不包含普通 shell |
+
+重命名示例：
+
+```sh
+hc-tui do tab.rename '{"name":"开发"}'
+hc-tui do pane.rename '{"pane":"3","name":"测试"}'
+hc-tui do agent.rename '{"terminal":"peer/t7","name":"审查 Agent"}'
+```
+
+Agent 和对应 Pane 共用终端别名，写入 core 的 `hctui` 标签；Tab 名独立保存。
+重命名对话框预填现有别名，清空后恢复默认显示。
 
 前缀 i 的 terminal.send 是“文本 + Enter”，不同于 terminal.paste。
 按名字发送按键、等待输出、上传文件、模板选择器是键位入口，未另列为同名工作台命令。

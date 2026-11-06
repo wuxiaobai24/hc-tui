@@ -37,6 +37,7 @@ sidebar_min_width = 18
 sidebar_max_width = 36
 mobile_width_threshold = 64   # 宽度 <= 此值走手机单列布局，0 关闭
 sidebar_start_collapsed = false
+lang = "auto"    # auto | en | zh，auto 跟随 locale
 tab_bar_position = "top"   # top | bottom
 pane_borders = "auto"      # auto | always | titles | off
 pane_gaps = true
@@ -157,6 +158,7 @@ paste_image = "prefix+shift+v"
 | 配置 | 行为 |
 |---|---|
 | ui.sidebar_width / min_width / max_width | 终端列数，拖动宽度夹在范围内；不是像素 |
+| ui.lang | auto 跟随 `LC_ALL` / `LC_MESSAGES` / `LANG`；en / zh 强制指定 |
 | ui.pane_borders | auto 分屏才画；always 总是画；titles 仅标题；off 不画 |
 | ui.pane_gaps | true 保留相邻 Pane 各自边框；false 使用单条共享分隔线 |
 | ui.pane_outer_borders | 是否保留内容区最外沿边框 |
@@ -256,3 +258,14 @@ sound=true 时可分别设置 sound_path、done_path、request_path；可用播�
 paplay，其次 ffplay / afplay / mpv，无法播放回落终端响铃。
 复制同时尝试 OSC 52 和平台剪贴板工具；图片读取在 macOS 使用系统接口，Linux 需要 wl-paste / xclip。
 `HC_TUI_GRAPHICS=kitty|blocks` 控制图形模式，tmux 默认 blocks。
+
+## 键盘方案
+
+默认使用 Ctrl+B 前缀。可通过操作菜单切换，或在配置中设置：
+
+```toml
+[keys]
+preset = "zellij"  # default | zellij
+```
+
+Zellij 模式键、锁定直通和鼠标替代操作见 [交互操作](interaction.md)。

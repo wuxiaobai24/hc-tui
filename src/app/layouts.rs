@@ -1,5 +1,6 @@
 //! Personal TUI layout profiles. These files contain data, never running programs.
 use super::*;
+use crate::i18n::{t, t1};
 use std::io::Write;
 
 impl App {
@@ -9,7 +10,7 @@ impl App {
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-            "profile names use letters, digits, - or _"
+            t("profile names use letters, digits, - or _")
         );
         Ok(self
             .config
@@ -24,7 +25,7 @@ impl App {
         let wi = self.active_ws;
         let ti = self
             .workspace()
-            .ok_or_else(|| anyhow::anyhow!("no space"))?
+            .ok_or_else(|| anyhow::anyhow!(t("no space")))?
             .active;
         let ws = &self.workspaces[wi];
         let machine = ws.machine.as_deref().unwrap_or("");
@@ -39,10 +40,10 @@ impl App {
             .as_array()
             .and_then(|a| a.iter().find(|w| w["id"] == space_id))
             .ok_or_else(|| {
-                anyhow::anyhow!("layout contains a terminal that is not attached yet")
+                anyhow::anyhow!(t("layout contains a terminal that is not attached yet"))
             })?;
         let root = space["tabs"][ti]["root"].clone();
-        anyhow::ensure!(root.is_object(), "layout not ready");
+        anyhow::ensure!(root.is_object(), t("layout not ready"));
         let path = self.profile_path("layouts", name)?;
         std::fs::create_dir_all(path.parent().unwrap())?;
         let mut file = std::fs::OpenOptions::new()
@@ -50,7 +51,7 @@ impl App {
             .create_new(true)
             .open(&path)?;
         writeln!(file, "{}", serde_json::to_string_pretty(&root)?)?;
-        self.note = format!("Saved layout {name}");
+        self.note = t1("Saved layout {}", name);
         Ok(())
     }
     pub(super) fn load_layout(&mut self, name: &str) -> Result<()> {
@@ -59,7 +60,7 @@ impl App {
                 .workspaces
                 .get_mut(self.active_ws)
                 .and_then(|w| w.tab_mut())
-                .ok_or_else(|| anyhow::anyhow!("no tab"))?;
+                .ok_or_else(|| anyhow::anyhow!(t("no tab")))?;
             tab.tree = crate::layout::preset::build(index, &tab.tree.panes());
             tab.layout = Some(index);
             self.mark_layout();
@@ -74,7 +75,7 @@ impl App {
         let wi = self.active_ws;
         let ti = self
             .workspace()
-            .ok_or_else(|| anyhow::anyhow!("no space"))?
+            .ok_or_else(|| anyhow::anyhow!(t("no space")))?
             .active;
         if let Ok(tree) = serde_json::from_value::<SavedNode>(root.clone()) {
             let ids = tree.panes();
@@ -86,7 +87,7 @@ impl App {
                 .collect();
             anyhow::ensure!(
                 !ids.is_empty() && ids.len() == unique.len() && unique.is_subset(&owned),
-                "layout must use each existing tab pane at most once"
+                t("layout must use each existing tab pane at most once")
             );
             for id in owned.difference(&unique) {
                 self.remove_pane_view(*id);
@@ -113,7 +114,7 @@ impl App {
         let mut imported = crate::shared::decode(&raw, machine).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
             imported.workspaces[0].tabs.len() == 1,
-            "layout needs at least one content block"
+            t("layout needs at least one content block")
         );
         let mut saved = self.snapshot();
         let mut replacement = imported.workspaces.remove(0).tabs.remove(0);
@@ -151,7 +152,7 @@ impl App {
                     refresh: 5,
                 })
             })
-            .ok_or_else(|| anyhow::anyhow!("unknown panel {name}"))?;
+            .ok_or_else(|| anyhow::anyhow!(t1("unknown panel {}", name)))?;
         let mut panel = panel;
         panel.name = target.to_string();
         let path = self.profile_path("panels", target)?;

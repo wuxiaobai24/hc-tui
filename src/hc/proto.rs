@@ -138,7 +138,7 @@ impl TerminalSummary {
             .space
             .as_deref()
             .or(self.cwd.as_deref())
-            .unwrap_or("Other terminals");
+            .unwrap_or(crate::i18n::t("Other terminals"));
         format!("{} / {space}", self.machine())
     }
 }

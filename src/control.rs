@@ -1,5 +1,6 @@
 //! Local command transport. The UI thread alone mutates application state.
 use crate::config::Config;
+use crate::i18n::t;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -51,7 +52,7 @@ impl Server {
         }
         if path.exists() {
             if UnixStream::connect(&path).is_ok() {
-                anyhow::bail!("another TUI already accepts commands for this session");
+                anyhow::bail!(t("another TUI already accepts commands for this session"));
             }
             std::fs::remove_file(&path)?;
         }
@@ -84,14 +85,14 @@ impl Server {
                     Some(body) => {
                         let (reply, answer) = mpsc::channel();
                         if sender.try_send(Request { body, reply }).is_err() {
-                            json!({"error":"command queue is full"})
+                            json!({"error": t("command queue is full")})
                         } else {
                             answer
                                 .recv_timeout(Duration::from_secs(5))
-                                .unwrap_or_else(|_| json!({"error":"UI did not answer"}))
+                                .unwrap_or_else(|_| json!({"error": t("UI did not answer")}))
                         }
                     }
-                    None => json!({"error":"expected one JSON request line"}),
+                    None => json!({"error": t("expected one JSON request line")}),
                 };
                 let _ = writeln!(stream, "{response}");
             }
@@ -119,7 +120,7 @@ impl Drop for Server {
 #[cfg(not(unix))]
 impl Server {
     pub fn start(_config: &Config) -> Result<(Self, Receiver<Request>)> {
-        anyhow::bail!("local command sockets require Unix")
+        anyhow::bail!(t("local command sockets require Unix"))
     }
 }
 
@@ -140,5 +141,5 @@ pub fn call(config: &Config, request: Value) -> Result<Value> {
 }
 #[cfg(not(unix))]
 pub fn call(_config: &Config, _request: Value) -> Result<Value> {
-    anyhow::bail!("local command sockets require Unix")
+    anyhow::bail!(t("local command sockets require Unix"))
 }

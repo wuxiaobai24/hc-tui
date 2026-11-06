@@ -12,6 +12,7 @@ use ratatui::{
     Frame,
 };
 
+use crossterm::event::KeyCode;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
@@ -19,14 +20,21 @@ use crate::app::{
     Prompt, Reader, SettingsOverlay, Toast,
 };
 use crate::config::{CollapsedSidebar, HostCursor, TabBarPosition};
+use crate::i18n::{t, t1, t2, tv};
 use crate::model::{Badge, PaneState, Slot};
 use crate::term::view::PlacementImage;
 use crate::theme::Theme;
+
+use crate::app::interaction::PointerTarget;
 
 mod chat;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.pointer_targets.clear();
+    app.menu_hit = Rect::default();
+    app.pane_drag_hits.clear();
+    app.pane_menu_hits.clear();
     app.sync_terminal_theme();
     let theme = app.config.theme.clone();
     let mobile = app.config.mouse_capture
@@ -142,42 +150,101 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.chat.is_some() {
         chat::render(frame, app, body, &theme);
     }
-    render_modals(frame, app, area, &theme);
     if let (Some(status), Some(line)) = (status, mode_line) {
         render_mode_line(frame, app, status, &line, &theme);
     }
+    render_modals(frame, app, area, &theme);
 }
 
-fn render_modals(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+fn render_modals(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    let mut targets = Vec::new();
+    if app.copy.is_some() && app.prompt.is_none() && app.chooser.is_none() {
+        let bar = Rect::new(
+            app.content.x,
+            area.bottom().saturating_sub(1),
+            app.content.width,
+            1,
+        );
+        let buttons = if app.copy.as_ref().is_some_and(|copy| copy.typing) {
+            vec![(t(" Find "), KeyCode::Enter), (t(" Cancel "), KeyCode::Esc)]
+        } else {
+            vec![
+                (t(" Copy "), KeyCode::Char('y')),
+                (t(" Search "), KeyCode::Char('/')),
+                (" < ", KeyCode::Char('N')),
+                (" > ", KeyCode::Char('n')),
+                (t(" Done "), KeyCode::Esc),
+            ]
+        };
+        clear_area(frame, bar, theme);
+        frame.render_widget(
+            Paragraph::new(t("COPY")).style(Style::default().fg(theme.color("accent"))),
+            Rect::new(bar.x, bar.y, 5.min(bar.width), 1),
+        );
+        let mut x = bar.x.saturating_add(6);
+        for (label, key) in buttons {
+            let rect = Rect::new(x, bar.y, bar.right().saturating_sub(x), 1);
+            pointer_button(
+                frame,
+                rect,
+                label,
+                PointerTarget::Key(key),
+                theme,
+                &mut targets,
+            );
+            x = x.saturating_add(UnicodeWidthStr::width(label) as u16 + 1);
+        }
+        if let Some(search) = app.copy.as_ref().and_then(|copy| copy.search.as_ref()) {
+            if x < bar.right() {
+                frame.render_widget(
+                    Paragraph::new(format!("/{search}"))
+                        .style(Style::default().fg(theme.color("fg"))),
+                    Rect::new(x, bar.y, bar.right() - x, 1),
+                );
+            }
+        }
+    }
     if let Some(reader) = &app.reader {
         render_reader(frame, reader, app.content, theme);
+        pointer_close(frame, app.content, theme, &mut targets);
     }
     if let Some(chooser) = &app.chooser {
-        render_chooser(frame, chooser, app.content, theme);
+        targets.clear();
+        render_chooser(frame, chooser, app.content, theme, &mut targets);
     }
     if let Some(help) = &app.help {
         let rows = app.help_view();
         clear_area(frame, app.content, theme);
+        targets.clear();
         render_help(frame, help, &rows, app.content, theme);
+        pointer_close(frame, app.content, theme, &mut targets);
     }
     if let Some(settings) = &app.settings {
         clear_area(frame, app.content, theme);
-        render_settings(frame, settings, app, app.content, theme);
+        targets.clear();
+        render_settings(frame, settings, app, app.content, theme, &mut targets);
     }
     if let Some(goto) = &app.goto {
         let rows = app.goto_rows();
         clear_area(frame, area, theme);
-        render_goto(frame, goto, &rows, area, theme, app.palette);
+        targets.clear();
+        render_goto(frame, goto, &rows, area, theme, app.palette, &mut targets);
     }
     if let Some(prompt) = &app.prompt {
-        render_prompt(frame, prompt, app.content, theme);
+        targets.clear();
+        render_prompt(frame, prompt, app.content, theme, &mut targets);
     }
+    app.pointer_targets = targets;
 }
 
 fn draw_mobile(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    let mut constraints = vec![Constraint::Length(1), Constraint::Min(3)];
+    if app.copy.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .constraints(constraints)
         .split(area);
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.color("bg"))),
@@ -220,14 +287,14 @@ fn render_mobile_header(frame: &mut Frame, app: &mut App, area: Rect, theme: &Th
     );
     let (text, background) = if app.switcher {
         app.mobile_close = button;
-        (" close ", theme.color("badge_bg"))
+        (t(" close "), theme.color("badge_bg"))
     } else {
         app.mobile_switch = button;
-        (" switch ", theme.color("accent"))
+        (t(" switch "), theme.color("accent"))
     };
     let status_width = button.x.saturating_sub(area.x).saturating_sub(1);
     let label = truncate(&mobile_status(app), status_width as usize);
-    let pad = status_width.saturating_sub(label.chars().count() as u16);
+    let pad = status_width.saturating_sub(UnicodeWidthStr::width(label.as_str()) as u16);
     let spans = vec![
         Span::styled(
             label,
@@ -266,13 +333,13 @@ fn mobile_status(app: &App) -> String {
             let label = app.workspace_label(app.active_ws);
             line.push(' ');
             line.push_str(&label);
-            line.push_str(&format!(
+            line.push_str(&t2(
                 "  tab {}/{}",
                 workspace.active + 1,
-                workspace.tabs.len()
+                workspace.tabs.len(),
             ));
         }
-        None => line.push_str(" no workspace"),
+        None => line.push_str(t(" no workspace")),
     }
     let attention = app.attention_count(app.active_ws);
     if attention > 0 {
@@ -298,7 +365,7 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
         target: None,
     };
 
-    rows.push(section("workspaces"));
+    rows.push(section(t("workspaces")));
     for index in 0..app.workspaces.len() {
         let label = app.workspace_label(index);
         let attention = app.attention_count(index);
@@ -330,7 +397,7 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
         });
     }
 
-    rows.push(section("tabs"));
+    rows.push(section(t("tabs")));
     if let Some(workspace) = app.workspace() {
         for (index, tab) in workspace.tabs.iter().enumerate() {
             if tab.settled {
@@ -359,13 +426,51 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
         }
     } else {
         rows.push(MobileRow {
-            text: "  (no tabs)".to_string(),
+            text: t("  (no tabs)").to_string(),
             style: Style::default().fg(theme.color("dim")),
             target: None,
         });
     }
 
-    rows.push(section("agents"));
+    rows.push(section(t("panes")));
+    match app.workspace().and_then(|workspace| workspace.tab()) {
+        Some(tab) => {
+            for pane in tab.panes() {
+                let Some(state) = app.panes.get(&pane.0) else {
+                    continue;
+                };
+                let focused = pane.0 == tab.focus;
+                let suffix = if tab.floating_of(pane.0).is_some() {
+                    format!(" · {}", t("floating"))
+                } else {
+                    String::new()
+                };
+                let room = width.saturating_sub(2 + UnicodeWidthStr::width(suffix.as_str()));
+                rows.push(MobileRow {
+                    text: format!(
+                        "{} {}{suffix}",
+                        if focused { "▸" } else { " " },
+                        truncate(&state.label(), room)
+                    ),
+                    style: if focused {
+                        Style::default()
+                            .bg(theme.color("selection_bg"))
+                            .fg(theme.color("selection_fg"))
+                    } else {
+                        Style::default().fg(theme.color("fg"))
+                    },
+                    target: Some(MobileTarget::Agent(pane.0)),
+                });
+            }
+        }
+        None => rows.push(MobileRow {
+            text: t("  (no panes)").to_string(),
+            style: Style::default().fg(theme.color("dim")),
+            target: None,
+        }),
+    }
+
+    rows.push(section(t("agents")));
     let symbols = app.config.indicators == crate::config::Indicators::Symbols;
     let mut previous = String::new();
     for NavigationRow {
@@ -401,7 +506,7 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
         });
     }
 
-    rows.push(section("menu"));
+    rows.push(section(t("menu")));
     for (label, action) in MOBILE_ACTIONS {
         rows.push(MobileRow {
             text: format!("  {label}"),
@@ -415,6 +520,7 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
 }
 
 const MOBILE_ACTIONS: &[(&str, MobileAction)] = &[
+    ("全部操作 / Actions", MobileAction::Actions),
     ("新建 tab", MobileAction::NewTab),
     ("左右分屏", MobileAction::SplitRight),
     ("上下分屏", MobileAction::SplitDown),
@@ -463,6 +569,15 @@ fn render_mobile_switcher(frame: &mut Frame, app: &mut App, area: Rect, theme: &
 
 fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     app.tab_bar = area;
+    let full_area = area;
+    let menu_width = 8.min(area.width);
+    let area = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(menu_width),
+        area.height,
+    );
+    app.menu_hit = Rect::new(area.right(), area.y, menu_width, 1);
     app.tab_hits.clear();
     app.tab_add = Rect::default();
     if area.width == 0 || area.height == 0 {
@@ -565,6 +680,15 @@ fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(background), area);
+    frame.render_widget(
+        Paragraph::new(t(" menu ")).style(
+            Style::default()
+                .bg(theme.color("accent"))
+                .fg(theme.color("tab_active_fg")),
+        ),
+        app.menu_hit,
+    );
+    app.tab_bar = full_area;
 }
 
 /// 右对齐的状态条目：`zoom` / `hostname` / `datetime` / `text` / `cmd:`。
@@ -574,7 +698,7 @@ fn tab_bar_right_text(app: &App) -> String {
         match token.as_str() {
             "zoom" => {
                 if app.zoom {
-                    parts.push("zoom".to_string());
+                    parts.push(t("zoom").to_string());
                 }
             }
             "hostname" => parts.push(hostname()),
@@ -596,11 +720,14 @@ fn tab_bar_right_text(app: &App) -> String {
 fn workspace_summary(workspace: &crate::model::Workspace) -> String {
     let tabs = workspace.tabs.len();
     let panes = workspace.panes().len();
-    format!(
-        "{tabs} tab{} · {panes} pane{}",
-        if tabs == 1 { "" } else { "s" },
-        if panes == 1 { "" } else { "s" }
-    )
+    // 英文分单复数；中文只有一种说法，四份原文都映射到同一条译文。
+    let text = match (tabs == 1, panes == 1) {
+        (true, true) => "{} tab · {} pane",
+        (true, false) => "{} tab · {} panes",
+        (false, true) => "{} tabs · {} pane",
+        (false, false) => "{} tabs · {} panes",
+    };
+    t2(text, tabs, panes)
 }
 
 fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
@@ -622,7 +749,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     }
     let width = inner.width as usize;
     let muted = Style::default().fg(theme.color("dim"));
-    let mut lines = vec![nav_title(" Spaces", "+ ", width, theme), Line::default()];
+    let mut lines = vec![nav_title(t(" Spaces"), "+ ", width, theme), Line::default()];
     let mut row = inner.y + 2;
     let mut space_lines = Vec::new();
     let mut space_hits = Vec::new();
@@ -645,7 +772,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             .map(|m| m.state.as_str());
         let connected = machine == "local" || state == Some("connected");
         let name = if machine == "local" {
-            "This computer"
+            t("This computer")
         } else {
             &machine
         };
@@ -674,9 +801,9 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             machine_hits.push((machine.clone(), space_lines.len()));
             space_lines.push(Line::from(Span::styled(
                 if connected {
-                    " + New space there"
+                    t(" + New space there")
                 } else {
-                    " ↻ Reconnect"
+                    t(" ↻ Reconnect")
                 },
                 muted,
             )));
@@ -813,19 +940,20 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
 
     // `new` 与 `menu`：与 herdr 的侧栏底行同位置同含义。
     if row < inner.y + inner.height {
-        let new = " new";
-        let menu = "● menu ";
-        let menu_width = menu.chars().count() as u16;
+        let new = t(" new");
+        let menu = format!("●{}", t(" menu "));
+        let menu_width = UnicodeWidthStr::width(menu.as_str()) as u16;
         app.sidebar_new = Rect::new(
             inner.x,
             row,
-            (new.chars().count() as u16).min(inner.width),
+            (UnicodeWidthStr::width(new) as u16).min(inner.width),
             1,
         );
         if inner.width > menu_width {
             app.sidebar_menu = Rect::new(inner.x + inner.width - menu_width, row, menu_width, 1);
         }
-        let pad = width.saturating_sub(new.chars().count() + menu.chars().count());
+        let pad = width
+            .saturating_sub(UnicodeWidthStr::width(new) + UnicodeWidthStr::width(menu.as_str()));
         lines.push(Line::from(vec![
             Span::styled(
                 new.to_string(),
@@ -841,7 +969,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " menu ".to_string(),
+                t(" menu ").to_string(),
                 Style::default().fg(theme.color("tab_bar_fg")),
             ),
         ]));
@@ -858,11 +986,11 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
 
     if row < inner.y + inner.height {
         let sort = match app.config.agent_sort {
-            crate::config::AgentSort::Spaces => "grouped",
-            crate::config::AgentSort::Priority => "priority",
+            crate::config::AgentSort::Spaces => t("grouped"),
+            crate::config::AgentSort::Priority => t("priority"),
         };
         app.agent_sort_hit = Rect::new(inner.x, row, inner.width, 1);
-        lines.push(nav_title(" Agents", sort, width, theme));
+        lines.push(nav_title(t(" Agents"), sort, width, theme));
         row = row.saturating_add(1);
     }
 
@@ -953,7 +1081,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     }
     if total == 0 && row < inner.y + inner.height {
         lines.push(Line::from(Span::styled(
-            "  (no agents)",
+            t("  (no agents)"),
             Style::default().fg(theme.color("dim")),
         )));
         row = row.saturating_add(1);
@@ -981,7 +1109,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
 
 /// 段标题：左边名字，右边状态词。
 fn nav_title(left: &str, right: &str, width: usize, theme: &Theme) -> Line<'static> {
-    let pad = width.saturating_sub(left.chars().count() + right.chars().count());
+    let pad = width.saturating_sub(UnicodeWidthStr::width(left) + UnicodeWidthStr::width(right));
     Line::from(vec![
         Span::styled(
             left.to_string(),
@@ -1029,7 +1157,7 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
         // 浮动 Pane 没有相邻边框，标题里必须带身份。
         let label = state.map(|pane| pane.label()).unwrap_or_default();
         let pin = if floating.is_some_and(|entry| entry.pinned) {
-            "pin "
+            t("pin ")
         } else {
             ""
         };
@@ -1057,8 +1185,10 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
                     None => String::new(),
                 }
             }
-            Some(PaneState::Ended { reason }) => format!(" closed: {} ", short(reason)),
-            Some(PaneState::Waiting) | None => " starting ".to_string(),
+            Some(PaneState::Ended { reason }) => {
+                format!(" {} ", t1("closed: {}", short(reason)))
+            }
+            Some(PaneState::Waiting) | None => t(" starting ").to_string(),
         }
     };
     let border_color = if slot.overlay {
@@ -1071,7 +1201,7 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
         theme.color("border")
     };
     let title = if popup {
-        format!("popup ·{title}")
+        format!("{} ·{title}", t("popup"))
     } else {
         title
     };
@@ -1085,6 +1215,27 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
         frame.render_widget(Clear, slot.outer);
     }
     frame.render_widget(block, slot.outer);
+    if app.config.mouse_capture
+        && !app.mobile
+        && !popup
+        && slot.borders.contains(Borders::TOP)
+        && slot.outer.width >= 22
+    {
+        let menu = Rect::new(slot.outer.right() - 7, slot.outer.y, 5, 1);
+        frame.render_widget(
+            Paragraph::new("[...]").style(Style::default().fg(theme.color("accent"))),
+            menu,
+        );
+        app.pane_menu_hits.push((slot.pane, menu));
+        if !slot.overlay {
+            let grip = Rect::new(slot.outer.right() - 12, slot.outer.y, 4, 1);
+            frame.render_widget(
+                Paragraph::new(" :: ").style(Style::default().fg(theme.color("dim"))),
+                grip,
+            );
+            app.pane_drag_hits.push((slot.pane, grip));
+        }
+    }
 
     if slot.collapsed {
         return;
@@ -1120,7 +1271,7 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
     }
 
     if pane.view.render(frame.buffer_mut(), slot.inner).is_err() {
-        let text = "VT render failed\n\nuse `hc read` to look at it";
+        let text = t("VT render failed\n\nuse `hc read` to look at it");
         frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), slot.inner);
         return;
     }
@@ -1297,7 +1448,13 @@ fn centered(content: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-fn render_prompt(frame: &mut Frame, prompt: &Prompt, content: Rect, theme: &Theme) {
+fn render_prompt(
+    frame: &mut Frame,
+    prompt: &Prompt,
+    content: Rect,
+    theme: &Theme,
+    targets: &mut Vec<(PointerTarget, Rect)>,
+) {
     if content.width < 20 || content.height < 8 {
         return;
     }
@@ -1315,9 +1472,9 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, content: Rect, theme: &Them
     }
     let confirm = prompt.kind.needs_confirm();
     let footer = if confirm {
-        "↵ confirm    esc cancel"
+        t("↵ confirm    esc cancel")
     } else {
-        "↵ save    ^c clear    esc cancel"
+        t("↵ save    ^c clear    esc cancel")
     };
     let (before, after) = prompt
         .buffer
@@ -1334,7 +1491,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, content: Rect, theme: &Them
         Span::styled(after.to_string(), Style::default().fg(theme.color("fg"))),
     ]);
     let footer_pad = (inner.width as usize)
-        .saturating_sub(footer.chars().count())
+        .saturating_sub(UnicodeWidthStr::width(footer))
         .saturating_sub(3);
     let lines = vec![
         Line::from(Span::styled(
@@ -1343,7 +1500,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, content: Rect, theme: &Them
                 .fg(theme.color("accent"))
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(""),
+        Line::from(truncate(&prompt.label, inner.width as usize)),
         input,
         Line::from(vec![
             Span::raw(" ".repeat(footer_pad)),
@@ -1355,6 +1512,31 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, content: Rect, theme: &Them
         Paragraph::new(lines).style(Style::default().bg(theme.color("sidebar_bg"))),
         inner,
     );
+    let buttons = Rect::new(
+        inner.x,
+        inner.y.saturating_add(3).min(inner.bottom() - 1),
+        inner.width,
+        1,
+    );
+    clear_area(frame, buttons, theme);
+    pointer_button(
+        frame,
+        buttons,
+        if confirm { t(" Confirm ") } else { t(" Save ") },
+        PointerTarget::Confirm,
+        theme,
+        targets,
+    );
+    let offset = (buttons.width / 2).max(10).min(buttons.width);
+    pointer_button(
+        frame,
+        Rect::new(buttons.x + offset, buttons.y, buttons.width - offset, 1),
+        t(" Cancel "),
+        PointerTarget::Close,
+        theme,
+        targets,
+    );
+    pointer_close(frame, area, theme, targets);
 }
 
 fn render_help(
@@ -1376,12 +1558,12 @@ fn render_help(
     frame.render_widget(block, area);
     let width = inner.width as usize;
 
-    let header = nav_title(" keybinds", "esc close", width, theme);
+    let header = nav_title(t(" keybinds"), t("esc close"), width, theme);
     let query_line = if help.query.is_empty() {
         Line::from(vec![
             Span::styled("  /", Style::default().fg(theme.color("accent"))),
             Span::styled(
-                " press / to filter by command or shortcut",
+                t(" press / to filter by command or shortcut"),
                 Style::default().fg(theme.color("dim")),
             ),
         ])
@@ -1395,7 +1577,7 @@ fn render_help(
         "─".repeat(width),
         Style::default().fg(theme.color("border")),
     ));
-    let footer = "search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter";
+    let footer = t("search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter");
     let body_rows = inner.height.saturating_sub(4) as usize;
     let scroll = if help.selected >= body_rows {
         help.selected + 1 - body_rows
@@ -1412,7 +1594,7 @@ fn render_help(
             format!(" {:28} {}", row.key, row.text)
         };
         // 右侧滚动条列。
-        let pad = width.saturating_sub(text.chars().count() + 1);
+        let pad = width.saturating_sub(UnicodeWidthStr::width(text.as_str()) + 1);
         let style = if selected {
             Style::default()
                 .bg(theme.color("selection_bg"))
@@ -1460,6 +1642,7 @@ fn render_settings(
     app: &App,
     content: Rect,
     theme: &Theme,
+    targets: &mut Vec<(PointerTarget, Rect)>,
 ) {
     let len = app.settings_len(settings.section);
     let panel_width = content.width.saturating_sub(4).min(60);
@@ -1484,8 +1667,16 @@ fn render_settings(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
+    let tab_rows = if width < 48 { 2 } else { 1 };
+    let mut tab_lines = Vec::new();
     let mut tabs = vec![Span::raw(" ")];
+    let mut tab_x = inner.x + 1;
     for (index, name) in App::SETTINGS_SECTIONS.iter().enumerate() {
+        if tab_rows == 2 && index == 2 {
+            tab_lines.push(Line::from(std::mem::take(&mut tabs)));
+            tabs.push(Span::raw(" "));
+            tab_x = inner.x + 1;
+        }
         let style = if index == settings.section {
             Style::default()
                 .bg(theme.color("selection_bg"))
@@ -1494,28 +1685,50 @@ fn render_settings(
         } else {
             Style::default().fg(theme.color("dim"))
         };
-        tabs.push(Span::styled(format!(" {name} "), style));
+        let width =
+            (UnicodeWidthStr::width(t(name)) as u16 + 2).min(inner.right().saturating_sub(tab_x));
+        targets.push((
+            PointerTarget::SettingsSection(index),
+            Rect::new(
+                tab_x,
+                inner.y + 2 + if tab_rows == 2 { index as u16 / 2 } else { 0 },
+                width,
+                1,
+            ),
+        ));
+        tab_x = tab_x.saturating_add(width + 1);
+        tabs.push(Span::styled(format!(" {} ", t(name)), style));
         tabs.push(Span::raw(" "));
     }
+    tab_lines.push(Line::from(tabs));
     let mut lines = vec![
         Line::from(Span::styled(
-            " Settings",
+            t(" Settings"),
             Style::default()
                 .fg(theme.color("fg"))
                 .add_modifier(Modifier::BOLD),
         )),
         Line::default(),
-        Line::from(tabs),
-        Line::from(Span::styled(
-            "─".repeat(width),
-            Style::default().fg(theme.color("border")),
-        )),
     ];
-    let available = inner.height.saturating_sub(6) as usize;
+    lines.extend(tab_lines);
+    lines.push(Line::from(Span::styled(
+        "─".repeat(width),
+        Style::default().fg(theme.color("border")),
+    )));
+    let available = inner.height.saturating_sub(5 + tab_rows) as usize;
     let offset = settings
         .selected
         .saturating_sub(available.saturating_sub(1));
     for index in offset..len.min(offset + available) {
+        targets.push((
+            PointerTarget::Setting(index),
+            Rect::new(
+                inner.x,
+                inner.y + 3 + tab_rows + (index - offset) as u16,
+                inner.width,
+                1,
+            ),
+        ));
         let selected = index == settings.selected;
         let (label, active) = settings_item(app, settings.section, index);
         let style = if selected {
@@ -1539,14 +1752,15 @@ fn render_settings(
     }
     frame.render_widget(Paragraph::new(lines), inner);
     let footer = if width >= 48 {
-        " ↑↓ select   ←→ section   ↵ apply   esc close"
+        t(" ↑↓ select   ←→ section   ↵ apply   esc close")
     } else {
-        " ↑↓ select  tab section  ↵ apply  esc close"
+        t(" ↑↓ select  tab section  ↵ apply  esc close")
     };
     frame.render_widget(
         Paragraph::new(truncate(footer, width)).style(Style::default().fg(theme.color("dim"))),
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
     );
+    pointer_close(frame, area, theme, targets);
 }
 
 /// 设置项的文字与是否当前生效。
@@ -1559,7 +1773,7 @@ fn settings_item(app: &App, section: usize, index: usize) -> (String, bool) {
         1 => {
             let symbols = index == 1;
             (
-                if symbols { "symbols" } else { "dots" }.to_string(),
+                if symbols { t("symbols") } else { t("dots") }.to_string(),
                 (app.config.indicators == crate::config::Indicators::Symbols) == symbols,
             )
         }
@@ -1571,12 +1785,12 @@ fn settings_item(app: &App, section: usize, index: usize) -> (String, bool) {
                 crate::config::Delivery::Toast => value == "toast",
                 crate::config::Delivery::System => value == "system",
             };
-            (value.to_string(), active)
+            (t(value).to_string(), active)
         }
         _ => {
             let on = index == 1;
             (
-                if on { "on" } else { "off" }.to_string(),
+                if on { t("on") } else { t("off") }.to_string(),
                 app.config.sound == on,
             )
         }
@@ -1590,6 +1804,7 @@ fn render_goto(
     screen: Rect,
     theme: &Theme,
     palette: bool,
+    targets: &mut Vec<(PointerTarget, Rect)>,
 ) {
     let area = Rect::new(
         screen.x + 2,
@@ -1610,14 +1825,18 @@ fn render_goto(
     let terminals = rows.iter().filter(|row| !row.section).count();
     let title_right = format!(
         "{terminals} {}",
-        if palette { "commands" } else { "terminals" }
+        if palette {
+            t("commands")
+        } else {
+            t("terminals")
+        }
     );
     let mut lines = vec![
         nav_title(
             if palette {
-                "─ Commands "
+                t("─ Commands ")
             } else {
-                "─ Go to "
+                t("─ Go to ")
             },
             &format!("{title_right} "),
             width,
@@ -1628,9 +1847,9 @@ fn render_goto(
             Span::styled(
                 if goto.query.is_empty() {
                     if palette {
-                        "search commands"
+                        t("search commands")
                     } else {
-                        "search agents and terminals"
+                        t("search agents and terminals")
                     }
                     .to_string()
                 } else {
@@ -1655,6 +1874,17 @@ fn render_goto(
         0
     };
     for (index, row) in rows.iter().enumerate().skip(scroll).take(body_rows) {
+        if !row.section {
+            targets.push((
+                PointerTarget::Goto(index),
+                Rect::new(
+                    inner.x,
+                    inner.y + 3 + (index - scroll) as u16,
+                    inner.width,
+                    1,
+                ),
+            ));
+        }
         let selected = index == goto.selected;
         let (left, right) = if row.section {
             (format!(" {}", row.text), row.right.clone())
@@ -1682,7 +1912,7 @@ fn render_goto(
     }
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
-            " No matching agents or terminals",
+            t(" No matching agents or terminals"),
             Style::default().fg(theme.color("dim")),
         )));
     }
@@ -1699,13 +1929,14 @@ fn render_goto(
         }
     }
     lines.push(Line::from(Span::styled(
-        " / search · ↑↓ rows · enter open · esc close",
+        t(" / search · ↑↓ rows · enter open · esc close"),
         Style::default().fg(theme.color("dim")),
     )));
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme.color("sidebar_bg"))),
         inner,
     );
+    pointer_close(frame, area, theme, targets);
 }
 
 fn datetime() -> String {
@@ -1767,9 +1998,9 @@ fn render_reader(frame: &mut Frame, reader: &Reader, content: Rect, theme: &Them
         height,
     );
     let status = if reader.complete {
-        format!("read · {} · {} 行", reader.how, reader.lines.len())
+        t2("read · {} · {} 行", tv(&reader.how), reader.lines.len())
     } else {
-        format!("read · {} · 部分内容", reader.how)
+        t1("read · {} · 部分内容", tv(&reader.how))
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1805,12 +2036,25 @@ fn render_reader(frame: &mut Frame, reader: &Reader, content: Rect, theme: &Them
     );
 }
 
-fn render_chooser(frame: &mut Frame, chooser: &Chooser, content: Rect, theme: &Theme) {
+fn render_chooser(
+    frame: &mut Frame,
+    chooser: &Chooser,
+    content: Rect,
+    theme: &Theme,
+    targets: &mut Vec<(PointerTarget, Rect)>,
+) {
     if content.width < 20 || content.height < 5 {
         return;
     }
     let width = content.width.min(64);
-    let wanted = chooser.items.len() as u16 + 3;
+    let row_height = if content.width <= 64 && content.height >= 12 {
+        2
+    } else {
+        1
+    };
+    let machines = chooser.kind == crate::app::ChooserKind::Machines;
+    let wanted =
+        (chooser.items.len() as u16).saturating_mul(row_height) + 3 + 2 * u16::from(machines);
     let height = wanted.min(content.height.saturating_sub(2)).max(3);
     let area = Rect::new(
         content.x + (content.width - width) / 2,
@@ -1829,19 +2073,31 @@ fn render_chooser(frame: &mut Frame, chooser: &Chooser, content: Rect, theme: &T
     let inner = block.inner(area);
     clear_area(frame, area, theme);
     frame.render_widget(block, area);
-    let visible = inner.height as usize;
+    let visible =
+        (inner.height.saturating_sub(2 * u16::from(machines)) / row_height).max(1) as usize;
     let start = if chooser.selected >= visible {
         chooser.selected + 1 - visible
     } else {
         0
     };
+    for (row, index) in (start..chooser.items.len()).take(visible).enumerate() {
+        targets.push((
+            PointerTarget::Chooser(index),
+            Rect::new(
+                inner.x,
+                inner.y + row as u16 * row_height,
+                inner.width,
+                row_height,
+            ),
+        ));
+    }
     let lines: Vec<Line> = chooser
         .items
         .iter()
         .enumerate()
         .skip(start)
         .take(visible)
-        .map(|(index, item)| {
+        .flat_map(|(index, item)| {
             let selected = index == chooser.selected;
             let marker = if selected { "▸" } else { " " };
             let text = format!(
@@ -1857,10 +2113,50 @@ fn render_chooser(frame: &mut Frame, chooser: &Chooser, content: Rect, theme: &T
             } else {
                 Style::default().fg(theme.color("fg"))
             };
-            Line::from(Span::styled(text, style))
+            let line = Line::from(Span::styled(text, style));
+            if row_height == 2 {
+                vec![line, Line::default().style(style)]
+            } else {
+                vec![line]
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    if machines && inner.height >= 2 {
+        for (row, buttons) in [
+            vec![
+                (t(" Open "), KeyCode::Enter),
+                (t(" Add "), KeyCode::Char('a')),
+            ],
+            vec![
+                (t(" Connect "), KeyCode::Char('c')),
+                (t(" Rename "), KeyCode::Char('r')),
+                (t(" Remove "), KeyCode::Char('d')),
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut x = inner.x;
+            for (label, key) in buttons {
+                pointer_button(
+                    frame,
+                    Rect::new(
+                        x,
+                        inner.bottom() - 2 + row as u16,
+                        inner.right().saturating_sub(x),
+                        1,
+                    ),
+                    label,
+                    PointerTarget::Key(key),
+                    theme,
+                    targets,
+                );
+                x = x.saturating_add(UnicodeWidthStr::width(label) as u16 + 1);
+            }
+        }
+    }
+    pointer_close(frame, area, theme, targets);
 }
 
 fn drag_selection(app: &App, pane: u32) -> Option<((u16, u16), (u16, u16))> {
@@ -2033,6 +2329,49 @@ fn truncate(text: &str, max_columns: usize) -> String {
 
 fn short(text: &str) -> String {
     truncate(text, 28)
+}
+
+fn pointer_button(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    target: PointerTarget,
+    theme: &Theme,
+    targets: &mut Vec<(PointerTarget, Rect)>,
+) {
+    let width = (UnicodeWidthStr::width(label) as u16).min(area.width);
+    if width == 0 || area.height == 0 {
+        return;
+    }
+    let rect = Rect::new(area.x, area.y, width, 1);
+    frame.render_widget(
+        Paragraph::new(label).style(
+            Style::default()
+                .bg(theme.color("selection_bg"))
+                .fg(theme.color("selection_fg")),
+        ),
+        rect,
+    );
+    targets.push((target, rect));
+}
+
+fn pointer_close(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    targets: &mut Vec<(PointerTarget, Rect)>,
+) {
+    if area.width < 5 || area.height == 0 {
+        return;
+    }
+    pointer_button(
+        frame,
+        Rect::new(area.right() - 5, area.y, 5, 1),
+        " [x] ",
+        PointerTarget::Close,
+        theme,
+        targets,
+    );
 }
 
 #[cfg(test)]

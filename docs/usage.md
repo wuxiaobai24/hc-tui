@@ -94,7 +94,7 @@ templates = "prefix+alt+t"
 | 侧栏右边界 | 左键拖动改宽度，受最小/最大宽度限制；松开写入配置 |
 | 浮动 Pane 标题行 | 左键拖动移动 |
 | 浮动 Pane 右下角 | 左键拖动改变宽高 |
-| Agent 行 | 左键跳转；右键切换共享置顶 |
+| Agent 行 | 左键跳转；右键打开重命名、共享置顶等菜单 |
 | Agent 分组 / 父项 | 点击折叠或展开 |
 | agents 标题 | 切换工作区分组 / 优先级分组 |
 | 终端内容 | 点选焦点；滚轮翻历史，程序开启鼠标跟踪后转发给程序 |
@@ -179,11 +179,14 @@ macOS 使用系统自带的剪贴板接口，无需安装 pngpaste；Linux 需�
 
 Mac 系统截图直接入剪贴板：按 Control+Shift+Command+4 框选，然后在本机运行的 hc-tui 中按 Ctrl+B，松开后按 Shift+V；终端 Pane 和 Chat 都支持。图片先上传到目标 Pane 所在机器，成功后插入那台机器上的路径。普通 Command+V 是否能携带图片由宿主终端决定，不能替代这个专用按键。
 
+更多点击入口、拖拽与可选 Zellij 模式见 [交互操作](interaction.md)。
+
 ## 手机与窄屏
 
 宽度不超过 `mobile_width_threshold`（默认 64）且鼠标捕获开启时使用单 Pane 布局。
-顶栏显示连接、工作区与 Tab 信息，switch 打开工作区、Tab、Agents 与动作菜单。
-工作区下同样显示 Tab/Pane 数量，Agents 使用相同过滤规则。点击目标后关闭面板。
+顶栏显示连接、工作区与 Tab 信息，switch 打开工作区、Tab、Pane、Agents 与动作菜单。
+Pane 段按当前 Tab 的布局顺序列出全部 Pane（浮动层标 `浮动`），点哪一行就把焦点交给哪个 Pane，
+不依赖 Pane 里有没有 agent；Agents 段仍只收有 agent 状态的 Pane，用于跨工作区看 Attention。
 其余 Pane 继续 attach；内容单指拖动翻历史，选字用 Copy Mode；面板滚动一次两行。
 设 `mobile_width_threshold = 0` 关闭自动窄屏布局。
 

@@ -77,7 +77,7 @@ flowchart TD
 | 分隔线样式 | `pane_borders`（auto/always/off）、`pane_gaps`、`pane_outer_borders` | 固定全边框 | 无配置，无 tmux 风格内分隔 |
 | 滚动条 | `pane_scrollbars`、`mouse_scroll_lines` | 无 | 无滚动条，滚轮步长写死 3 |
 | 清除与编辑历史 | `pane.clear`、`pane.edit_scrollback`（交给 `$EDITOR`） | 无 | 无 |
-| 窄屏布局 | `mobile_width_threshold` 单列布局 | 同名单列布局：一行顶栏 + `switch` 全屏面板（workspaces / tabs / agents / menu），单指拖动翻 scrollback | 无 |
+| 窄屏布局 | `mobile_width_threshold` 单列布局 | 同名单列布局：一行顶栏 + `switch` 全屏面板（workspaces / tabs / panes / agents / menu），单指拖动翻 scrollback | 无 |
 
 ### 2.3 Agent（产品定位的核心）
 

@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod config;
 pub mod copy;
 pub mod hc;
+pub mod i18n;
 pub mod layout;
 pub mod model;
 pub mod term;

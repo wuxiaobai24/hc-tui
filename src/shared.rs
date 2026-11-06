@@ -1,4 +1,5 @@
 //! The GUI's core document. Screen focus/zoom/settled state stays in this client.
+use crate::i18n::t;
 use crate::model::{SavedAxis, SavedNode, SavedPane, SavedState, SavedTab, SavedWorkspace};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -41,13 +42,13 @@ pub fn decode(value: &Value, machine: &str) -> Result<SavedState, String> {
     let spaces = value
         .get("spaces")
         .and_then(Value::as_array)
-        .ok_or("layout has no spaces array")?;
+        .ok_or(t("layout has no spaces array"))?;
     let mut next = 1;
     for space in spaces {
         let id = space
             .get("id")
             .and_then(Value::as_str)
-            .ok_or("space has no id")?;
+            .ok_or(t("space has no id"))?;
         let mut ws = SavedWorkspace {
             origin: Some(qualify(machine, id)),
             machine: (!machine.is_empty()).then(|| machine.to_string()),
@@ -67,14 +68,14 @@ pub fn decode(value: &Value, machine: &str) -> Result<SavedState, String> {
         for tab in space
             .get("tabs")
             .and_then(Value::as_array)
-            .ok_or("space has no tabs array")?
+            .ok_or(t("space has no tabs array"))?
         {
             let id = tab
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or("tab has no id")?;
+                .ok_or(t("tab has no id"))?;
             let Some(tree) = decode_node(
-                tab.get("root").ok_or("tab has no root")?,
+                tab.get("root").ok_or(t("tab has no root"))?,
                 machine,
                 &mut next,
                 &mut state.panes,
@@ -372,7 +373,7 @@ pub fn merge(base: &Value, ours: &Value, theirs: &Value) -> Result<Value, String
             return Ok(Value::Array(result));
         }
     }
-    Err("concurrent edits conflict; reload and reapply this change".to_string())
+    Err(t("concurrent edits conflict; reload and reapply this change").to_string())
 }
 
 #[cfg(test)]

@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 
 use crossterm::execute;
 
+use crate::i18n::{t, t1, t2};
+
 /// Read PNG bytes on the machine running the TUI, before terminal.put uploads them.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn image() -> std::result::Result<Vec<u8>, String> {
@@ -33,18 +35,18 @@ pub(crate) fn image() -> std::result::Result<Vec<u8>, String> {
         }
     }
     Err(if available {
-        "no PNG image available in the local clipboard".to_string()
+        t("no PNG image available in the local clipboard").to_string()
     } else {
-        "image paste needs wl-paste (Wayland) or xclip (X11) on the TUI machine".to_string()
+        t("image paste needs wl-paste (Wayland) or xclip (X11) on the TUI machine").to_string()
     })
 }
 
 fn checked_png(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     if bytes.len() > MAX_IMAGE_BYTES {
-        return Err("image was not uploaded: core accepts at most 8 MiB".into());
+        return Err(t("image was not uploaded: core accepts at most 8 MiB").into());
     }
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Err("no PNG image available in the local clipboard".into());
+        return Err(t("no PNG image available in the local clipboard").into());
     }
     Ok(bytes)
 }
@@ -59,18 +61,18 @@ pub(crate) fn image() -> Result<Vec<u8>, String> {
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&directory)
-        .map_err(|error| format!("cannot prepare clipboard image: {error}"))?;
+        .map_err(|error| t1("cannot prepare clipboard image: {}", error))?;
     let path = directory.join("screenshot.png");
     let result = (|| {
         let output = Command::new("/usr/bin/osascript")
             .args(["-e", MAC_READ_PNG])
             .arg(&path)
             .output()
-            .map_err(|error| format!("cannot read macOS clipboard: {error}"))?;
+            .map_err(|error| t1("cannot read macOS clipboard: {}", error))?;
         if !output.status.success() {
-            return Err(format!(
+            return Err(t1(
                 "no PNG image available in the local clipboard: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                String::from_utf8_lossy(&output.stderr).trim(),
             ));
         }
         let mut bytes = Vec::new();
@@ -79,7 +81,7 @@ pub(crate) fn image() -> Result<Vec<u8>, String> {
                 file.take(MAX_IMAGE_BYTES as u64 + 1)
                     .read_to_end(&mut bytes)
             })
-            .map_err(|error| format!("cannot read clipboard image: {error}"))?;
+            .map_err(|error| t1("cannot read clipboard image: {}", error))?;
         checked_png(bytes)
     })();
     let _ = std::fs::remove_dir_all(&directory);
@@ -105,24 +107,24 @@ end run
 /// 复制文本，返回一句给状态栏用的人话。
 pub fn copy(text: &str) -> String {
     if text.is_empty() {
-        return "copy: nothing selected".to_string();
+        return t("copy: nothing selected").to_string();
     }
     let mut ways = Vec::new();
     if osc52(text) {
         ways.push("OSC 52");
     }
     if tool(text) {
-        ways.push("clipboard tool");
+        ways.push(t("clipboard tool"));
     }
     match ways.len() {
-        0 => format!(
+        0 => t1(
             "copied {} chars (host may not accept it)",
-            text.chars().count()
+            text.chars().count(),
         ),
-        _ => format!(
+        _ => t2(
             "copied {} chars · {}",
             text.chars().count(),
-            ways.join(" + ")
+            ways.join(" + "),
         ),
     }
 }
@@ -266,7 +268,7 @@ pub(crate) fn image_file_paste(text: &str) -> Option<Result<ImageAttachment, Str
                 let high = encoded.next().and_then(|b| (b as char).to_digit(16));
                 let low = encoded.next().and_then(|b| (b as char).to_digit(16));
                 let (Some(high), Some(low)) = (high, low) else {
-                    return Some(Err("invalid image file URL".into()));
+                    return Some(Err(t("invalid image file URL").into()));
                 };
                 bytes.push((high * 16 + low) as u8);
             } else {
@@ -275,7 +277,7 @@ pub(crate) fn image_file_paste(text: &str) -> Option<Result<ImageAttachment, Str
         }
         path = match String::from_utf8(bytes) {
             Ok(path) => path,
-            Err(_) => return Some(Err("invalid UTF-8 image path".into())),
+            Err(_) => return Some(Err(t("invalid UTF-8 image path").into())),
         };
     } else {
         let mut chars = text.chars();
@@ -297,20 +299,23 @@ pub(crate) fn image_file_paste(text: &str) -> Option<Result<ImageAttachment, Str
     }
     Some((|| {
         let unreadable = |error| {
-            format!("image was not uploaded: source is unreadable on the TUI machine ({error})")
+            t1(
+                "image was not uploaded: source is unreadable on the TUI machine ({})",
+                error,
+            )
         };
         let mut bytes = Vec::new();
         let metadata = std::fs::metadata(path).map_err(unreadable)?;
         if !metadata.is_file() {
-            return Err("image was not uploaded: source is not a regular file".into());
+            return Err(t("image was not uploaded: source is not a regular file").into());
         }
         let file = std::fs::File::open(path).map_err(unreadable)?;
         // terminal.put accepts at most 8 MiB; bound the read if the file grows.
         file.take((MAX_IMAGE_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
-            .map_err(|error| format!("cannot read image: {error}"))?;
+            .map_err(|error| t1("cannot read image: {}", error))?;
         if bytes.len() > MAX_IMAGE_BYTES {
-            return Err("image was not uploaded: core accepts at most 8 MiB".into());
+            return Err(t("image was not uploaded: core accepts at most 8 MiB").into());
         }
         let extension = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
             "png"
@@ -321,7 +326,7 @@ pub(crate) fn image_file_paste(text: &str) -> Option<Result<ImageAttachment, Str
         } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
             "webp"
         } else {
-            return Err("image was not uploaded: file is not PNG, JPEG, GIF or WebP".into());
+            return Err(t("image was not uploaded: file is not PNG, JPEG, GIF or WebP").into());
         };
         Ok(ImageAttachment { bytes, extension })
     })())

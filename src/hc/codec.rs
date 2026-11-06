@@ -22,7 +22,14 @@ pub struct Frame {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CodecError {
-    #[error("frame payload of {0} bytes exceeds {MAX_PAYLOAD}")]
+    #[error(
+        "{}",
+        crate::i18n::t2(
+            "frame payload of {} bytes exceeds {}",
+            .0,
+            MAX_PAYLOAD
+        )
+    )]
     TooLarge(usize),
 }
 

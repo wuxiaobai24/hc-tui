@@ -166,6 +166,7 @@ hc-tui do pane.split '{"direction":"right"}' --session work
 
 | 文档 | 内容 |
 |---|---|
+| [交互操作](docs/interaction.md) | 点击菜单、拖拽、手机手势与可选 Zellij 模式 |
 | [使用指南](docs/usage.md) | 完整键位、鼠标、状态、生命周期、Chat 和常见问题 |
 | [配置说明](docs/configuration.md) | 配置项、颜色、绑定、通知、脚本面板和路径 |
 | [命令参考](docs/commands.md) | 全部工作台命令、参数、目标选择和返回值 |
@@ -173,6 +174,7 @@ hc-tui do pane.split '{"direction":"right"}' --session work
 | [herdr-app 对齐契约](docs/herdr-app-alignment.md) | 共享数据、冲突、生命周期和验证边界 |
 | [发布检查清单](docs/release.md) | 版本、构建、标签和发行包验收 |
 | [协议实测基线](docs/protocol-facts.md) | 0.1.17 时期的协议记录，需结合当前 schema |
+| [TSP 兼容评估](docs/tern-tsp-compat.md) | herdr core 接 Tern Surface Protocol 的实测、架构映射与代价 |
 | [Ghostty ADR](docs/adr/0001-ghostty-vt.md) | VT 选型、风险和升级方式 |
 
 `plan-v1.0.md`、`plan-v1.1.md`、`review-v1.0.md`、`gap-vs-herdr.md` 是历史资料，

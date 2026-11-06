@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::i18n::t;
+
 /// 一个可渲染的消息块。
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -103,7 +105,7 @@ pub fn file_label(path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("session");
+        .unwrap_or(t("session"));
     let stem = name.strip_suffix(".jsonl").unwrap_or(name);
     match stem.rsplit_once('_') {
         Some((_, id)) => format!("pi {}", &id[..id.len().min(8)]),
@@ -258,7 +260,7 @@ fn push_message(out: &mut Vec<Block>, tools: &mut HashMap<String, usize>, messag
                 let name = call
                     .get("name")
                     .and_then(Value::as_str)
-                    .unwrap_or("tool")
+                    .unwrap_or(t("tool"))
                     .to_string();
                 let args = call
                     .get("arguments")
@@ -329,7 +331,7 @@ fn push_message(out: &mut Vec<Block>, tools: &mut HashMap<String, usize>, messag
                     None => ToolState::Ok,
                 },
                 result: match exit {
-                    Some(code) => format!("exit {code}"),
+                    Some(code) => crate::i18n::t1("exit {}", code),
                     None => String::new(),
                 },
                 detail: String::new(),
@@ -368,7 +370,7 @@ fn tool_name(message: &Value) -> String {
     message
         .get("toolName")
         .and_then(Value::as_str)
-        .unwrap_or("tool")
+        .unwrap_or(t("tool"))
         .to_string()
 }
 

@@ -80,6 +80,26 @@ pub enum HostCursor {
     Drawn,
 }
 
+/// 界面文案语言。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    /// 跟随 `LC_ALL` / `LC_MESSAGES` / `LANG`。
+    Auto,
+    En,
+    Zh,
+}
+
+impl Lang {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "en" => Some(Self::En),
+            "zh" => Some(Self::Zh),
+            _ => None,
+        }
+    }
+}
+
 /// 通知投递方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -653,6 +673,8 @@ pub struct Config {
     pub sidebar_max_width: u16,
     /// 终端宽度不超过这个值时进入手机单列布局；`0` 关闭。
     pub mobile_width_threshold: u16,
+    /// 界面文案语言。
+    pub lang: Lang,
     /// 每个终端保留的 scrollback 字节数。
     pub scrollback_bytes: usize,
     /// 新建 Pane 的起始目录。
@@ -660,6 +682,8 @@ pub struct Config {
     /// 新建 Pane 用的可执行文件；空表示交给 core 的默认 shell。
     pub default_shell: String,
     pub render_fps: u32,
+    /// Optional modal keyboard preset; explicit bindings remain available.
+    pub zellij_keys: bool,
     pub keys: Keys,
     pub theme: Theme,
     pub mouse_capture: bool,
@@ -728,10 +752,12 @@ impl Default for Config {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: 64,
+            lang: Lang::Auto,
             scrollback_bytes: 8 << 20,
             new_cwd: NewCwd::Follow,
             default_shell: String::new(),
             render_fps: 30,
+            zellij_keys: false,
             keys: Keys::default(),
             theme: theme::builtin("default").expect("default theme exists"),
             mouse_capture: true,
@@ -769,7 +795,25 @@ impl Default for Config {
     }
 }
 
+/// `auto` 语言下，环境里的 locale 是否中文。
+pub fn detect_zh() -> bool {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("zh"))
+}
+
 impl Config {
+    /// 界面文案是否用中文；`lang = "auto"` 时看环境变量里的 locale。
+    pub fn zh(&self) -> bool {
+        match self.lang {
+            Lang::Zh => true,
+            Lang::En => false,
+            Lang::Auto => detect_zh(),
+        }
+    }
+
     /// 读配置文件。文件不存在时只是用默认值。
     pub fn load(path: Option<PathBuf>) -> Self {
         let mut config = Self::default();
@@ -827,7 +871,7 @@ impl Config {
                 Some(_) => {}
                 None => self
                     .warnings
-                    .push(format!("Invalid panel {}", path.display())),
+                    .push(crate::i18n::t1("Invalid panel {}", path.display())),
             }
         }
     }
@@ -840,6 +884,11 @@ impl Config {
         for (key, value) in &document.values {
             let path = key.as_str();
             match path {
+                "keys.preset" => match value.text() {
+                    Some("default") => self.zellij_keys = false,
+                    Some("zellij") => self.zellij_keys = true,
+                    _ => warnings.push(format!("{path}: expected default / zellij")),
+                },
                 "ui.sidebar" => {
                     self.sidebar = value.boolean(&mut warnings, path).unwrap_or(self.sidebar)
                 }
@@ -868,6 +917,13 @@ impl Config {
                         .clamp(0, u16::MAX as i64)
                         as u16
                 }
+                "ui.lang" => match value.text() {
+                    Some(text) => match Lang::parse(text) {
+                        Some(lang) => self.lang = lang,
+                        None => warnings.push(format!("{path}: 只支持 auto / en / zh")),
+                    },
+                    None => warnings.push(format!("{path}: 只支持 auto / en / zh")),
+                },
                 "ui.sidebar_start_collapsed" => {
                     self.sidebar = !value.boolean(&mut warnings, path).unwrap_or(true)
                 }
@@ -1074,7 +1130,8 @@ impl Config {
                             .clamp(1, 3600) as u64,
                     });
                 } else {
-                    warnings.push("[[panels]] requires name and command".to_string());
+                    warnings
+                        .push(crate::i18n::t("[[panels]] requires name and command").to_string());
                 }
                 continue;
             }
@@ -1230,6 +1287,7 @@ pub fn default_config_text() -> String {
         config.mobile_width_threshold
     ));
     out.push_str(&format!("sidebar_start_collapsed = {}\n", !config.sidebar));
+    out.push_str("lang = \"auto\"    # auto | en | zh，auto 跟随 locale\n");
     out.push_str("tab_bar_position = \"top\"   # top | bottom\n");
     out.push_str("pane_borders = \"auto\"      # auto | always | titles | off\n");
     out.push_str(&format!("pane_gaps = {}\n", config.pane_gaps));
@@ -1310,7 +1368,7 @@ pub fn default_config_text() -> String {
     out.push_str("# request_path = \"/path/to/request.mp3\"\n");
     out.push_str("\n[session]\n");
     out.push_str(&format!("restore = {}\n", config.restore));
-    out.push_str("\n[keys]\n");
+    out.push_str("\n[keys]\npreset = \"default\"   # default | zellij\n");
     for (name, binding) in config.keys.entries() {
         out.push_str(&format!("{name} = {binding}\n"));
     }
@@ -1591,6 +1649,20 @@ mod tests {
     }
 
     #[test]
+    fn zellij_preset_is_optional_and_preserves_explicit_bindings() {
+        let mut config = Config::default();
+        assert!(!config.zellij_keys);
+        let document = parse_toml("[keys]\npreset = \"zellij\"\nnew_tab = \"prefix+t\"\n").unwrap();
+        config.apply(&document);
+        assert!(config.zellij_keys);
+        assert_eq!(config.keys.new_tab, Binding::parse("prefix+t").unwrap());
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let document = parse_toml(&default_config_text()).unwrap();
+        config.apply(&document);
+        assert!(!config.zellij_keys);
+    }
+
+    #[test]
     fn parses_the_supported_subset() {
         let document = parse_toml(
             r#"
@@ -1774,6 +1846,15 @@ mod tests {
         let config = Config::load(Some(path));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(config.mobile_width_threshold, 40);
+    }
+
+    #[test]
+    fn lang_is_configurable() {
+        let path = temp_file("lang", "[ui]\nlang = \"zh\"\n");
+        let config = Config::load(Some(path));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.lang, Lang::Zh);
+        assert!(config.zh());
     }
 
     #[test]

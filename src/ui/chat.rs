@@ -17,6 +17,7 @@ use crate::app::App;
 use crate::chat::commands::Kind;
 use crate::chat::pi::{BlockKind, ToolState};
 use crate::chat::{Chat, ChatAction};
+use crate::i18n::t2;
 use crate::model::Badge;
 use crate::theme::Theme;
 
@@ -110,7 +111,7 @@ fn paint(frame: &mut Frame, chat: &mut Chat, meta: &Meta, area: Rect, theme: &Th
     chat.actions.clear();
 
     // 顶栏：会话来源 + 需要人处理时亮红。
-    let mut head = format!("chat · {label} · {}", chat.note);
+    let mut head = t2("chat · {} · {}", label, &chat.note);
     if chat.tool_running() {
         head.push_str(" · 运行中");
     }

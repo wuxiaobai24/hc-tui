@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::{t, t1, t2};
 use crate::shared;
 
 #[derive(Clone)]
@@ -87,7 +88,7 @@ impl App {
                             match shared::merge(&previous.base, &pending, &value) {
                                 Ok(merged) => {
                                     if let Err(error) = self.import_shared(&merged, machine) {
-                                        self.note = format!("Cannot rebase layout: {error}");
+                                        self.note = t1("Cannot rebase layout: {}", error);
                                         return true;
                                     }
                                     self.shared_docs.insert(
@@ -104,7 +105,10 @@ impl App {
                                     self.flush_shared();
                                 }
                                 Err(error) => {
-                                    self.note = format!("Shared layout: {error}; use layout.reload to accept the shared version");
+                                    self.note = t1(
+                                            "Shared layout: {}; use layout.reload to accept the shared version",
+                                            error,
+                                        );
                                     self.shared_docs.insert(
                                         machine.to_string(),
                                         Replica {
@@ -124,7 +128,7 @@ impl App {
                         }
                     }
                     if let Err(error) = self.import_shared(&value, machine) {
-                        self.note = format!("Cannot import layout: {error}");
+                        self.note = t1("Cannot import layout: {}", error);
                         return true;
                     }
                     self.shared_docs.insert(
@@ -139,11 +143,12 @@ impl App {
                     );
                 }
                 Err(error) => {
-                    self.note = format!(
-                        "{} layout unavailable: {}",
-                        if machine.is_empty() { "Local" } else { machine },
-                        error.message
-                    )
+                    let label = if machine.is_empty() {
+                        t("Local")
+                    } else {
+                        machine
+                    };
+                    self.note = t2("{} layout unavailable: {}", label, error.message)
                 }
             }
             self.dirty = true;
@@ -173,7 +178,7 @@ impl App {
                 }
                 Err(error) if error.kind == "conflict" => self.request_shared(machine),
                 Err(error) => {
-                    self.note = format!("Shared layout write failed: {}", error.message);
+                    self.note = t1("Shared layout write failed: {}", error.message);
                 }
             }
             self.dirty = true;

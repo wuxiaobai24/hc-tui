@@ -1,5 +1,6 @@
 //! Shared command dispatch for the palette, key commands and integrations.
 use super::*;
+use crate::i18n::{t, t1};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("space.new", "Create a space; name, folder, machine, argv"),
@@ -19,6 +20,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("tab.settle", "Put tab away, keep running"),
     ("tab.unsettle", "Bring tab back"),
     ("pane.split", "Split right or down"),
+    ("pane.rename", "Rename a pane"),
     ("pane.close", "Close pane and end its terminal"),
     ("pane.zoom", "Toggle zoom"),
     ("pane.focus", "Focus pane or terminal"),
@@ -40,6 +42,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("terminal.scroll", "Scroll history; lines, pages, to"),
     ("terminal.search", "Search terminal history"),
     ("terminal.right_click", "Right click to program or menu"),
+    ("agent.rename", "Rename an agent terminal"),
     ("agent.focus", "Focus agent, including sub-agents"),
     ("agent.next", "Next agent in displayed order"),
     ("agent.prev", "Previous agent in displayed order"),
@@ -86,7 +89,7 @@ impl App {
         self.dirty = true;
     }
     pub fn execute_action(&mut self, name: &str, args: Value) -> Result<()> {
-        anyhow::ensure!(args.is_object(), "command arguments must be an object");
+        anyhow::ensure!(args.is_object(), t("command arguments must be an object"));
         let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
         let direction = || match text("direction").as_deref().unwrap_or("right") {
             "left" => Direction::Left,
@@ -112,7 +115,7 @@ impl App {
                     .workspaces
                     .iter()
                     .position(|w| w.origin.as_deref() == Some(&id) || w.id.to_string() == id)
-                    .ok_or_else(|| anyhow::anyhow!("unknown space {id}"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t1("unknown space {}", id)))?;
                 self.select_workspace(index);
             }
         }
@@ -130,7 +133,7 @@ impl App {
                             })
                             .map(|ti| (wi, ti))
                     })
-                    .ok_or_else(|| anyhow::anyhow!("unknown tab {id}"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t1("unknown tab {}", id)))?;
                 self.select_workspace(target.0);
                 self.select_tab(target.1);
             }
@@ -142,7 +145,7 @@ impl App {
                     .iter()
                     .find(|(n, p)| p.origin.as_deref() == Some(&id) || n.to_string() == id)
                     .map(|(id, _)| *id)
-                    .ok_or_else(|| anyhow::anyhow!("unknown pane {id}"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t1("unknown pane {}", id)))?;
                 self.focus_pane(target);
             }
         }
@@ -187,7 +190,7 @@ impl App {
                 } else {
                     self.ask(
                         PromptKind::CloseWorkspace(self.active_ws),
-                        "End every terminal in this space? (y/N)",
+                        t("End every terminal in this space? (y/N)"),
                     );
                 }
             }
@@ -198,14 +201,14 @@ impl App {
                     }
                     self.mark_layout();
                 } else {
-                    self.ask(PromptKind::RenameWorkspace(self.active_ws), "space name");
+                    self.ask(PromptKind::RenameWorkspace(self.active_ws), t("space name"));
                 }
             }
             "space.select" => {
                 if let Some(i) = args["index"].as_u64() {
                     anyhow::ensure!(
                         i > 0 && i as usize <= self.workspaces.len(),
-                        "space index out of range"
+                        t("space index out of range")
                     );
                     self.select_workspace(i as usize - 1);
                 }
@@ -222,11 +225,11 @@ impl App {
             "space.move" => {
                 let index = args["index"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("index required"))?
+                    .ok_or_else(|| anyhow::anyhow!(t("index required")))?
                     as usize;
                 anyhow::ensure!(
                     index > 0 && index <= self.workspaces.len(),
-                    "space index out of range"
+                    t("space index out of range")
                 );
                 let ws = self.workspaces.remove(self.active_ws);
                 self.workspaces.insert(index - 1, ws);
@@ -239,7 +242,7 @@ impl App {
                         .workspaces
                         .iter()
                         .position(|w| w.origin.as_deref() == Some(&id) || w.id.to_string() == id)
-                        .ok_or_else(|| anyhow::anyhow!("unknown space {id}"))?;
+                        .ok_or_else(|| anyhow::anyhow!(t1("unknown space {}", id)))?;
                     self.select_workspace(wi);
                 }
                 let place = text("place").unwrap_or_else(|| "tab".into());
@@ -272,23 +275,25 @@ impl App {
                 } else {
                     self.ask(
                         PromptKind::CloseTab(self.active_ws),
-                        "End every terminal in this tab? (y/N)",
+                        t("End every terminal in this tab? (y/N)"),
                     );
                 }
             }
             "tab.rename" => {
                 let ws = self.active_ws;
-                let id = self.tab().ok_or_else(|| anyhow::anyhow!("no tab"))?.id;
+                let id = self.tab().ok_or_else(|| anyhow::anyhow!(t("no tab")))?.id;
                 if let Some(label) = text("name") {
                     self.workspaces[ws].tab_mut().unwrap().label = label;
                     self.mark_layout();
                 } else {
-                    self.ask(
+                    let initial = self.tab().unwrap().label.clone();
+                    self.ask_with(
                         PromptKind::RenameTab {
-                            workspace: ws,
+                            workspace: self.workspaces[ws].id,
                             tab: id,
                         },
-                        "tab name",
+                        t("tab name"),
+                        initial,
                     );
                 }
             }
@@ -296,7 +301,7 @@ impl App {
                 if let Some(i) = args["index"].as_u64() {
                     anyhow::ensure!(
                         i > 0 && i as usize <= self.tabs_in_workspace(),
-                        "tab index out of range"
+                        t("tab index out of range")
                     );
                     self.select_tab(i as usize - 1);
                 }
@@ -306,13 +311,13 @@ impl App {
             "tab.move" => {
                 let to = args["index"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("index required"))?
+                    .ok_or_else(|| anyhow::anyhow!(t("index required")))?
                     as usize;
                 let w = self
                     .workspaces
                     .get_mut(self.active_ws)
-                    .ok_or_else(|| anyhow::anyhow!("no space"))?;
-                anyhow::ensure!(to > 0 && to <= w.tabs.len(), "tab index out of range");
+                    .ok_or_else(|| anyhow::anyhow!(t("no space")))?;
+                anyhow::ensure!(to > 0 && to <= w.tabs.len(), t("tab index out of range"));
                 let t = w.tabs.remove(w.active);
                 w.tabs.insert(to - 1, t);
                 w.active = to - 1;
@@ -345,6 +350,39 @@ impl App {
             } else {
                 Axis::Horizontal
             }),
+            "pane.rename" => {
+                let pane =
+                    target_pane.ok_or_else(|| anyhow::anyhow!(t("terminal has no open view")))?;
+                if let Some(name) = text("name") {
+                    self.rename_pane(pane, &name)?;
+                } else {
+                    let initial = self
+                        .panes
+                        .get(&pane)
+                        .ok_or_else(|| anyhow::anyhow!(t("no pane")))?
+                        .name
+                        .clone()
+                        .unwrap_or_default();
+                    self.ask_with(
+                        PromptKind::RenamePane(pane),
+                        t("pane name (empty clears the alias)"),
+                        initial,
+                    );
+                }
+            }
+            "agent.rename" => {
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
+                let initial = self.terminal_alias(&address)?;
+                if let Some(name) = text("name") {
+                    self.rename_terminal(&address, &name)?;
+                } else {
+                    self.ask_with(
+                        PromptKind::RenameAgent(address),
+                        t("agent name (empty clears the alias)"),
+                        initial,
+                    );
+                }
+            }
             "pane.close" => self.close_focused_pane(),
             "pane.zoom" => {
                 self.zoom = !self.zoom;
@@ -360,15 +398,15 @@ impl App {
             "agent.next" => self.cycle_agent(1),
             "agent.prev" => self.cycle_agent(-1),
             "terminal.park" => {
-                let address = terminal().ok_or_else(|| anyhow::anyhow!("terminal required"))?;
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 self.park_terminal(&address);
             }
             "terminal.kill" => {
-                let address = terminal().ok_or_else(|| anyhow::anyhow!("terminal required"))?;
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 self.kill_terminal_tree(&address);
             }
             "terminal.keep" => {
-                let address = terminal().ok_or_else(|| anyhow::anyhow!("terminal required"))?;
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 self.call_rpc(
                     "keep",
                     "terminal.keep",
@@ -377,7 +415,7 @@ impl App {
                 self.open_terminal(&address);
             }
             "terminal.pin" => {
-                let address = terminal().ok_or_else(|| anyhow::anyhow!("terminal required"))?;
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 let pinned = args["pinned"].as_bool().unwrap_or(true);
                 self.update_terminal(Some(&address), |t| t.pinned = pinned);
                 self.call_rpc(
@@ -387,7 +425,7 @@ impl App {
                 );
             }
             "terminal.peek" => {
-                let address = terminal().ok_or_else(|| anyhow::anyhow!("terminal required"))?;
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 self.call_rpc(
                     "read",
                     "terminal.read",
@@ -408,24 +446,25 @@ impl App {
             "terminal.copy" => {
                 let p = target_pane
                     .and_then(|id| self.panes.get(&id))
-                    .ok_or_else(|| anyhow::anyhow!("terminal has no open view"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t("terminal has no open view")))?;
                 self.note = clipboard::copy(&p.view.viewport_lines().join("\n"));
             }
             "terminal.paste" => {
-                let value = text("text").ok_or_else(|| anyhow::anyhow!("text required"))?;
-                let id = target_pane.ok_or_else(|| anyhow::anyhow!("terminal has no open view"))?;
+                let value = text("text").ok_or_else(|| anyhow::anyhow!(t("text required")))?;
+                let id =
+                    target_pane.ok_or_else(|| anyhow::anyhow!(t("terminal has no open view")))?;
                 let pane = self
                     .panes
                     .get_mut(&id)
-                    .ok_or_else(|| anyhow::anyhow!("no pane"))?;
-                anyhow::ensure!(pane.is_live(), "terminal is not attached");
+                    .ok_or_else(|| anyhow::anyhow!(t("no pane")))?;
+                anyhow::ensure!(pane.is_live(), t("terminal is not attached"));
                 pane.view.scroll_bottom();
                 let bytes = pane.view.encode_paste(&value);
                 self.send(Command::Input { pane: id, bytes });
             }
             "terminal.paste_image" => self.paste_image(),
             "terminal.right_click" => {
-                let address = terminal().ok_or_else(|| anyhow::anyhow!("terminal required"))?;
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 match text("to").as_deref() {
                     Some("program") => {
                         self.program_right_click.insert(address);
@@ -433,11 +472,12 @@ impl App {
                     Some("menu") => {
                         self.program_right_click.remove(&address);
                     }
-                    _ => anyhow::bail!("to must be program or menu"),
+                    _ => anyhow::bail!(t("to must be program or menu")),
                 }
             }
             "terminal.search" => {
-                let id = target_pane.ok_or_else(|| anyhow::anyhow!("terminal has no open view"))?;
+                let id =
+                    target_pane.ok_or_else(|| anyhow::anyhow!(t("terminal has no open view")))?;
                 self.focus_pane(id);
                 self.enter_copy_mode();
                 if let Some(copy) = self.copy.as_mut() {
@@ -446,7 +486,8 @@ impl App {
                 }
             }
             "terminal.scroll" => {
-                let id = target_pane.ok_or_else(|| anyhow::anyhow!("terminal has no open view"))?;
+                let id =
+                    target_pane.ok_or_else(|| anyhow::anyhow!(t("terminal has no open view")))?;
                 let height = self.content.height as f64;
                 if let Some(p) = self.panes.get_mut(&id) {
                     match text("to").as_deref() {
@@ -472,7 +513,7 @@ impl App {
                 self.call_rpc(method, method, args.clone());
             }
             "mod.open" => {
-                let name = text("name").ok_or_else(|| anyhow::anyhow!("name required"))?;
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
                 self.new_tab(Some(name.clone()));
                 let id = self.focused();
                 if let Some(p) = self.panes.get_mut(&id) {
@@ -518,7 +559,7 @@ impl App {
                 let value = args
                     .get("layout")
                     .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("layout required"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t("layout required")))?;
                 self.apply_layout(value)?;
             }
             "layout.select" => {
@@ -534,24 +575,24 @@ impl App {
                     .workspaces
                     .get_mut(self.active_ws)
                     .and_then(|w| w.tab_mut())
-                    .ok_or_else(|| anyhow::anyhow!("no tab"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t("no tab")))?;
                 match &mut tab.tree {
                     SplitNode::Stack { panes, active } => {
                         let index = target
                             .and_then(|id| panes.iter().position(|p| p.0 == id))
                             .or(index)
-                            .ok_or_else(|| anyhow::anyhow!("child or index required"))?;
-                        anyhow::ensure!(index < panes.len(), "child index out of range");
+                            .ok_or_else(|| anyhow::anyhow!(t("child or index required")))?;
+                        anyhow::ensure!(index < panes.len(), t("child index out of range"));
                         *active = index;
                         tab.focus = panes[index].0;
                     }
-                    _ => anyhow::bail!("shown tab is not a stack"),
+                    _ => anyhow::bail!(t("shown tab is not a stack")),
                 };
                 self.mark_layout();
             }
             "layout.reset" => self.load_layout("balanced")?,
             "mod.clone" => {
-                let name = text("name").ok_or_else(|| anyhow::anyhow!("name required"))?;
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
                 let target = text("as").unwrap_or_else(|| format!("{name}-copy"));
                 self.clone_panel(&name, &target)?;
             }
@@ -568,7 +609,7 @@ impl App {
             "layout.resize" => {
                 let px = args["px"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("px required"))?;
+                    .ok_or_else(|| anyhow::anyhow!(t("px required")))?;
                 self.sidebar_width = (px.min(u16::MAX as u64) as u16)
                     .clamp(self.config.sidebar_min_width, self.config.sidebar_max_width);
             }
@@ -587,9 +628,9 @@ impl App {
                 })
             }
             "app.theme" => {
-                let name = text("name").ok_or_else(|| anyhow::anyhow!("name required"))?;
-                self.config.theme =
-                    crate::theme::builtin(&name).ok_or_else(|| anyhow::anyhow!("unknown theme"))?;
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                self.config.theme = crate::theme::builtin(&name)
+                    .ok_or_else(|| anyhow::anyhow!(t("unknown theme")))?;
                 crate::config::write_setting(
                     &self.config.config_path,
                     "theme.name",
@@ -612,7 +653,7 @@ impl App {
                     self.close_popup();
                 }
             }
-            _ => anyhow::bail!("Unknown command: {name}"),
+            _ => anyhow::bail!(t1("Unknown command: {}", name)),
         }
         if matches!(name, "space.new" | "tab.new" | "terminal.open") {
             if let Some(module) = text("mod") {
@@ -632,7 +673,7 @@ impl App {
         Ok(())
     }
 
-    fn swap_direction(&mut self, direction: Direction) -> Result<()> {
+    pub(super) fn swap_direction(&mut self, direction: Direction) -> Result<()> {
         let id = self.focused();
         let leaves: Vec<_> = self
             .slots
@@ -641,9 +682,21 @@ impl App {
             .map(|s| (PaneId(s.pane), s.outer))
             .collect();
         let target = neighbor(&leaves, PaneId(id), direction)
-            .ok_or_else(|| anyhow::anyhow!("no neighbor"))?
+            .ok_or_else(|| anyhow::anyhow!(t("no neighbor")))?
             .0;
-        let tab = self.workspaces[self.active_ws].tab_mut().unwrap();
+        self.swap_panes(id, target)
+    }
+
+    pub(super) fn swap_panes(&mut self, id: u32, target: u32) -> Result<()> {
+        let tab = self
+            .workspace_mut()
+            .and_then(Workspace::tab_mut)
+            .ok_or_else(|| anyhow::anyhow!(t("no tab")))?;
+        let panes = tab.tree.panes();
+        anyhow::ensure!(
+            panes.contains(&PaneId(id)) && panes.contains(&PaneId(target)),
+            t("no neighbor")
+        );
         fn swap(node: &mut SplitNode, a: u32, b: u32) {
             match node {
                 SplitNode::Leaf(id) => {
@@ -731,7 +784,7 @@ impl App {
         let p = self
             .panes
             .get_mut(&id)
-            .ok_or_else(|| anyhow::anyhow!("no pane"))?;
+            .ok_or_else(|| anyhow::anyhow!(t("no pane")))?;
         if p.terminal.as_deref() == Some(address) {
             return Ok(());
         }
@@ -755,7 +808,7 @@ impl App {
         if name == "file.open" {
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| anyhow::anyhow!("path required"))?;
+                .ok_or_else(|| anyhow::anyhow!(t("path required")))?;
             self.call_rpc(
                 "panel.file",
                 "file.read",
@@ -851,20 +904,25 @@ impl App {
             .find(|t| t.address == address)
             .is_some_and(|t| t.pinned);
         let items = [
-            ("Peek", "terminal.peek", json!({"terminal":address})),
-            ("Keep as tab", "terminal.keep", json!({"terminal":address})),
+            (t("Rename"), "agent.rename", json!({"terminal":address})),
+            (t("Peek"), "terminal.peek", json!({"terminal":address})),
             (
-                "Park (keep running)",
+                t("Keep as tab"),
+                "terminal.keep",
+                json!({"terminal":address}),
+            ),
+            (
+                t("Park (keep running)"),
                 "terminal.park",
                 json!({"terminal":address}),
             ),
             (
-                if pinned { "Unpin" } else { "Pin" },
+                if pinned { t("Unpin") } else { t("Pin") },
                 "terminal.pin",
                 json!({"terminal":address,"pinned":!pinned}),
             ),
             (
-                "End program and sub-agents",
+                t("End program and sub-agents"),
                 "terminal.kill",
                 json!({"terminal":address}),
             ),
@@ -876,7 +934,7 @@ impl App {
         })
         .collect();
         self.open_chooser(Chooser {
-            title: format!("Terminal · {address}"),
+            title: format!("{} · {address}", t("Terminal")),
             items,
             selected: 0,
             kind: ChooserKind::Commands,

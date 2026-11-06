@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::t1;
 use crate::layout::split::Divider;
 
 #[derive(Clone)]
@@ -70,7 +71,7 @@ impl App {
                                 "ui.sidebar_width",
                                 &self.sidebar_width.to_string(),
                             ) {
-                                self.note = format!("sidebar resized; {error}");
+                                self.note = t1("sidebar resized; {}", error);
                             }
                         }
                         self.layout_drag = None;
