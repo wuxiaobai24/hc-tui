@@ -50,7 +50,7 @@ hc-tui update --from ./hc-tui-0.4.1-x86_64-unknown-linux-musl.tar.gz
 ## 多机与 Pi
 
 ```sh
-ssh box 'hc-tui --session work'    # 在 box 上恢复该 core/session 的同一共享文档
+ssh -t box 'hc-tui --session work'    # 在 box 上恢复该 core/session 的同一共享文档
 hc-tui --session work             # 在已配置 hc machine 的 core 上浏览机器与布局
 ssh box 'hc-tui session-hook install'  # 在 Pi 实际运行的机器安装会话映射
 ```

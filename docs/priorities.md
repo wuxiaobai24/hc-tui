@@ -7,6 +7,6 @@
 3. **共享布局边界**：只承诺 [同步契约](sync-contract.md) 中的数据；不追旧 Desktop 每个按钮。settle 当前属于屏幕本地，若改变必须有 App 端契约配合。
 4. **二进制交付**：Linux amd64/arm64 musl、macOS Intel/Apple Silicon，归档、校验和、原子 update；普通使用者不用安装 Zig。源码构建作为维护者附录。
 
-远端入口使用 `ssh box 'hc-tui --session work'`，或本地 core 的 `hc machine` 路由；不另建传输协议。手机 switch 与新增主题后置。
+远端入口使用 `ssh -t box 'hc-tui --session work'`，或本地 core 的 `hc machine` 路由；不另建传输协议。手机 switch 与新增主题后置。
 
 Diff 审阅交给 revdiff / Plannotator 等外部工具，TUI 只通过 `mod.open` 或自定义命令接一个外部 Pane；不增加内置审阅引擎。

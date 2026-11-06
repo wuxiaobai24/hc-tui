@@ -253,6 +253,6 @@ Spaces 与 Agents 分区独立滚动，将鼠标移到相应区域滚动即可�
 
 在 Pi 实际运行的机器执行 `hc-tui session-hook install`，然后在 Pi `/reload`。Pi 必须运行在 core 管理的终端内。也可以用 `hc label <terminal> session=/absolute/path.jsonl` 显式映射。
 远端没有 label 时显示“远端会话未映射”，不会推断本机路径；无法读取时显示“远端读取失败”。Chat 面板里的本地 hook 操作不会写到错误机器。
-`ssh box 'hc-tui --session work'` 仍读取 box 上的同一 core/session 文档；直接用 `hc-tui --session work` 则通过该 core 已配置的 machine 链路汇总远端工作区。
+`ssh -t box 'hc-tui --session work'` 仍读取 box 上的同一 core/session 文档；直接用 `hc-tui --session work` 则通过该 core 已配置的 machine 链路汇总远端工作区。
 
 远端 Chat 的命令面板只列内置 Pi 命令，不把本机的 prompt/skill 扫描结果冒充远端可用命令。
