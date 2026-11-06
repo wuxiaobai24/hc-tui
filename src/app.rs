@@ -37,6 +37,7 @@ use crate::ui;
 mod actions;
 mod agent_tree;
 mod layouts;
+mod mouse_resize;
 mod panels;
 mod shared_sync;
 
@@ -355,6 +356,7 @@ pub struct App {
     pub floating_hidden: bool,
     /// 正在拖动的浮动 Pane。
     pub floating_drag: Option<FloatingDrag>,
+    layout_drag: Option<mouse_resize::LayoutDrag>,
     pub resize_mode: bool,
     pub move_mode: bool,
     pub workspace_mode: bool,
@@ -374,6 +376,7 @@ pub struct App {
     held_done: Option<(String, u64)>,
     initial_tasks: HashMap<u32, String>,
     program_right_click: std::collections::HashSet<String>,
+    terminal_display: Option<crate::hc::proto::Display>,
     pub chooser: Option<Chooser>,
     pub machines: Vec<MachineInfo>,
     machine_refresh: Option<Instant>,
@@ -486,6 +489,7 @@ impl App {
             zoom: false,
             floating_hidden: false,
             floating_drag: None,
+            layout_drag: None,
             resize_mode: false,
             move_mode: false,
             workspace_mode: false,
@@ -504,6 +508,7 @@ impl App {
             held_done: None,
             initial_tasks: HashMap::new(),
             program_right_click: std::collections::HashSet::new(),
+            terminal_display: None,
             chooser: None,
             machines: Vec::new(),
             machine_refresh: None,
@@ -1095,6 +1100,19 @@ impl App {
 
     // ---------------------------------------------------------------- 输入
 
+    pub fn sync_terminal_theme(&mut self) {
+        for pane in self.panes.values_mut() {
+            if let Err(error) = pane.view.apply_theme(&self.config.theme) {
+                self.note = format!("Terminal theme: {error}");
+            }
+        }
+        let display = crate::hc::proto::Display::from_theme(&self.config.theme);
+        if self.terminal_display.as_ref() != Some(&display) {
+            self.send(Command::Display(display.clone()));
+            self.terminal_display = Some(display);
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             let local = self.prefix
@@ -1256,6 +1274,18 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.mobile
+            || self.chat.is_some()
+            || self.prompt.is_some()
+            || self.help.is_some()
+            || self.settings.is_some()
+            || self.goto.is_some()
+            || self.chooser.is_some()
+            || self.reader.is_some()
+            || self.popup.is_some()
+        {
+            self.layout_drag = None;
+        }
         if self.chat.is_some() && self.on_chat_mouse(mouse) {
             return;
         }
@@ -1314,6 +1344,10 @@ impl App {
                 pane.view.scroll(self.config.mouse_scroll_lines as isize);
                 self.dirty = true;
             }
+            return;
+        }
+
+        if self.on_layout_mouse(mouse) {
             return;
         }
 
@@ -5090,42 +5124,6 @@ impl App {
         self.dirty = true;
     }
 
-    /// 命令退出后自动移除视图，并把树里的空位折叠掉。
-    fn remove_transient(&mut self, pane: u32) {
-        let Some((workspace, tab)) = self.locate(pane) else {
-            self.remove_pane_view(pane);
-            return;
-        };
-        let focused_before = self.workspaces[workspace].tabs[tab].focus;
-        self.remove_pane_view(pane);
-        let replacement = {
-            let tab = &mut self.workspaces[workspace].tabs[tab];
-            let tree = tab.tree.clone();
-            match tree.remove_pane(PaneId(pane)) {
-                Some(tree) => {
-                    let panes = tree.panes();
-                    tab.tree = tree;
-                    tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
-                    Some(tab.focus)
-                }
-                None => None,
-            }
-        };
-        match replacement {
-            Some(next) => {
-                if focused_before == pane {
-                    self.send(Command::Focus {
-                        pane: next,
-                        focused: true,
-                    });
-                }
-                self.note = "transient command finished".to_string();
-            }
-            None => self.close_tab_in(workspace),
-        }
-        self.mark_layout();
-    }
-
     /// 输入该去的 Pane：popup 打开时独占输入。
     pub fn input_pane(&self) -> u32 {
         self.popup
@@ -5245,15 +5243,12 @@ impl App {
                     self.dirty = true;
                     return;
                 }
-                if program_exit && self.panes.get(&pane).is_some_and(|state| state.transient) {
-                    self.remove_transient(pane);
-                    return;
-                }
-                self.note = if program_exit {
-                    format!("程序结束：{reason}（prefix c 新 tab 继续）")
+                if program_exit {
+                    self.detach_view_from_layout(pane);
+                    self.note = format!("程序结束：{reason}");
                 } else {
-                    format!("stream 断开：{reason}")
-                };
+                    self.note = format!("stream 断开：{reason}");
+                }
                 self.dirty = true;
             }
         }
@@ -6309,7 +6304,7 @@ impl App {
     pub fn navigation_rows(&self) -> Vec<NavigationRow> {
         let mut entries = Vec::new();
         for (id, pane) in &self.panes {
-            if pane.transient || pane.module.is_some() {
+            if pane.transient || pane.module.is_some() || pane.agent.status.is_none() {
                 continue;
             }
             let terminal = self
@@ -6377,7 +6372,11 @@ impl App {
                 label,
             });
         }
-        for terminal in self.terminals_without_pane().into_iter().filter(|t| t.live) {
+        for terminal in self
+            .terminals_without_pane()
+            .into_iter()
+            .filter(|t| t.live && t.status.is_some())
+        {
             let mut agent = crate::model::Agent::default();
             agent.set_status(terminal.status.clone());
             agent.observe_turn(terminal.turn);
@@ -6705,21 +6704,11 @@ fn borders_for(
         }
         let vertical_overlap = outer.y < other.y + other.height && other.y < outer.y + outer.height;
         let horizontal_overlap = outer.x < other.x + other.width && other.x < outer.x + outer.width;
-        if vertical_overlap {
-            if other.x + other.width == outer.x {
-                borders.remove(Borders::LEFT);
-            }
-            if other.x == outer.x + outer.width {
-                borders.remove(Borders::RIGHT);
-            }
+        if vertical_overlap && other.x + other.width == outer.x {
+            borders.remove(Borders::LEFT);
         }
-        if horizontal_overlap {
-            if other.y + other.height == outer.y && mode != PaneBorders::Titles {
-                borders.remove(Borders::TOP);
-            }
-            if other.y == outer.y + outer.height {
-                borders.remove(Borders::BOTTOM);
-            }
+        if horizontal_overlap && other.y + other.height == outer.y && mode != PaneBorders::Titles {
+            borders.remove(Borders::TOP);
         }
     }
     borders
@@ -6808,8 +6797,12 @@ pub fn run(config: Config) -> Result<()> {
         app.tick();
 
         if app.take_dirty() || Instant::now() >= next_draw {
-            terminal.draw(|frame| ui::draw(frame, &mut app))?;
-            graphics.draw(&mut app, &mut std::io::stdout())?;
+            use crossterm::SynchronizedUpdate;
+            std::io::stdout().sync_update(|output| -> Result<()> {
+                terminal.draw(|frame| ui::draw(frame, &mut app))?;
+                graphics.draw(&mut app, output)?;
+                Ok(())
+            })??;
             next_draw = Instant::now() + frame;
             if let Some(next) = app.window_title() {
                 if next != title {
@@ -6929,6 +6922,178 @@ mod tests {
         assert_eq!(app.workspace_label(0), "Production");
     }
 
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_resizes_nested_splits_without_changing_focus_or_target() {
+        let mut app = offline_app();
+        app.split_focused(Axis::Horizontal);
+        app.split_focused(Axis::Vertical);
+        app.reflow(Rect::new(0, 0, 100, 30));
+        let focused = app.focused();
+        let before = app.slots.clone();
+        let bottom = before.iter().max_by_key(|s| s.outer.y).unwrap();
+        let x = bottom.outer.x + 5;
+        let y = bottom.outer.y;
+        app.on_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+        assert!(app.layout_drag.is_some());
+        app.on_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x, y + 5));
+        // Release outside the original divider still completes the same drag.
+        app.on_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), 99, y + 5));
+        app.reflow(Rect::new(0, 0, 100, 30));
+        let after = app.slots.iter().find(|s| s.pane == bottom.pane).unwrap();
+        assert!(after.outer.y > bottom.outer.y);
+        assert_eq!(app.slots[0].outer, before[0].outer);
+        assert_eq!(app.focused(), focused);
+        assert!(app.layout_drag.is_none());
+        assert!(app.layout_dirty);
+        assert!(app.drag.is_none());
+    }
+
+    #[test]
+    fn mouse_resizes_shared_vertical_border_even_with_terminal_mouse_tracking() {
+        let mut app = offline_app();
+        app.config.pane_gaps = false;
+        app.split_focused(Axis::Horizontal);
+        app.reflow(Rect::new(0, 0, 100, 30));
+        for pane in app.panes.values_mut() {
+            pane.view.write(b"\x1b[?1000h");
+        }
+        let x = app.slots[1].outer.x - 1;
+        let y = app.slots[1].outer.y + 5;
+        app.on_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+        app.on_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 10, y));
+        app.on_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 10, y));
+        app.reflow(Rect::new(0, 0, 100, 30));
+        assert!(app.slots[1].outer.x > x + 1);
+        assert!(app.layout_drag.is_none());
+    }
+
+    #[test]
+    fn sidebar_drag_is_clamped_and_modal_clicks_do_not_start_resize() {
+        let mut app = offline_app();
+        let root = std::env::temp_dir().join(format!("hctui-resize-{}", std::process::id()));
+        app.config.config_path = root.join("config.toml");
+        app.sidebar_area = Rect::new(0, 0, 26, 30);
+        app.content = Rect::new(26, 1, 74, 29);
+        let press = mouse_at(MouseEventKind::Down(MouseButton::Left), 25, 10);
+        app.on_mouse(press);
+        app.on_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), 99, 10));
+        assert_eq!(app.sidebar_width, app.config.sidebar_max_width);
+        app.on_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), 0, 10));
+        assert_eq!(app.sidebar_width, app.config.sidebar_min_width);
+        assert!(app.layout_drag.is_none());
+        assert!(std::fs::read_to_string(&app.config.config_path)
+            .unwrap()
+            .contains(&format!("sidebar_width = {}", app.config.sidebar_min_width)));
+        app.ask(PromptKind::NewWorkspace, "name");
+        app.on_mouse(press);
+        assert!(app.layout_drag.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_tab_exit_keeps_the_active_tab_and_focus() {
+        let mut app = offline_app();
+        let background = app.focused();
+        app.new_tab(None);
+        let focused = app.focused();
+        let active = app.tab().unwrap().id;
+        app.new_tab(None);
+        app.select_tab(1);
+        app.on_net(NetEvent::AttachClosed {
+            pane: background,
+            channel: 1,
+            reason: "exit 0".into(),
+            program_exit: true,
+        });
+        assert_eq!(app.tab().unwrap().id, active);
+        assert_eq!(app.focused(), focused);
+    }
+
+    #[test]
+    fn program_exit_removes_pane_but_stream_loss_keeps_it() {
+        let mut app = offline_app();
+        let original = app.focused();
+        app.split_focused(Axis::Horizontal);
+        let exited = app.focused();
+        app.on_net(NetEvent::AttachClosed {
+            pane: exited,
+            channel: 2,
+            reason: "exit 0".into(),
+            program_exit: true,
+        });
+        assert!(!app.panes.contains_key(&exited));
+        assert_eq!(app.tab().unwrap().panes(), vec![PaneId(original)]);
+        assert_eq!(app.focused(), original);
+        assert!(!app
+            .inflight
+            .values()
+            .any(|(method, _)| method == "terminal.kill"));
+        app.on_net(NetEvent::AttachClosed {
+            pane: original,
+            channel: 1,
+            reason: "disconnected".into(),
+            program_exit: false,
+        });
+        assert!(app.panes.contains_key(&original));
+        app.on_net(NetEvent::AttachClosed {
+            pane: original,
+            channel: 1,
+            reason: "exit 0".into(),
+            program_exit: true,
+        });
+        assert!(app.panes.is_empty());
+        assert!(app.workspaces.is_empty());
+    }
+
+    #[test]
+    fn agent_navigation_excludes_shells_and_tracks_status_reports() {
+        let mut app = offline_app();
+        let pane = app.focused();
+        app.panes.get_mut(&pane).unwrap().terminal = Some("t1".into());
+        app.on_net(NetEvent::Snapshot {
+            seq: 1,
+            terminals: [
+                json!({"address":"t1", "foreground":{"name":"bash"}}),
+                json!({"address":"t2", "title":"Codex", "labels":{"herdr.pinned":"1"}}),
+                json!({"address":"t3", "status":{"state":"working"}}),
+            ]
+            .iter()
+            .map(|v| TerminalSummary::parse(v).unwrap())
+            .collect(),
+        });
+        let addresses = |app: &App| {
+            app.navigation_rows()
+                .into_iter()
+                .filter_map(|row| row.terminal)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(addresses(&app), vec!["t3"]);
+        app.apply_event(TerminalEvent {
+            kind: "status".into(),
+            terminal: Some("t1".into()),
+            seq: 2,
+            data: json!({"status":{"state":"idle"}, "reported":true}),
+        });
+        assert!(addresses(&app).contains(&"t1".to_string()));
+        app.apply_event(TerminalEvent {
+            kind: "status".into(),
+            terminal: Some("t1".into()),
+            seq: 3,
+            data: json!({"status":null, "reported":false}),
+        });
+        assert_eq!(addresses(&app), vec!["t3"]);
+        assert_eq!(app.panes[&pane].terminal.as_deref(), Some("t1"));
+    }
+
     #[test]
     fn external_agent_opens_in_its_space_without_mutating_current_tab() {
         let mut app = offline_app();
@@ -7016,7 +7181,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_edges_disappear_without_gaps() {
+    fn adjacent_panes_keep_one_shared_border_without_gaps() {
         use ratatui::widgets::Borders;
         let leaves = vec![
             (PaneId(1), Rect::new(0, 0, 10, 10)),
@@ -7024,7 +7189,7 @@ mod tests {
         ];
         let left = borders_for(leaves[0].1, &leaves, PaneBorders::Auto, false, true);
         let right = borders_for(leaves[1].1, &leaves, PaneBorders::Auto, false, true);
-        assert!(!left.contains(Borders::RIGHT));
+        assert!(left.contains(Borders::RIGHT));
         assert!(!right.contains(Borders::LEFT));
         assert!(left.contains(Borders::LEFT));
 

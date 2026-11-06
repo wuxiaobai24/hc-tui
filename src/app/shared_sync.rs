@@ -494,6 +494,9 @@ mod tests {
         let mut app = app();
         let value = json!({"spaces":[space("a","same","t1"),space("b","same","t2")]});
         app.shared_reply("shared.get:", Ok(json!({"version":1,"value":value})));
+        for pane in app.panes.values_mut() {
+            pane.agent.set_status(Some("working".into()));
+        }
         let rows = app.navigation_rows();
         assert_ne!(rows[0].group_id, rows[1].group_id);
         assert_eq!(rows[0].group, rows[1].group);

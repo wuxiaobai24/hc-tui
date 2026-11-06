@@ -793,10 +793,12 @@ impl App {
 
 impl App {
     pub(super) fn detach_view_from_layout(&mut self, pane: u32) {
+        let focused = self.focused();
         let Some((wi, ti)) = self.locate(pane) else {
             self.remove_pane_view(pane);
             return;
         };
+        let active_tab = self.workspaces[wi].tab().map(|t| t.id);
         self.remove_pane_view(pane);
         let tab = &mut self.workspaces[wi].tabs[ti];
         if let Some(index) = tab.floating.iter().position(|f| f.pane == pane) {
@@ -811,6 +813,13 @@ impl App {
                 tab.focus = tab.panes().first().map(|p| p.0).unwrap_or(0);
             }
         }
+        if let Some(index) = self.workspaces[wi]
+            .tabs
+            .iter()
+            .position(|t| Some(t.id) == active_tab)
+        {
+            self.workspaces[wi].active = index;
+        }
         if self.workspaces[wi].tabs.is_empty() {
             self.workspaces.remove(wi);
             if wi < self.active_ws {
@@ -822,6 +831,14 @@ impl App {
             w.active = w.active.min(w.tabs.len().saturating_sub(1));
         }
         self.zoom = false;
+        self.layout_drag = None;
+        let next = self.focused();
+        if next != focused && self.panes.contains_key(&next) {
+            self.send(Command::Focus {
+                pane: next,
+                focused: true,
+            });
+        }
         self.mark_layout();
     }
 }

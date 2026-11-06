@@ -1,405 +1,117 @@
 # hc-tui
 
 基于 [herdr-core](https://github.com/herdrdev/herdr-core)（`hc`）的 Rust 原生终端工作台。
-Core 拥有终端与进程，本仓库拥有 Workspace / Tab / Pane / 渲染。
+在一个终端里管理工作区、Tab、分屏和编码 Agent，可与 herdr-app 共享多台机器的布局。
 
-Workspace → Tab → Pane 的 TUI 工作台，与 herdr-app 共享各机器的结构文档和稳定 ID。
-支持 Agent 父子树、共享置顶/已读、命令面板、多机布局、脚本面板和原生 Kitty 图片。
-关闭 Pane/Tab/space 会结束对应程序；退出客户端只 detach，程序继续运行。
-当前行为契约和验证边界见 [herdr-app 对齐契约](docs/herdr-app-alignment.md)。
+## 安装与启动
 
-## 快速开始
+运行需要 `hc` 在 `PATH` 中；本轮完整契约验收使用 core 0.1.18。
+从源码构建还需要 Rust stable 和 **Zig 0.16.0**，Zig 0.17 不兼容当前 vendored VT。
 
 ```sh
-# 需要 Zig 0.16.0（libghostty-vt 硬性要求）与 Rust stable
-mise install                 # 或自行安装 zig 0.16
-cargo build
-cargo run -- probe           # 连上 core，打印握手结果
-cargo run                    # 打开 TUI，恢复共享工作区；没有布局时新建 shell
-cargo run -- --attach t3     # attach 一个已存在的终端
-cargo run -- --config ./hc-tui.toml   # 指定配置文件
-cargo run -- --no-restore    # 忽略 doc 里保存的布局
-cargo run -- --default-config         # 打印全部可配字段与默认键位
-cargo test                   # 单元测试
-HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach -- --nocapture   # 真实 core 的端到端验收
+mise install                   # 按 mise.toml 安装 Zig 0.16.0
+mise exec -- cargo build --release -p hc-tui
+mkdir -p ~/.local/bin
+install -m 755 target/release/hc-tui ~/.local/bin/hc-tui
+hc-tui probe                   # 验证与 core 的连接；未运行的 core 会自动启动
+hc-tui                         # 恢复工作区；没有布局时创建 shell
 ```
 
-`probe` 在 core 未运行时会由 `hc connect` 自动拉起。
+确保 `~/.local/bin` 在 `PATH` 中。没有 mise 时安装 Zig 0.16.0，必要时用
+`ZIG=/path/to/zig-0.16.0` 指定编译器。发行包和原子升级见 [开发与部署](docs/development.md)。
 
-## 已经有什么
+## 先认识界面
 
-| 模块 | 状态 |
+- **Space / Workspace**：工作区，组织机器、目录和多个 Tab；两种名称指同一层对象。
+- **Tab**：一组分屏及浮动 Pane。
+- **Pane**：一个终端视图或脚本面板。进程由 core 持有，视图由 TUI 管理。
+- **Agent**：上报过状态的终端会话；普通 shell 不会因打开、命名或置顶就成为 Agent。
+
+侧栏 `spaces` 在每个工作区下显示 `2 tabs · 4 panes`，未选中也能看到；有分支时接在后面。
+计数包含该工作区的所有 Tab（含 settled）与 Pane（含浮动和模块）。
+`agents` 展示状态、父子关系、分组与共享已读；普通终端从工作区或 Go to 搜索访问。
+
+## 常用操作
+
+以下按键都先按一次 `Ctrl+B`，松开后再按表中按键。双按 `Ctrl+B` 把它发送给程序。
+
+| 操作 | 按键 / 鼠标 |
 |---|---|
-| `hc::codec` | framed 编解码（9 B header、DATA/CREDIT/CLOSE/RESIZE/FOCUS/FACTS），有单测 |
-| `hc::client` | `hc connect` 子进程、明文 hello、generation 与方法校验、帧读写 |
-| `hc::net` | 后台线程：单 reader 按帧序分发、RPC 关联、每个 Pane 一条 attach 流、两条流都回 credit、FACTS、断线退避重连；普通终端的 keep 恢复由 core 负责 |
-| `hc::proto` | 终端记录、事件、attach/subscribe 结果、CLOSE reason 的宽松解析 |
-| `term::view` | 本地 VT → Ratatui Buffer 的桥：样式、宽字符、真彩、反显、光标；key/mouse 编码、bracketed paste、透传查询的否定应答 |
-| `term::input` | crossterm 键盘 → ghostty 键码与修饰键映射 |
-| `layout::split` | BSP 分屏：分裂、折叠、比例调整、按几何找焦点邻居；Stack 纵向堆叠（折叠项只占一行标题），有单测 |
-| `layout::preset` | 七个布局预设（balanced / main-left / main-top / columns / rows / stack / main-stack），按当前分屏 Pane 顺序重排 |
-| 浮动层 | Tab 自带的浮动 Pane：多个并存、按 z 叠放、pin、收起、鼠标拖动与改尺寸、随布局持久化 |
-| `app` / `ui` | Workspace/Tab/BSP Pane 的事件循环、尺寸对齐、侧栏（工作区 + Agent）、Tab 栏、状态栏、提示行、toast、鼠标与拖选、手机单列布局与 `switch` 面板 |
-| `model` | Workspace / Tab / Pane / Agent 状态、Pane 跨 Tab 移动、布局序列化 |
-| `config` | `~/.config/hc-tui/config.toml`（XDG 优先）的 TOML 子集解析、键位绑定、`--default-config` |
-| `theme` | 12 套内置主题 + `[theme.custom]` 逐 token 覆盖 |
-| `copy` / `clipboard` | Copy Mode 的移动/选区/搜索，OSC 52 + 平台剪贴板工具 |
-| `chat` | pi 会话 JSONL 的跟随与解析、命令面板；Chat 视图渲染在 `ui::chat` |
-| `tui` | raw mode / alt screen / 鼠标 / bracketed paste 的进入与 RAII 恢复 |
+| 新建 / 切换 Tab | `c`；`n` / `p` 或 `1`–`9` |
+| 左右 / 上下分屏 | `v` / `-` |
+| 切换 Pane | `h j k l`；`Tab` / `Shift+Tab`；鼠标点击 |
+| 调整大小 | 拖动分屏分隔线；`r` 后按 `h j k l` |
+| 调整侧栏宽度 | 拖动侧栏右边界，松开后保存配置 |
+| 新建 / 选择工作区 | `Shift+N` / `w`；点击侧栏 |
+| 搜索工作区与终端 | `g` |
+| 工作台命令面板 | `:` |
+| 复制模式 / 只读历史 | `[` / `/` |
+| 下一个 Agent / 最近待处理 | `a` / `o` |
+| 设置 / 所有键位 | `s` / `?` |
+| 退出客户端，保留程序 | `q` |
 
-测试里有两条防线：`tests/fixtures/core-first-paint.bin`（真实 core 首帧）锁住
-「字节 → cell」的还原；`tests/g1_attach.rs` 在隔离 session 里跑真实 core 的
-attach → 首帧 → 输入回环 → 跨 credit 窗口的大流量 → detach → 重连 → 程序结束 CLOSE。
+鼠标调整布局需要 `ui.mouse_capture = true`。浮动 Pane 拖标题行移动、拖右下角改尺寸。
+全套键位、鼠标、手机布局和 pi Chat 见 [使用指南](docs/usage.md)。
 
-## 配置
+## 关闭与退出的区别
 
-文件位置 `$XDG_CONFIG_HOME/hc-tui/config.toml`（回落 `~/.config/...`）；不存在就用默认值。
-解析失败写进底部提示行，不阻止启动。`hc-tui --default-config` 打印当前支持的全部字段。
-
-```toml
-[ui]
-sidebar = true
-sidebar_width = 26
-mobile_width_threshold = 64     # 宽度 <= 此值时进手机单列布局，0 关闭
-tab_bar_position = "top"      # top | bottom
-pane_borders = "auto"         # auto | always | titles | off（auto：只在分屏时画；titles：只画标题行）
-pane_gaps = true              # false 时相邻 Pane 共用一条分隔线
-pane_outer_borders = true     # false：去掉 Pane 区域外沿的框
-pane_scrollbars = true        # 焦点 Pane 右缘的滚动条
-show_agent_labels_on_pane_borders = false
-hide_tab_bar_when_single_tab = false
-mouse_capture = true
-mouse_scroll_lines = 3
-copy_on_select = false
-confirm_close = true
-status_indicators = "dots"    # dots | symbols
-agent_panel_sort = "spaces"   # spaces | priority
-prompt_new_tab_name = true    # herdr 默认先问 Tab 名字
-prompt_new_workspace_name = false
-window_title = "{hostname}: {workspace}"
-tab_bar_right = []
-tab_bar_right_separator = " "
-
-[terminal]
-scrollback_bytes = 8388608
-new_cwd = "follow"           # follow | home | current | 固定路径
-default_shell = ""           # 空表示交给 core 的默认 shell
-
-[theme]
-name = "catppuccin"           # 见 --default-config 的内置主题列表
-[theme.custom]
-accent = "#89b4fa"
-
-[notifications]
-delivery = "toast"            # off | toast | system（system 另发 notify-send）
-
-[session]
-restore = true                # 从 core doc 恢复布局
-
-[keys]
-prefix = "ctrl+b"
-new_tab = "prefix+c"
-kill_pane = "prefix+shift+d"
-# ... 全部动作见 --default-config
-
-# 自定义命令：key 支持 prefix+... 或 ctrl+alt+...
-[[keys.command]]
-key = "prefix+alt+g"
-type = "popup"          # shell | pane | popup | action
-command = "lazygit"
-width = "80%"
-height = "80%"
-
-[[keys.command]]
-key = "prefix+alt+t"
-type = "pane"           # 临时 Pane，命令退出即消失
-command = "just test"
-
-[[keys.command]]
-key = "prefix+alt+n"
-type = "shell"          # 后台 detach，不占界面
-command = "notify-send done"
-```
-
-`type` 省略时按 `pane` 处理；`width` / `height` 接受格数或百分比，只对 popup 生效。
-命令用 `sh -c`（Windows 为 `cmd /d /c`）执行，起始目录沿用当前 Pane 的前台目录。
-
-其他可配项：
-
-```toml
-[ui]
-sidebar_collapsed_mode = "compact"  # compact: 留一条窄栏；hidden: 完全隐藏
-host_cursor = "native"              # native: 宿主光标；drawn: 画成单元格
-tab_bar_right = ["zoom", "hostname", "cmd:git rev-parse --short HEAD"]
-# cmd: 条目每 5 秒跑一次，取第一行输出显示在 Tab 栏右侧
-
-[notifications]
-sound = true
-sound_path = "~/.config/hc-tui/notify.mp3"
-done_path = "~/.config/hc-tui/done.mp3"
-request_path = "~/.config/hc-tui/request.mp3"
-```
-
-声音优先用 `paplay`，其次 `ffplay` / `afplay` / `mpv`；都不可用时退回终端响铃。
-
-键位语法：`prefix+<key>` 需要前缀，`ctrl+alt+<key>` 是终端模式直达绑定；字母跟随
-Shift 大小写，`minus` / `comma` / `ampersand` / `leftbracket` 等命名符号可用。
-`prefix+shift+r` 重新加载配置，无需重启。
-
-## 键位
-
-前缀键是 `ctrl+b`，按下后单独跟一个字母/符号；连按两次把字面 `ctrl+b` 交给程序。
-
-| 键 | 作用 |
+| 操作 | 程序和布局的结果 |
 |---|---|
-| `q` | 退出 TUI（只断视图，程序继续跑） |
-| `?` | Keybinds 浮层：`/` 过滤，`j`/`k`/`PgUp`/`PgDn` 滚动，`Esc` 关闭 |
-| `s` | Settings 浮层：theme / indicators / toasts / sound，回车应用并写回配置 |
-| `g` | Go to 浮层：搜索工作区与终端，`Enter` 跳到已有视图或新开一个视图 |
-| `o` | 跳到最近一次需要处理的 Agent（没有则找下一个待处理） |
-| `c` | 新 Tab（默认先问名字） |
-| `shift+t` | 命名当前 Tab（留空恢复默认） |
-| `n` / `p` | 下一个 / 上一个 Tab |
-| `1`–`9` | 切到第 n 个 Tab |
-| `shift+x` | 关闭当前 Tab（连带其所有视图） |
-| `shift+n` | 新 Workspace（`prompt_new_workspace_name` 决定是否先问名字） |
-| `shift+w` | 命名当前 Workspace |
-| `w` | Workspace 选择：`1`–`9` 或 `h`/`l` |
-| `shift+d` | 关闭当前 Workspace（需确认） |
-| `v` | 左右分屏 |
-| `-` | 上下分屏 |
-| `h` `j` `k` `l` | 焦点移动到左/下/上/右的 Pane |
-| `tab` / `shift+tab` | 在当前 Tab 内循环焦点 |
-| `t` | 把当前 Tab 的所有 Pane 收成一个 Stack（标题排在顶部，焦点那个展开） |
-| `shift+l` / `shift+j` | 下一个 / 上一个布局预设 |
-| `f` | 焦点 Pane 在分屏与浮动层之间切换 |
-| `shift+f` | 切换浮动 Pane 的 pin |
-| `shift+h` | 收起 / 展开浮动层 |
-| `z` | 缩放当前 Pane 占满内容区 |
-| `r` 然后 `h j k l` | 调整分隔线比例，其他键退出调整 |
-| `x` | 关闭当前 Pane 视图（程序继续跑） |
-| `m` 然后 `1`–`9` / `t` | 把当前 Pane 移到目标 Tab / 移成新 Tab |
-| `shift+p` | 命名当前 Pane（写入 `terminal.label`） |
-| `shift+k` | 结束当前 Pane 里的程序（需输入 `y` 确认） |
-| `i` | 给当前 Pane 的程序发一条消息（`terminal.send`，粘贴 + Enter） |
-| `shift+c` | 中断当前轮（`terminal.interrupt`） |
-| `shift+o` | 切换 keep（丢失后用 shell 恢复） |
-| `shift+u` | 移除已结束的终端记录（`terminal.rm`） |
-| `e` | 把视口 ANSI 交给 `$EDITOR`，在 popup 里打开 |
-| `/` | 只读文本浮层：`terminal.read` 的屏幕 + 历史（`j`/`k`/`PgUp`/`PgDn` 滚动，`q` 关闭） |
-| `shift+i` | 按名字按键：`terminal.keys`，输入 `enter, ctrl+c` 这类序列 |
-| `shift+w` | 等输出出现：`terminal.wait`（输入要等待的文本） |
-| `shift+p` | 发送文件：`terminal.put`（输入本地文件路径） |
-| `shift+t` | 模板选择器：在新 Tab 里运行 `terminal.run` 模板 |
-| `shift+m` | 机器选择器：`Enter`/`n` 在目标机器开新 Pane，`a` 添加、`c` 连接、`r` 改名、`d` 移除 |
-| `shift+v` | 把剪贴板图片交给 `terminal.put`，再把落盘路径贴进程序 |
-| `[` | 进入 Copy Mode |
-| `a` | 跳到下一个需要处理的 Agent |
-| `b` | 显示/隐藏侧栏 |
-| `shift+r` | 重新加载配置文件 |
+| 关闭 Pane / Tab / Space | 结束相关程序和子 Agent，删除对应布局 |
+| 程序自己退出 | 自动移除 Pane，清理空 Tab / Space；其他 Pane 继续运行 |
+| `terminal.park` | 移除视图、禁用 keep，程序继续运行 |
+| `tab.settle` | 暂时收起 Tab，保留程序；需要注意时重新出现 |
+| `app.quit` / 前缀 `q` | 客户端 detach，core 中的程序继续运行 |
+| 连接失败 / attach 错误 | 保留错误视图，等待恢复；不冒充程序正常退出 |
 
-Copy Mode：`h j k l` 移动，`w`/`b` 按词，`0`/`$` 行首行尾，`g`/`G` 视口顶/底，
-`Ctrl+u`/`Ctrl+d` 翻页，`v` 起选区，`R` 切换矩形选区，`y` 或 Enter 复制并退出，
-`/` 搜索（命中会高亮）、`n` 下一个，`o` 打开光标处的链接，`q`/`Esc` 退出。
-复制同时走 OSC 52 与平台剪贴板工具。
+## 功能与边界
 
-侧栏与 herdr 同构：顶部 `spaces` 段每个工作区两行（名字 + git 分支），底行是
-`new ● menu`；分隔线下面是 `agents` 段。工作区行可点击切换，Agent 行按
-`blocked > error > done > working > idle`（或按工作区分组）排序，点击即跳过去并
-标记已读；没有本视图的终端（其它客户端在同一个 core 里创建、或 `hc run` 起的）
-也列在这里，点击会给它开一个 attach 视图。列表超过侧栏高度时用滚轮滚动。
-已读轮次写在 `~/.local/state/hc-tui/state.json`，重启不会把旧完成重新当未读。
-
-桌面布局与 herdr 一致：侧栏占满整列，Tab 栏（`1 2 3 +`，缩放时当前 Tab 追加 `Z`）
-只在内容区上方；没有常驻状态栏，只有进入 PREFIX / COPY / RESIZE / NAVIGATE /
-MOVE 或出现提示时才在底部占一行。窗口标题按 `window_title` 模板写成
-`{hostname}: {workspace}` 这类形式。
-
-鼠标左键点 Pane 切焦点、点 Tab 栏切 Tab、点侧栏行跳转工作区或 Agent；滚轮在子程序
-未启用鼠标时按 `mouse_scroll_lines` 翻本地历史，启用后转发给它。`copy_on_select = true`
-时普通模式拖选即复制；否则宿主终端被 TUI 持有鼠标，要拖选文字请按住 `Shift`。
-
-## 手机与窄屏
-
-终端宽度不超过 `mobile_width_threshold`（默认 64）且 `mouse_capture = true` 时进入手机单列布局：
-
-- 顶栏一行：连接状态、工作区、`tab 2/3`、待处理数量，右端是 ` switch ` 按钮。
-  原先的 Tab 栏与状态栏都不再占行，腾出的高度全给 Pane。
-- 内容区只摆当前 Pane（其余 Pane 照常 attach、输出继续写进本地 VT）。
-- 点 ` switch ` 打开全屏面板：`workspaces`、`tabs`、`agents`（含没有状态上报的 Pane）与 `menu`
-  四段，一行一个可点条目，点一下跳过去并关面板；面板打开时顶栏右侧变成 ` close `。
-  `menu` 收下了手机上没有前缀键就按不出来的动作：新建 tab、左右/上下分屏、关闭 pane、
-  复制模式、下一个待处理、退出。
-- 面板列表超出屏幕时用双指滚动，一次两行。
-- 单击 Pane 切焦点；单指上下拖动翻 scrollback（手指下拖看更早的行，上拖回来），
-  手机布局下拖选复制不启用，选字走 Copy Mode。
-
-`mobile_width_threshold = 0` 或 `mouse_capture = false` 时保持常规布局（侧栏 + Tab 栏 + 状态栏）。
-
-## Chat 视图
-
-`prefix+shift+a`（手机上在 `switch` 面板里点 `chat 视图`）把当前 Pane 的 pi 会话
-渲染成一列消息：正文按当前宽度重折、思考内容折成两行、工具调用收成一行（`Enter`
-或点击展开结果）。Chat 只是同一份 transcript 的另一种渲染，Pane 的终端照常 attach，
-`Ctrl+O` 随时退回终端，两边不会分叉。
-
-数据直接读 pi 自己写的会话文件 `~/.pi/agent/sessions/--<cwd>--/<时间>_<id>.jsonl`
-（`PI_CODING_AGENT_SESSION_DIR` 可改根目录），沿 `parentId` 只走当前叶子，所以
-`/tree`、`/fork` 之后被放弃的分支不会出现在视图里。`/new`、`/resume` 换了会话文件时
-会自动跟过去。
-
-| 按键 | 作用 |
+| 能力 | 当前支持 |
 |---|---|
-| `Enter` | 发送输入行；输入为空时展开/收起选中的工具卡 |
-| `Ctrl+C` | 给 Pane 发 `Ctrl+C` |
-| `Ctrl+N` | 发送 `/new` |
-| `Ctrl+P` | 命令面板 |
-| `Ctrl+O` | 退回终端视图 |
-| `Ctrl+Y` | 复制最后一条回复 |
-| `Ctrl+U` / `Ctrl+E` | 清空输入 / 回到底部 |
-| `↑` `↓` | 输入为空时在块之间移动；有输入时翻输入历史 |
-| `PgUp` `PgDn` | 翻消息 |
-| `Esc` | 关命令面板，或退出 Chat |
+| 工作区和布局 | 多机、稳定 ID、GUI 双向同步、CAS 冲突保护、布局恢复 |
+| 分屏 | BSP、七种预设、Stack、zoom、浮动、pin、移动、拖动改大小 |
+| Agents | 状态与未读、置顶、父子树、按机器/工作区或优先级分组、双向导航 |
+| 终端 | 独立 attach、历史与搜索、复制、按键/消息发送、剪贴板图片上传 |
+| 扩展 | 文件/变更只读入口、定时脚本面板、JSON props、个人布局和模块克隆 |
+| 外观 | 12 套主题、自定义颜色、Pane 默认色及 ANSI 0–15 色随主题切换 |
+| 图片 | Kitty PNG/RGB/RGBA、虚拟 placement、裁切遮挡；通用宿主半块预览 |
+| 手机 | 窄屏单 Pane、switch 面板、触摸滚动、pi Chat 动作条 |
+| 自动化 | 命令面板、action 快捷键、`commands` / `ls` / `do` 本地控制 |
 
-输入行写回 Pane 的 attach 流（文本 + 回车），所以 pi 自己的权限、模型、扩展与项目
-上下文都照原样生效。输入 `/` 打开命令面板：pi 的内置斜杠命令，加上 `~/.pi/agent/prompts`
-里的模板与各标准位置发现的技能；标了 `终端` 的命令（设置、会话选择器、登录等）会先
-关掉 Chat 再发，因为它们的浮层只有终端能画。
+显式真彩色和程序通过 OSC 指定的颜色由程序控制。Sixel/iTerm 图片协议、GPUI JS
+模块运行时、专门的 worktree 管理、通用 Agent 会话续接尚未实现。pi Chat 读取本机会话文件，
+不能当作任意 Agent 或远端会话的通用聊天协议。英文输入/滚动时的重复字符报告尚未稳定复现，
+本版补充真实后端回放测试并改为整帧同步输出；不将它列为已确认修复。
 
-### 会话映射
-
-同一目录可能有多个 pi 会话，按「最近写入」挑文件会挑错。hc 不提供 agent 会话的接口，
-所以让 agent 自己报：命令面板里的 `安装会话映射 hook`（标 `本地`）会在
-`<agent-dir>/extensions/hc-tui-session.ts` 写一个 pi 扩展（`<agent-dir>` 默认
-`~/.pi/agent`，可用 `PI_CODING_AGENT_DIR` 改），它每次开轮都把会话文件路径报到
-`hc label <t> session=<path>`。hc-tui 读到这个 label 就用它，顶栏只写会话名。
-
-没装 hook 时按目录里最新的 `.jsonl` 推断，顶栏标 `· 推断`。两者都可用；装了之后
-同一目录多个活跃会话也不会串。删掉扩展就是面板里那条 `移除会话映射 hook`。
-
-手机上除了快捷键，Chat 底部还有一条 `发送 / 中断 / 命令 / 终端` 动作条。
-Agent 处于 `blocked` 或 `error` 时顶栏变红，提示需要回终端处理。
-
-找不到会话文件、或 Pane 的 cwd 对不上时，顶栏写明原因，其它视图不受影响。
-
-每个 Pane attach 的是它自己的终端，因此不同 Pane 的尺寸不会互相抢；
-同一个终端被两个客户端 attach 时才会出现「最后活动者定尺寸」。
-
-隐藏 Tab 的 Pane 仍保持 attach（输出会继续写进本地 VT），切回去立刻是完整的；
-关掉 Tab 或 Pane 视图只发 CLOSE，core 里的程序继续运行，可以用 `hc ls` 找回。
-
-## 尚未做
-
-按「能力归属」分类，避免把接线工作误当成 core 缺口。
-
-**core 已提供，本仓库还没接**
-
-- `machine.exec`：不走终端的远程一次性命令。
-- `events.subscribe` 的 `terminal` / `children_of` / `label` 过滤：当前订阅全部终端，侧栏才能看到不属于本客户端的终端。
-
-**原语已具备（vendored crate 或本地环境）**
-
-- Kitty Graphics 渲染：已接非虚拟 placement 的采样渲染（RGB/RGBA/PNG，每个单元格取对应像素作背景）；虚拟 placement（Unicode 占位符）尚未处理。
-- 图片粘贴依赖本机 `wl-paste` / `xclip` / `pngpaste`。
-- Worktree：git 子进程 + 目录选择，core 不参与。
-
-**core 确实不提供（主动降级，暂缓）**
-
-- 插件系统（herdr 自有 API 与运行沙箱）。
-- Agent 会话续接（依赖各 Agent 的 `integration install` 钩子与它自己记录的 session 引用）。
-- 发行：`just release-musl` 与 `just dist` 已就绪，CI 有 musl 任务；macOS 产物只在手动触发并勾选 `macos` 时构建。
-
-**暂缓的具体理由**
-
-- Worktree：日常多任务用 Tab 与 Workspace 已能覆盖。
-- Agent 会话续接：各家 hook 格式分散，收益集中在重启恢复一处，排在远程机器之后。
-- 插件系统：没有稳定的自有 API 层，先有 `terminal.*` / `machine.*` 的完整包装再谈扩展点。
-
-`scripts/ui-smoke.sh` 覆盖首次绘制、Tab/分屏、布局跨重启恢复、Copy Mode、reader、
-自定义命令的三种形态与 shell 落盘；`just smoke` 运行它。
-
-G1 手工门禁里的 `pi` 一项尚未在有凭证的环境验证；其余四个程序已交互验证。
-
-## 发行
-
-产物命名与内容：
-
-```
-hc-tui-<version>-x86_64-unknown-linux-musl.tar.gz
-  hc-tui                  静态链接（musl），无运行时依赖
-  LICENSE
-  THIRD-PARTY-NOTICES.md
-  CHANGELOG.md
-hc-tui-<version>-x86_64-unknown-linux-musl.tar.gz.sha256
-```
+## 配置与自动化
 
 ```sh
-just dist          # cargo zigbuild → tar.gz + sha256（Linux musl）
-sha256sum -c hc-tui-*.tar.gz.sha256
-tar -xzf hc-tui-*.tar.gz && ./hc-tui --version
+hc-tui --default-config                  # 当前全部默认字段与绑定
+hc-tui --config ./hc-tui.toml
+hc-tui --session work
+hc-tui --attach t3
+hc-tui --no-restore
+hc-tui commands                         # 命令目录，无需已运行的 TUI
+hc-tui ls --session work                 # 以下操作需要对应 session 的 TUI 已运行
+hc-tui do agent.next '{}' --session work
+hc-tui do pane.split '{"direction":"right"}' --session work
 ```
 
-macOS（aarch64 / x86_64）默认不构建。需要时在 Actions 页手动触发 `release` 工作流并勾选
-`macos` 输入，产物会一起进同一个 GitHub Release。
-发布前的最低检查清单见 [docs/release.md](docs/release.md)。
+配置默认在 `$XDG_CONFIG_HOME/hc-tui/config.toml`，回落 `~/.config/hc-tui/config.toml`。
+前缀 `Shift+R` 重载配置。主题设置会同时更新外部 UI 和已有 Pane 的默认色与 ANSI 调色板。
 
-运行时只需要 `hc`（>= 0.1.17）在 `PATH` 里；Zig 只在从源码构建时需要。
+## 文档导航
 
-## 文档
-
-| 文档 | 作用 |
+| 文档 | 内容 |
 |---|---|
-| [docs/plan-v1.1.md](docs/plan-v1.1.md) | 权威实施方案，冲突时以本文为准 |
-| [docs/review-v1.0.md](docs/review-v1.0.md) | 对 v1.0 的评审、证据与更正理由 |
-| [docs/protocol-facts.md](docs/protocol-facts.md) | hc 协议实测事实，实现的直接依据 |
-| [docs/gap-vs-herdr.md](docs/gap-vs-herdr.md) | 与 Herdr 的差距矩阵与补齐顺序 |
-| [docs/release.md](docs/release.md) | 发布检查清单与产物验证 |
-| [docs/adr/0001-ghostty-vt.md](docs/adr/0001-ghostty-vt.md) | Ghostty 选型、风险与升级路径 |
-| [docs/plan-v1.0.md](docs/plan-v1.0.md) | v1.0 原文归档 |
+| [使用指南](docs/usage.md) | 完整键位、鼠标、状态、生命周期、Chat 和常见问题 |
+| [配置说明](docs/configuration.md) | 配置项、颜色、绑定、通知、脚本面板和路径 |
+| [命令参考](docs/commands.md) | 全部工作台命令、参数、目标选择和返回值 |
+| [开发与部署](docs/development.md) | 模块结构、构建、验证、原子安装和回滚 |
+| [herdr-app 对齐契约](docs/herdr-app-alignment.md) | 共享数据、冲突、生命周期和验证边界 |
+| [发布检查清单](docs/release.md) | 版本、构建、标签和发行包验收 |
+| [协议实测基线](docs/protocol-facts.md) | 0.1.17 时期的协议记录，需结合当前 schema |
+| [Ghostty ADR](docs/adr/0001-ghostty-vt.md) | VT 选型、风险和升级方式 |
 
-## 环境基线
-
-- `hc` 0.1.17（以 `hc schema` 为准；源码 checkout 可能更旧）
-- **Zig 0.16.0**（0.17 编译失败，见 ADR-0001）
-- Rust stable（骨架验证于 1.99.1）
-
-许可：Apache-2.0。第三方组件见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
-
-### Agent 导航、命令和图片
-
-Agents 在打开前读取名称、状态和目录，按机器和稳定 space ID 分组。
-点击分组折叠，点击 agents 标题切换分组/优先级；父 agent 可折叠子项。
-点击已有 agent 回到原位置；外部会话独立开 Tab。
-
-`prefix :` 搜索工作台命令；`hc-tui commands` 列出支持的动作。
-运行中的界面可通过同一 session 的 `hc-tui ls` 与 `hc-tui do` 控制：
-
-```sh
-hc-tui do agent.next '{}'
-hc-tui do terminal.park '{"terminal":"t3"}'
-hc-tui do mod.open '{"name":"files"}'
-```
-
-可将这些动作绑定到快捷键，也可注册脚本面板：
-
-```toml
-[[keys.command]]
-key = "prefix+alt+a"
-type = "action"
-command = 'agent.prev {}'
-
-[[panels]]
-name = "status"
-command = "git status --short"
-refresh = 5
-```
-
-面板使用工作区所在机器和目录。`mod.open {"name":"status"}` 打开面板；
-`HC_TUI_PANEL_PROPS` 提供 JSON props。`layout.clone`/`mod.clone` 保存个人克隆。
-
-Kitty、Ghostty、Herdr、WezTerm 自动使用原生像素输出；其他宿主使用半块字符预览。
-`HC_TUI_GRAPHICS=kitty hc-tui` 强制原生输出，`HC_TUI_GRAPHICS=blocks hc-tui`
-使用字符预览；tmux 内默认字符预览。图片粘贴仍是 `prefix shift+v`。
-
-图形、共享布局、生命周期与 GUI 专属能力的区别见
-[对齐契约](docs/herdr-app-alignment.md)。`just parity` 可重跑双 core 的隔离契约验收。
+`plan-v1.0.md`、`plan-v1.1.md`、`review-v1.0.md`、`gap-vs-herdr.md` 是历史资料，
+不作为当前功能清单。许可：Apache-2.0；见 [第三方组件](THIRD-PARTY-NOTICES.md)。

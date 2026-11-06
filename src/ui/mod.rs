@@ -25,6 +25,7 @@ mod chat;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.sync_terminal_theme();
     let theme = app.config.theme.clone();
     let mobile = app.config.mouse_capture
         && app.config.mobile_width_threshold > 0
@@ -319,6 +320,12 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
             style,
             target: Some(MobileTarget::Workspace(index)),
         });
+        let workspace = &app.workspaces[index];
+        rows.push(MobileRow {
+            text: truncate(&format!("  {}", workspace_summary(workspace)), width),
+            style: Style::default().fg(theme.color("dim")),
+            target: Some(MobileTarget::Workspace(index)),
+        });
     }
 
     rows.push(section("tabs"));
@@ -584,6 +591,16 @@ fn tab_bar_right_text(app: &App) -> String {
     parts.join(&app.config.tab_bar_right_separator)
 }
 
+fn workspace_summary(workspace: &crate::model::Workspace) -> String {
+    let tabs = workspace.tabs.len();
+    let panes = workspace.panes().len();
+    format!(
+        "{tabs} tab{} · {panes} pane{}",
+        if tabs == 1 { "" } else { "s" },
+        if panes == 1 { "" } else { "s" }
+    )
+}
+
 fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     app.sidebar_area = area;
     app.workspace_hits.clear();
@@ -616,7 +633,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     lines.push(title(" spaces".to_string()));
     row = row.saturating_add(1);
 
-    // 每个 space 两行：名字与分支。
+    // 每个 space 两行：名字，以及 Tab/Pane 数量与分支。
     let mut spaces: Vec<_> = (0..app.workspaces.len())
         .map(|index| {
             (
@@ -681,10 +698,15 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             .workspace_cwd(index)
             .and_then(|cwd| app.branch(&cwd))
             .unwrap_or_default();
-        let mut detail = format!("   {}", truncate(&branch, width.saturating_sub(4)));
+        let workspace = &app.workspaces[index];
+        let mut detail = workspace_summary(workspace);
         if attention > 0 {
-            detail.push_str(&format!(" {attention}"));
+            detail.push_str(&format!(" · {attention}!"));
         }
+        if !branch.is_empty() {
+            detail.push_str(&format!(" · {branch}"));
+        }
+        let detail = format!("   {}", truncate(&detail, width.saturating_sub(3)));
         let detail_style = if active {
             Style::default()
                 .bg(theme.color("selection_bg"))

@@ -1,0 +1,152 @@
+# 工作台命令参考
+
+[返回 README](../README.md) · [使用指南](usage.md) · [配置](configuration.md)
+
+## 调用和返回值
+
+前缀 `:` 打开命令面板，搜索动作后可编辑 JSON 参数；action 快捷键与 CLI 使用同一分发器。
+`hc-tui commands` 返回当前命令目录，无需正在运行的 TUI。
+`ls` 和 `do` 通过 Unix socket 控制已运行的客户端，不是直接连接 core 的 `hc` 命令。
+
+```sh
+hc-tui commands
+hc-tui ls --session work
+hc-tui do pane.split '{"direction":"down"}' --session work
+hc-tui do space.rename '{"id":"sp123","name":"backend"}' --session work
+```
+
+CLI 参数顺序：`do <动作名> [JSON 对象] [--session 名称] [--config 路径]`。
+省略 JSON 按 `{}` 处理。使用同一 XDG_STATE_HOME 和 session；--config 本身不会另开控制 socket。
+同一 session 的 TUI 未运行时 ls/do 报连接失败；目前本地控制 socket 只实现于 Unix。
+
+`ls` 返回 state、connection、terminals。state 包含 workspaces、tabs、panes、稳定来源 ID 和当前选择；
+terminals 是 core 终端快照，包含普通终端，不等于侧栏 Agents 列表。
+`do` 返回 accepted=true 仅表示 UI 已受理；confirmation_pending=true 表示仍需 UI 确认。
+core 操作异步完成，应通过后续 ls、core 状态或 UI 提示验证，不把受理当作成功结束。
+
+## 目标与通用参数
+
+- `space.*`（除 new）可用 `id` 选择稳定 Space ID 或 TUI 数字 ID 的字符串。
+- `tab.*`（除 new）可用 `id` 选择稳定 Tab ID 或 TUI 数字 ID 的字符串，并切到所在工作区。
+- `pane.*` 可用 `pane` 选择稳定 Pane ID 或 TUI 数字 ID 的字符串。
+- `terminal` 是 core 地址，如 `t3` 或 `peer/t3`；通常省略时使用当前输入终端。
+- `index` 从 **1** 开始；机器名称和稳定 ID 不按显示名称猜测，先用 ls 读取。
+- 选定目标可能改变当前焦点。复制、搜索和滚动需要已有打开的终端视图。
+
+## Space
+
+| 动作 | 参数与结果 |
+|---|---|
+| space.new | 可选 name、folder、machine、argv（字符串数组）；创建工作区和首个终端 |
+| space.close | 可选 id、confirmed=true；结束工作区程序和子 Agent，默认遵循确认设置 |
+| space.rename | 可选 id；name 指定新名，省略弹出输入框 |
+| space.move | 可选 id；index 必填，在工作区列表中移动 |
+| space.select | id 或 index；切换工作区 |
+| space.next / space.prev | 循环选择工作区 |
+
+## Tab
+
+| 动作 | 参数与结果 |
+|---|---|
+| tab.new | 可选 name、space、folder、argv；place 为 tab（默认）、right 或 down |
+| tab.close | 可选 id、confirmed=true；结束相关程序和子 Agent |
+| tab.rename | 可选 id；name 指定名称，省略弹出输入框 |
+| tab.move | 可选 id；index 指定在本工作区的顺序 |
+| tab.select | id 或 index；选择并取消 settled |
+| tab.next / tab.prev | 切换 Tab |
+| tab.settle / tab.unsettle | 可选 id；收起 / 恢复，程序保持运行 |
+
+space.new、tab.new、terminal.open 也可传 mod 和 props 创建模块 Pane。
+Tab 数量及 Space 概览包含 settled Tab；settle 只是屏幕状态，不删除共享结构。
+
+## Pane
+
+| 动作 | 参数与结果 |
+|---|---|
+| pane.split | direction=right（默认）或 down |
+| pane.close | 关闭目标 Pane 并结束程序；最后一个 Pane 按设置确认 |
+| pane.zoom | 切换当前 Pane 放大 |
+| pane.focus | terminal 指定 core 终端；也可通过通用 pane 参数定位现有 Pane |
+| pane.go | direction=left/right/up/down，默认 right |
+| pane.swap | direction 同上；交换位置，保留 Pane 和程序身份 |
+
+拖动分隔线属于鼠标交互，不需要先运行命令。键盘比例调整用前缀 r。
+
+## Terminal 与 Agent
+
+| 动作 | 参数与结果 |
+|---|---|
+| terminal.open | 同 tab.new；argv 指定程序，place=tab/right/down |
+| terminal.keep | 可选 terminal；启用 keep，无视图时打开 |
+| terminal.park | 可选 terminal；禁用 keep、移除视图，程序继续运行 |
+| terminal.pin | 可选 terminal、pinned（默认 true）；共享置顶，不改变 Agent 分类 |
+| terminal.kill | 可选 terminal；结束程序及子 Agent，直接执行，无交互确认参数 |
+| terminal.peek | 可选 terminal；读取最近 500 行到只读浮层 |
+| terminal.show | terminal 临时替换当前视图的显示；省略 terminal 恢复原显示 |
+| terminal.copy | 可选 terminal；复制已打开视图的可见文本 |
+| terminal.paste | text 必填，可选 terminal；发送粘贴文本，**不自动回车** |
+| terminal.paste_image | 本机剪贴板图片上传并粘贴路径到当前 Pane |
+| terminal.scroll | 可选 terminal；to=top/bottom，或 lines（有符号）/pages（可为小数）；负值向历史上方 |
+| terminal.search | 可选 terminal、query；进入 Copy Mode 搜索 |
+| terminal.right_click | 可选 terminal；to=program 或 menu，设置右键路由；Shift+右键总是菜单 |
+| agent.focus | terminal 指定 Agent，可打开尚未显示的子 Agent |
+| agent.next / agent.prev | 沿当前可见 Agents 顺序循环，不包含普通 shell |
+
+前缀 i 的 terminal.send 是“文本 + Enter”，不同于 terminal.paste。
+按名字发送按键、等待输出、上传文件、模板选择器是键位入口，未另列为同名工作台命令。
+程序正常退出会自动移除 Pane；连接错误保留视图。退出全部客户端不会替代 terminal.kill。
+
+## Machine 与文件/模块
+
+| 动作 | 参数与结果 |
+|---|---|
+| machine.list | 请求机器列表，在 UI 中显示；CLI 受理响应不含列表结果 |
+| machine.connect | 参数按 core 的 machine.connect 传递，如 machine |
+| machine.add | 参数原样传给 core machine.add，如 name、via、session；以本机 hc schema 为准 |
+| machine.remove | 参数原样传给 core machine.rm |
+| files.open | 当前工作区 Git 文件列表，只读浮层 |
+| changes.open | 当前工作区相对 HEAD 的 git diff，只读浮层 |
+| file.open | path 必填，当前工作区机器上的文件，只读浮层 |
+| mod.open | name 必填，可选 props 对象；新 Tab 中打开脚本模块 |
+| mod.clone | name 必填，可选 as（默认 name-copy）；写入个人 panels JSON |
+
+```sh
+hc-tui do mod.open '{"name":"changes"}'
+hc-tui do file.open '{"path":"README.md"}'
+hc-tui do mod.open '{"name":"status","props":{"scope":"all"}}'
+hc-tui do mod.clone '{"name":"files","as":"my-files"}'
+```
+
+files.open 与 mod.open files 是不同入口：前者一次性只读浮层，后者定期刷新的 Tab 模块。
+脚本面板的注册与执行环境见 [配置](configuration.md#脚本面板与个人克隆)。
+
+## Layout、外观与应用
+
+| 动作 | 参数与结果 |
+|---|---|
+| layout.clone | as 指定个人布局名；缺省为 name-copy（name 默认 layout）；拒绝覆盖 |
+| layout.set | layout 必填；接受 SavedNode 或 GUI Pane 树，具体结构见 model/shared 实现 |
+| layout.select | 当前根为 Stack 时用 child（Pane ID 字符串）或 index 选择项 |
+| layout.reset | 当前 Tab 重排为 balanced |
+| layout.switch | name 为内置预设或个人布局名；省略则下一个预设 |
+| layout.reload | 接受共享文档版本以解除冲突；machine 可选，默认当前工作区机器 |
+| layout.show / layout.hide / layout.toggle | 显示 / 隐藏 / 切换侧栏 |
+| layout.resize | px 必填；历史参数名，实际单位为**终端列数**，受 min/max 限制 |
+| app.palette | 打开工作台命令面板 |
+| app.settings | 打开设置 |
+| app.help | 打开键位提示 |
+| app.theme | name 必填；切换内置主题并写入配置 |
+| app.quit | detach 客户端，程序继续运行 |
+| overlay.close | 清除打开的本地浮层；popup 仅关闭视图 |
+
+七个内置预设：balanced、main-left、main-top、columns、rows、stack、main-stack。
+layout.set 使用当前布局身份，不是任意 JSON 启动器；SavedNode 路径要求 Pane 属于当前 Tab，
+每个 Pane 最多出现一次，未使用的视图会移除。切布局前可用 ls 查看和 layout.clone 保存。
+个人布局克隆不是程序的启动模板，不能用来复制一个运行中的 Agent。
+
+```sh
+hc-tui do layout.switch '{"name":"columns"}'
+hc-tui do layout.clone '{"as":"my-columns"}'
+hc-tui do app.theme '{"name":"catppuccin-latte"}'
+hc-tui do terminal.park '{"terminal":"peer/t3"}'
+```

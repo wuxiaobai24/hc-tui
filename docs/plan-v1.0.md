@@ -1,5 +1,7 @@
 # HC TUI：基于 Herdr Core 的原生终端工作台完整设计
 
+> 历史资料：保留当时的设计与评审，不代表当前功能。当前入口见 [README](../README.md)、[使用指南](usage.md) 和 [对齐契约](herdr-app-alignment.md)。
+
 版本：v1.0（2026-11-04）  
 定位：Rust 原生 TUI、Agent-first、多终端、多机器、可恢复的 Herdr Core 客户端。  
 资料基线：herdr-core v0.1.17 与 herdr TUI v0.9.5；正式开发前锁定 commit 并对本机 `hc schema` 进行校验。

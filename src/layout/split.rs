@@ -50,6 +50,15 @@ pub struct Placement {
     pub collapsed: bool,
 }
 
+/// 一次分隔线拖动的目标；路径在按下时固定，拖过其他 Pane 不会换目标。
+#[derive(Debug, Clone)]
+pub struct Divider {
+    path: Vec<bool>,
+    axis: Axis,
+    area: Rect,
+    ratio: f32,
+}
+
 impl SplitNode {
     pub fn leaf(id: u32) -> Self {
         SplitNode::Leaf(PaneId(id))
@@ -121,6 +130,73 @@ impl SplitNode {
                 }
             }
         }
+    }
+
+    /// 命中分隔线的两侧边缘；嵌套分隔线优先于祖先。
+    pub fn divider_at(&self, area: Rect, column: u16, row: u16) -> Option<Divider> {
+        if !area.contains((column, row).into()) {
+            return None;
+        }
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        let (a, b) = split_rect(area, *axis, *ratio);
+        for (child, rect, side) in [(first, a, false), (second, b, true)] {
+            if let Some(mut divider) = child.divider_at(rect, column, row) {
+                divider.path.insert(0, side);
+                return Some(divider);
+            }
+        }
+        let (pointer, boundary) = match axis {
+            Axis::Horizontal => (column, b.x),
+            Axis::Vertical => (row, b.y),
+        };
+        (pointer == boundary || pointer.checked_add(1) == Some(boundary)).then(|| Divider {
+            path: Vec::new(),
+            axis: *axis,
+            area,
+            ratio: *ratio,
+        })
+    }
+
+    pub fn drag_divider(&mut self, divider: &Divider, dx: i32, dy: i32) -> bool {
+        let mut node = self;
+        for second in &divider.path {
+            let Self::Split {
+                first,
+                second: other,
+                ..
+            } = node
+            else {
+                return false;
+            };
+            node = if *second { other } else { first };
+        }
+        let Self::Split { axis, ratio, .. } = node else {
+            return false;
+        };
+        if *axis != divider.axis {
+            return false;
+        }
+        let (delta, extent) = match axis {
+            Axis::Horizontal => (dx, divider.area.width),
+            Axis::Vertical => (dy, divider.area.height),
+        };
+        if extent < 2 {
+            return false;
+        }
+        let next = (divider.ratio + delta as f32 / f32::from(extent)).clamp(0.05, 0.95);
+        if *ratio == next {
+            return false;
+        }
+        *ratio = next;
+        true
     }
 
     pub fn panes(&self) -> Vec<PaneId> {

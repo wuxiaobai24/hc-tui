@@ -224,6 +224,19 @@ pub struct Display {
 }
 
 impl Display {
+    pub fn from_theme(theme: &crate::theme::Theme) -> Self {
+        let color = |token| match crate::term::view::theme_rgb(theme, token) {
+            ratatui::style::Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+            _ => None,
+        };
+        Self {
+            fg: color("fg"),
+            bg: color("bg"),
+            cursor: color("cursor_bg"),
+            cell: Some(crate::hc::net::CELL_PX),
+        }
+    }
+
     /// FACTS 只需要 cell 像素尺寸；颜色留空让 core 用自己的默认值。
     pub fn with_cell(width: u32, height: u32) -> Self {
         Self {

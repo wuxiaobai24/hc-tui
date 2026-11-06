@@ -86,6 +86,7 @@ pub enum Command {
         method: String,
         params: Value,
     },
+    Display(Display),
     Shutdown,
 }
 
@@ -266,6 +267,7 @@ struct Session<'a> {
     event_lines: Vec<u8>,
     streams: Vec<Stream>,
     intents: &'a mut BTreeMap<u32, PaneIntent>,
+    display: &'a mut Display,
     commands: &'a mut UnboundedReceiver<Command>,
 }
 
@@ -288,9 +290,10 @@ async fn supervise(
 ) {
     let mut intents: BTreeMap<u32, PaneIntent> = BTreeMap::new();
     let mut backoff = BACKOFF_MIN;
+    let mut display = Display::with_cell(CELL_PX[0], CELL_PX[1]);
 
     loop {
-        let outcome = serve(&config, &events, &mut commands, &mut intents).await;
+        let outcome = serve(&config, &events, &mut commands, &mut intents, &mut display).await;
         match outcome {
             Outcome::Shutdown => return,
             Outcome::Fatal(reason) => {
@@ -316,6 +319,7 @@ async fn supervise(
                 _ = &mut sleep => break,
                 command = commands.recv() => match command {
                     None | Some(Command::Shutdown) => return,
+                    Some(Command::Display(next)) => display = next,
                     Some(command) => apply_offline_command(command, &mut intents, &events),
                 },
             }
@@ -379,7 +383,8 @@ fn apply_offline_command(
                 }),
             });
         }
-        Command::Shutdown
+        Command::Display(_)
+        | Command::Shutdown
         | Command::Input { .. }
         | Command::Focus { .. }
         | Command::Credit { .. } => {}
@@ -391,6 +396,7 @@ async fn serve(
     events: &Sender<NetEvent>,
     commands: &mut UnboundedReceiver<Command>,
     intents: &mut BTreeMap<u32, PaneIntent>,
+    display: &mut Display,
 ) -> Outcome {
     let parts = match client::open(config.session.as_deref()).await {
         Ok(parts) => parts,
@@ -444,6 +450,7 @@ async fn serve(
         event_lines: Vec::new(),
         streams: Vec::new(),
         intents,
+        display,
         commands,
     };
     session.run().await
@@ -571,6 +578,14 @@ impl Session<'_> {
                             program_exit: false,
                         });
                     }
+                }
+            }
+            Command::Display(display) => {
+                *self.display = display;
+                let payload = serde_json::to_vec(self.display)?;
+                let channels: Vec<_> = self.streams.iter().map(|s| s.channel).collect();
+                for channel in channels {
+                    self.write(&codec::facts(channel, &payload)?).await?;
                 }
             }
             Command::Resize { pane, cols, rows } => {
@@ -910,7 +925,7 @@ impl Session<'_> {
                 address
             }
         };
-        let display = Display::with_cell(CELL_PX[0], CELL_PX[1]);
+        let display = self.display.clone();
         let result = self
             .rpc(
                 "terminal.attach",

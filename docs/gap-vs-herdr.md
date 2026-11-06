@@ -1,5 +1,7 @@
 # hc-tui 与 Herdr 的差距
 
+> 历史资料：保留当时的设计与评审，不代表当前功能。当前入口见 [README](../README.md)、[使用指南](usage.md) 和 [对齐契约](herdr-app-alignment.md)。
+
 日期：2026-11-04
 对照对象：`herdr 0.9.3`（含 `herdr --default-config`、`herdr api schema`、各命令组 help）与 `hc 0.1.17`（`hc schema`）。
 本仓库基线：`a5c62ce` 之上的 P2 状态，`cargo test` 36 单元 + 2 端到端全绿。

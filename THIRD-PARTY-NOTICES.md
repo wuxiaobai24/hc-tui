@@ -5,7 +5,7 @@
 
 ## 本项目
 
-- **hc-tui** — Apache-2.0，见 [LICENSE](../LICENSE)
+- **hc-tui** — Apache-2.0，见 [LICENSE](LICENSE)
 
 ## vendored 的终端模拟器
 

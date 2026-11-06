@@ -37,6 +37,7 @@ pub struct TerminalView {
     responses: Arc<Mutex<Vec<u8>>>,
     /// kitty graphics 已解码的 RGBA 缓存：fingerprint → 像素。
     image_cache: HashMap<u64, Arc<Vec<u8>>>,
+    theme: Option<crate::theme::Theme>,
 }
 
 /// 一张要绘制到单元格上的 kitty 图像。
@@ -75,7 +76,37 @@ impl TerminalView {
             mouse_encoder: MouseEncoder::new()?,
             responses,
             image_cache: HashMap::new(),
+            theme: None,
         })
+    }
+
+    pub fn apply_theme(&mut self, theme: &crate::theme::Theme) -> Result<()> {
+        if self.theme.as_ref() == Some(theme) {
+            return Ok(());
+        }
+        let rgb = |color| -> ghostty_vt::RgbColor {
+            let Color::Rgb(r, g, b) = color else {
+                unreachable!("resolved theme color")
+            };
+            ghostty_vt::RgbColor { r, g, b }
+        };
+        // Named/indexed custom colors are resolved against the theme palette too.
+        let palette = theme.terminal_palette();
+        let resolve = |color: Color, fallback: Color| -> ghostty_vt::RgbColor {
+            rgb(resolve_color(color, &palette).unwrap_or(fallback))
+        };
+        self.terminal.set_default_colors(
+            resolve(theme.color("fg"), Color::Rgb(224, 224, 224)),
+            resolve(theme.color("bg"), Color::Rgb(18, 18, 18)),
+            resolve(theme.color("cursor_bg"), Color::Rgb(200, 200, 200)),
+        )?;
+        let mut full = ghostty_vt::default_palette();
+        for (i, color) in palette.into_iter().enumerate() {
+            full[i] = resolve(color, Color::Rgb(0, 0, 0));
+        }
+        self.terminal.set_default_palette(&full)?;
+        self.theme = Some(theme.clone());
+        Ok(())
     }
 
     /// 喂原始 VT 字节。首帧与流内重绘都走这里。
@@ -291,25 +322,48 @@ impl TerminalView {
             let mut x = 0u16;
             while x < area.width && cells.next() {
                 let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.reset();
                 let basic = cells.basic_data().unwrap_or_default();
                 match basic.wide {
                     // 宽字符占两列：主 cell 画字，尾 cell 留空。跳过会错位。
                     CellWide::SpacerTail | CellWide::SpacerHead => {
                         cell.set_symbol(" ");
-                        cell.set_style(Style::default());
+                        cell.set_style(
+                            Style::default()
+                                .fg(default_fg.unwrap_or(Color::Reset))
+                                .bg(default_bg.unwrap_or(Color::Reset)),
+                        );
                     }
                     _ => {
                         let symbol = cells.grapheme_text().unwrap_or_default();
-                        cell.set_symbol(if symbol.is_empty() { " " } else { &symbol });
-                        cell.set_style(style_of(&basic.style, default_fg, default_bg));
+                        cell.set_symbol(
+                            if symbol.is_empty()
+                                || (basic.wide == CellWide::Wide && x + 1 >= area.width)
+                            {
+                                " "
+                            } else {
+                                &symbol
+                            },
+                        );
+                        cell.set_style(style_of(
+                            &basic.style,
+                            default_fg,
+                            default_bg,
+                            colors.as_ref().map(|c| &c.palette),
+                        ));
                     }
                 }
                 x += 1;
             }
             while x < area.width {
                 let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.reset();
                 cell.set_symbol(" ");
-                cell.set_style(Style::default());
+                cell.set_style(
+                    Style::default()
+                        .fg(default_fg.unwrap_or(Color::Reset))
+                        .bg(default_bg.unwrap_or(Color::Reset)),
+                );
                 x += 1;
             }
             y += 1;
@@ -317,8 +371,13 @@ impl TerminalView {
         while y < area.height {
             for x in 0..area.width {
                 let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.reset();
                 cell.set_symbol(" ");
-                cell.set_style(Style::default());
+                cell.set_style(
+                    Style::default()
+                        .fg(default_fg.unwrap_or(Color::Reset))
+                        .bg(default_bg.unwrap_or(Color::Reset)),
+                );
             }
             y += 1;
         }
@@ -432,6 +491,55 @@ fn mouse_button(button: MouseButton) -> ffi::GhosttyMouseButton {
     }
 }
 
+pub(crate) fn theme_rgb(theme: &crate::theme::Theme, token: &str) -> Color {
+    let palette = theme.terminal_palette();
+    resolve_color(theme.color(token), &palette)
+        .filter(|c| matches!(c, Color::Rgb(..)))
+        .unwrap_or(match token {
+            "bg" => Color::Rgb(18, 18, 18),
+            "cursor_bg" => Color::Rgb(200, 200, 200),
+            _ => Color::Rgb(224, 224, 224),
+        })
+}
+
+fn resolve_color(color: Color, palette: &[Color; 16]) -> Option<Color> {
+    let index = match color {
+        Color::Rgb(..) => return Some(color),
+        Color::Reset => return None,
+        Color::Indexed(i) => {
+            return Some(if i < 16 {
+                match palette[i as usize] {
+                    c @ Color::Rgb(..) => c,
+                    _ => rgb(ghostty_vt::default_palette()[i as usize]),
+                }
+            } else {
+                rgb(ghostty_vt::default_palette()[i as usize])
+            });
+        }
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+    };
+    Some(match palette[index] {
+        color @ Color::Rgb(..) => color,
+        Color::Indexed(i) => rgb(ghostty_vt::default_palette()[i as usize]),
+        _ => rgb(ghostty_vt::default_palette()[index]),
+    })
+}
+
 fn rgb(color: ghostty_vt::RgbColor) -> Color {
     Color::Rgb(color.r, color.g, color.b)
 }
@@ -443,9 +551,18 @@ fn cell_color(color: CellColor) -> Color {
     }
 }
 
-fn style_of(cell: &CellStyle, default_fg: Option<Color>, default_bg: Option<Color>) -> Style {
-    let mut fg = cell.fg_color.map(cell_color).or(default_fg);
-    let mut bg = cell.bg_color.map(cell_color).or(default_bg);
+fn style_of(
+    cell: &CellStyle,
+    default_fg: Option<Color>,
+    default_bg: Option<Color>,
+    palette: Option<&[ghostty_vt::RgbColor; 256]>,
+) -> Style {
+    let resolve = |color| match (color, palette) {
+        (CellColor::Palette(index), Some(palette)) => rgb(palette[index as usize]),
+        _ => cell_color(color),
+    };
+    let mut fg = cell.fg_color.map(resolve).or(default_fg);
+    let mut bg = cell.bg_color.map(resolve).or(default_bg);
     if cell.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -524,13 +641,13 @@ mod tests {
         assert_eq!(text, "bold red");
 
         let style = buf[(0, 0)].style();
-        assert_eq!(style.fg, Some(Color::Indexed(1)));
+        assert_eq!(style.fg, Some(rgb(ghostty_vt::default_palette()[1])));
         assert!(style.add_modifier.contains(Modifier::BOLD));
 
         // 下划线绿
         let style = buf[(9, 0)].style();
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(style.fg, Some(Color::Indexed(2)));
+        assert_eq!(style.fg, Some(rgb(ghostty_vt::default_palette()[2])));
     }
 
     #[test]
@@ -553,12 +670,106 @@ mod tests {
     }
 
     #[test]
+    fn theme_updates_existing_text_and_resolves_ansi_without_changing_truecolor() {
+        let area = Rect::new(0, 0, 20, 2);
+        let mut view = TerminalView::new(20, 2, 1 << 20).unwrap();
+        view.write(b"plain \x1b[31mred \x1b[38;2;12;34;56mRGB");
+        let dark = crate::theme::builtin("catppuccin").unwrap();
+        view.apply_theme(&dark).unwrap();
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area).unwrap();
+        assert_eq!(buf[(0, 0)].fg, dark.color("fg"));
+        assert_eq!(buf[(0, 0)].bg, dark.color("bg"));
+        assert_eq!(buf[(6, 0)].fg, dark.terminal_palette()[1]);
+        assert_eq!(buf[(10, 0)].fg, Color::Rgb(12, 34, 56));
+        let light = crate::theme::builtin("catppuccin-latte").unwrap();
+        view.apply_theme(&light).unwrap();
+        view.render(&mut buf, area).unwrap();
+        assert_eq!(buf[(0, 0)].fg, light.color("fg"));
+        assert_eq!(buf[(0, 0)].bg, light.color("bg"));
+        assert_eq!(buf[(6, 0)].fg, light.terminal_palette()[1]);
+        assert_eq!(buf[(10, 0)].fg, Color::Rgb(12, 34, 56));
+    }
+
+    #[test]
+    fn ascii_edits_and_scrolling_survive_real_backend_redraws_without_duplicates() {
+        use ratatui::{backend::CrosstermBackend, TerminalOptions, Viewport};
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Output(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Output::default();
+        let outer = Rect::new(0, 0, 40, 10);
+        let area = Rect::new(3, 2, 30, 6);
+        let mut terminal = ratatui::Terminal::with_options(
+            CrosstermBackend::new(output.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(outer),
+            },
+        )
+        .unwrap();
+        let mut view = TerminalView::new(30, 6, 1 << 20).unwrap();
+        let mut host = TerminalView::new(40, 10, 1 << 20).unwrap();
+        let mut offset = 0;
+        for bytes in [
+            b"prompt> abcdef".as_slice(),
+            b"\x08\x08XY",
+            b"\r\x1b[2Kprompt> x",
+            b"\r\n0123456789012345678901234567890123456789\r\n",
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n",
+            b"\x1b[2;1H\x1b[2Kupdated",
+            b"\x1b[2J\x1b[Hclear",
+        ] {
+            view.write(bytes);
+            terminal
+                .draw(|frame| {
+                    view.render(frame.buffer_mut(), area).unwrap();
+                })
+                .unwrap();
+            let data = output.0.borrow();
+            host.write(&data[offset..]);
+            offset = data.len();
+            let mut expected = Buffer::empty(outer);
+            let mut actual = Buffer::empty(outer);
+            view.render(&mut expected, area).unwrap();
+            host.render(&mut actual, outer).unwrap();
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    assert_eq!(
+                        actual[(x, y)].symbol(),
+                        expected[(x, y)].symbol(),
+                        "at {x},{y} after {bytes:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_key_release_does_not_duplicate_printable_input() {
+        let mut view = TerminalView::new(20, 2, 1 << 20).unwrap();
+        let press = KeyEvent::new(crossterm::event::KeyCode::Char('a'), KeyModifiers::NONE);
+        let mut release = press;
+        release.kind = KeyEventKind::Release;
+        assert_eq!(view.encode_key(press), Some(b"a".to_vec()));
+        assert_eq!(view.encode_key(release), None);
+    }
+
+    #[test]
     fn inverse_swaps_foreground_and_background() {
         let cell = CellStyle {
             inverse: true,
             ..CellStyle::default()
         };
-        let style = style_of(&cell, Some(Color::White), Some(Color::Black));
+        let style = style_of(&cell, Some(Color::White), Some(Color::Black), None);
         assert_eq!(style.fg, Some(Color::Black));
         assert_eq!(style.bg, Some(Color::White));
     }
