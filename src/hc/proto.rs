@@ -226,7 +226,7 @@ pub struct Display {
 impl Display {
     pub fn from_theme(theme: &crate::theme::Theme) -> Self {
         let color = |token| match crate::term::view::theme_rgb(theme, token) {
-            ratatui::style::Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+            ratatui_core::style::Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
             _ => None,
         };
         Self {

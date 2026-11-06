@@ -104,7 +104,7 @@ fn main_stack(panes: &[PaneId]) -> SplitNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
+    use ratatui_core::layout::Rect;
 
     fn panes(count: u32) -> Vec<PaneId> {
         (1..=count).map(PaneId).collect()

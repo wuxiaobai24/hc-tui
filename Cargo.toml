@@ -26,10 +26,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-crossterm = "0.28"
+crossterm = "0.29"
 ghostty-vt = { path = "crates/ghostty-vt" }
 png = "0.17"
-ratatui = "0.29"
+ratatui = "0.30.2"
+ratatui-core = "0.1.2"
+ratatui-crossterm = "0.1.2"
+ratatui-widgets = "0.3.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

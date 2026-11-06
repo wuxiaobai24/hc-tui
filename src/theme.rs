@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use ratatui::style::Color;
+use ratatui_core::style::Color;
 
 /// 全部 token 及默认主题的取值。顺序即 `default-config` 的输出顺序。
 const DEFAULTS: &[(&str, Color)] = &[

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ratatui::layout::Rect;
+use ratatui_core::layout::Rect;
 
 use super::view::PlacementImage;
 use crate::app::App;

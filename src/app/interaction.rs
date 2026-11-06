@@ -586,7 +586,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui_core::{backend::TestBackend, terminal::Terminal};
 
     fn app() -> App {
         let (_, events) = std::sync::mpsc::channel();

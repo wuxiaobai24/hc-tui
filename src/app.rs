@@ -15,7 +15,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::Rect;
+use ratatui_core::layout::Rect;
 use serde_json::{json, Value};
 
 use crate::chat::commands::{Kind, Local};
@@ -1005,7 +1005,7 @@ impl App {
         for leaf in &leaves {
             // 折叠成标题行的成员只留顶线，不参与相邻边共享。
             let borders = if leaf.collapsed {
-                ratatui::widgets::Borders::TOP
+                ratatui_widgets::borders::Borders::TOP
             } else {
                 borders_for(
                     leaf.rect,
@@ -1037,8 +1037,8 @@ impl App {
             slots.push(Slot {
                 pane: entry.pane,
                 outer,
-                inner: inner_rect(outer, ratatui::widgets::Borders::ALL),
-                borders: ratatui::widgets::Borders::ALL,
+                inner: inner_rect(outer, ratatui_widgets::borders::Borders::ALL),
+                borders: ratatui_widgets::borders::Borders::ALL,
                 overlay: true,
                 collapsed: false,
             });
@@ -1060,8 +1060,8 @@ impl App {
             slots.push(Slot {
                 pane: popup.pane,
                 outer,
-                inner: inner_rect(outer, ratatui::widgets::Borders::ALL),
-                borders: ratatui::widgets::Borders::ALL,
+                inner: inner_rect(outer, ratatui_widgets::borders::Borders::ALL),
+                borders: ratatui_widgets::borders::Borders::ALL,
                 overlay: true,
                 collapsed: false,
             });
@@ -3753,7 +3753,7 @@ impl App {
             tree.layout(content)
         };
         for placement in candidates.iter().filter(|placement| !placement.collapsed) {
-            let inner = inner_rect(placement.rect, ratatui::widgets::Borders::ALL);
+            let inner = inner_rect(placement.rect, ratatui_widgets::borders::Borders::ALL);
             if inner.width < MIN_PANE_WIDTH || inner.height < MIN_PANE_HEIGHT {
                 self.next_pane -= 1;
                 return None;
@@ -6672,8 +6672,8 @@ fn borders_for(
     mode: PaneBorders,
     gaps: bool,
     outer_edges: bool,
-) -> ratatui::widgets::Borders {
-    use ratatui::widgets::Borders;
+) -> ratatui_widgets::borders::Borders {
+    use ratatui_widgets::borders::Borders;
     let mut borders = match mode {
         PaneBorders::Off => Borders::NONE,
         PaneBorders::Always => Borders::ALL,
@@ -6757,8 +6757,8 @@ fn clamp_extent(value: u16, min: u16, max: u16) -> u16 {
     value.clamp(min, max)
 }
 
-fn inner_rect(outer: Rect, borders: ratatui::widgets::Borders) -> Rect {
-    use ratatui::widgets::Borders;
+fn inner_rect(outer: Rect, borders: ratatui_widgets::borders::Borders) -> Rect {
+    use ratatui_widgets::borders::Borders;
     let left = u16::from(borders.contains(Borders::LEFT));
     let right = u16::from(borders.contains(Borders::RIGHT));
     let top = u16::from(borders.contains(Borders::TOP));
@@ -6963,7 +6963,7 @@ mod tests {
 
     #[test]
     fn sidebar_machine_folding_and_scrolling_keep_agents_reachable() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_core::{backend::TestBackend, terminal::Terminal};
         let mut app = offline_app();
         app.config.theme = crate::theme::builtin("catppuccin").unwrap();
         app.workspaces[0].label = "hc-tui".into();
@@ -7435,7 +7435,7 @@ mod tests {
 
     #[test]
     fn inner_rect_follows_the_drawn_borders() {
-        use ratatui::widgets::Borders;
+        use ratatui_widgets::borders::Borders;
         let outer = Rect::new(2, 3, 20, 10);
         assert_eq!(inner_rect(outer, Borders::ALL), Rect::new(3, 4, 18, 8));
         assert_eq!(inner_rect(outer, Borders::NONE), outer);
@@ -7447,7 +7447,7 @@ mod tests {
 
     #[test]
     fn adjacent_panes_keep_one_shared_border_without_gaps() {
-        use ratatui::widgets::Borders;
+        use ratatui_widgets::borders::Borders;
         let leaves = vec![
             (PaneId(1), Rect::new(0, 0, 10, 10)),
             (PaneId(2), Rect::new(10, 0, 10, 10)),
@@ -7464,7 +7464,7 @@ mod tests {
 
     #[test]
     fn a_lone_pane_has_no_border_in_auto_mode() {
-        use ratatui::widgets::Borders;
+        use ratatui_widgets::borders::Borders;
         let leaves = vec![(PaneId(1), Rect::new(0, 0, 10, 10))];
         assert_eq!(
             borders_for(leaves[0].1, &leaves, PaneBorders::Auto, true, true),
@@ -7478,7 +7478,7 @@ mod tests {
 
     #[test]
     fn titles_mode_keeps_one_top_line_per_pane() {
-        use ratatui::widgets::Borders;
+        use ratatui_widgets::borders::Borders;
         let leaves = vec![
             (PaneId(1), Rect::new(0, 0, 10, 10)),
             (PaneId(2), Rect::new(0, 10, 10, 10)),
@@ -7524,7 +7524,7 @@ mod tests {
 
     #[test]
     fn mobile_switcher_lists_panes_without_agent_status() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_core::{backend::TestBackend, terminal::Terminal};
         let mut app = offline_app();
         app.config.theme = crate::theme::builtin("catppuccin").unwrap();
         let agent_pane = app.focused();

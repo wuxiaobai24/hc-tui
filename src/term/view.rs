@@ -13,7 +13,7 @@ use ghostty_vt::{
     ffi, CellColor, CellStyle, CellWide, KeyEncoder, MouseEncoder, RenderState, RowCells,
     RowIterator, Terminal,
 };
-use ratatui::{
+use ratatui_core::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -770,7 +770,8 @@ mod tests {
 
     #[test]
     fn ascii_edits_and_scrolling_survive_real_backend_redraws_without_duplicates() {
-        use ratatui::{backend::CrosstermBackend, TerminalOptions, Viewport};
+        use ratatui_core::terminal::{TerminalOptions, Viewport};
+        use ratatui_crossterm::CrosstermBackend;
         use std::io::Write;
         #[derive(Clone, Default)]
         struct Output(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
@@ -787,7 +788,7 @@ mod tests {
         use base64::Engine;
         crossterm::style::force_color_output(true);
         let outer = Rect::new(0, 0, 110, 36);
-        let mut terminal = ratatui::Terminal::with_options(
+        let mut terminal = ratatui_core::terminal::Terminal::with_options(
             CrosstermBackend::new(output.clone()),
             TerminalOptions {
                 viewport: Viewport::Fixed(outer),

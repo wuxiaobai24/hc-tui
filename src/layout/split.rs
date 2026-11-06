@@ -4,7 +4,7 @@
 //! - [`Axis::Horizontal`]：左右分（竖分隔线）
 //! - [`Axis::Vertical`]：上下分（横分隔线）
 
-use ratatui::layout::Rect;
+use ratatui_core::layout::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PaneId(pub u32);

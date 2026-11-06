@@ -1911,7 +1911,7 @@ mod tests {
         assert_eq!(config.theme.name, "gruvbox");
         assert_eq!(
             config.theme.color("accent"),
-            ratatui::style::Color::Rgb(85, 170, 119)
+            ratatui_core::style::Color::Rgb(85, 170, 119)
         );
         assert_eq!(config.notifications, Delivery::Off);
         assert!(!config.restore);

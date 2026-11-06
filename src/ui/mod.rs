@@ -3,13 +3,18 @@
 //! 只画 Pane 的内容区；边框、Tab 栏、侧栏、状态栏都不交给终端内容。宽度与中文
 //! 宽字符的对齐由 `term::view` 保证。所有颜色都来自 [`crate::theme`] 的 token。
 
-use ratatui::{
+use ratatui_core::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    terminal::Frame,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame,
+};
+use ratatui_widgets::{
+    block::Block,
+    borders::Borders,
+    clear::Clear,
+    paragraph::{Paragraph, Wrap},
 };
 
 use crossterm::event::KeyCode;
@@ -2380,7 +2385,7 @@ mod tests {
 
     #[test]
     fn overlay_clear_removes_underlying_terminal_attributes() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_core::{backend::TestBackend, terminal::Terminal};
         let theme = crate::theme::builtin("catppuccin").unwrap();
         let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
         terminal

@@ -4,13 +4,13 @@
 //! 在底部，手机上多一条动作条。数据来自 [`crate::chat`]，输入由 `App` 回写到
 //! Pane 的 attach 流。
 
-use ratatui::{
+use ratatui_core::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
+    terminal::Frame,
     text::{Line, Span},
-    widgets::Paragraph,
-    Frame,
 };
+use ratatui_widgets::paragraph::Paragraph;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
@@ -66,7 +66,7 @@ fn paint(frame: &mut Frame, chat: &mut Chat, meta: &Meta, area: Rect, theme: &Th
     if area.width == 0 || area.height == 0 {
         return;
     }
-    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(ratatui_widgets::clear::Clear, area);
     frame.render_widget(
         Paragraph::new(blank_lines(area)).style(Style::default().bg(theme.color("bg"))),
         area,
@@ -441,7 +441,7 @@ fn body_lines(chat: &Chat, width: usize, theme: &Theme) -> Rendered {
 
 fn with_background(
     line: Line<'static>,
-    background: Option<ratatui::style::Color>,
+    background: Option<ratatui_core::style::Color>,
 ) -> Line<'static> {
     match background {
         Some(color) => line.style(Style::default().bg(color)),
@@ -457,7 +457,7 @@ fn push_wrapped(
     first: Span<'static>,
     theme: &Theme,
     token: &str,
-    highlight: Option<ratatui::style::Color>,
+    highlight: Option<ratatui_core::style::Color>,
 ) {
     let style = Style::default().fg(theme.color(token));
     let indent = Span::raw(" ".repeat(first.width()));
@@ -629,7 +629,8 @@ mod tests {
     use crate::chat::Chat;
     use crate::model::Badge;
     use crate::theme::builtin;
-    use ratatui::{backend::TestBackend, layout::Rect, text::Line, widgets::Paragraph, Terminal};
+    use ratatui_core::{backend::TestBackend, layout::Rect, terminal::Terminal, text::Line};
+    use ratatui_widgets::paragraph::Paragraph;
 
     fn session_lines() -> Vec<String> {
         [
@@ -669,7 +670,7 @@ mod tests {
     }
 
     /// 取屏幕文本；宽字符的填充格也占一格，去掉空白后比较内容。
-    fn screen(buffer: &ratatui::buffer::Buffer, width: usize, height: usize) -> String {
+    fn screen(buffer: &ratatui_core::buffer::Buffer, width: usize, height: usize) -> String {
         let mut out = String::new();
         for y in 0..height {
             for x in 0..width {

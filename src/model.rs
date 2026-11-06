@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use ratatui::layout::Rect;
+use ratatui_core::layout::Rect;
 use serde::{Deserialize, Serialize};
 
 use crate::layout::split::{Axis, PaneId, SplitNode};
@@ -534,7 +534,7 @@ pub struct Slot {
     /// 边框以内的内容区，attach 与 VT 用这个尺寸。
     pub inner: Rect,
     /// 实际要画的边框；相邻 Pane 共用的边会被去掉。
-    pub borders: ratatui::widgets::Borders,
+    pub borders: ratatui_widgets::borders::Borders,
     /// 浮层 Pane（popup），画在所有分屏之上。
     pub overlay: bool,
     /// 折叠成一行标题的 Stack 成员：不重排终端，也不重绘内容。

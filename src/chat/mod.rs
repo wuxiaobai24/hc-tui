@@ -65,9 +65,9 @@ pub struct Chat {
     /// 命令面板；输入以 `/` 开头时打开。
     pub palette: Option<Palette>,
     /// 上一次渲染算出的工具块行区域，鼠标点击用。
-    pub hits: Vec<(usize, ratatui::layout::Rect)>,
+    pub hits: Vec<(usize, ratatui_core::layout::Rect)>,
     /// 上一次渲染算出的动作条按钮，鼠标点击用。
-    pub actions: Vec<(ChatAction, ratatui::layout::Rect)>,
+    pub actions: Vec<(ChatAction, ratatui_core::layout::Rect)>,
     /// 上一次渲染算出的消息区高度，按键滚动用。
     pub view_height: usize,
     /// 上一次渲染算出的视口起点（折行后的行号）与每个块的 `(块下标, 起行, 止行)`。
