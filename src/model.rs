@@ -173,6 +173,8 @@ pub struct Pane {
     pub cwd: Option<String>,
     /// agent 自报的会话文件路径（`labels.session`），Chat 视图首选它。
     pub agent_session: Option<String>,
+    pub origin: Option<String>,
+    pub module: Option<serde_json::Value>,
     pub agent: Agent,
     /// 命令退出后自动移除视图（`type = "pane"` 与 popup）。
     pub transient: bool,
@@ -192,6 +194,8 @@ impl Pane {
             foreground: None,
             cwd: None,
             agent_session: None,
+            origin: None,
+            module: None,
             agent: Agent::default(),
             transient: false,
             launch: None,
@@ -269,6 +273,8 @@ impl Pane {
 }
 
 pub struct Tab {
+    pub origin: Option<String>,
+    pub settled: bool,
     pub id: u32,
     pub label: String,
     pub tree: SplitNode,
@@ -353,6 +359,8 @@ fn percent(value: u16, total: u16) -> u16 {
 impl Tab {
     pub fn new(id: u32, pane: u32) -> Self {
         Self {
+            origin: None,
+            settled: false,
             id,
             label: String::new(),
             tree: SplitNode::leaf(pane),
@@ -471,6 +479,9 @@ impl Tab {
 }
 
 pub struct Workspace {
+    pub origin: Option<String>,
+    pub machine: Option<String>,
+    pub folder: Option<String>,
     pub id: u32,
     pub label: String,
     pub tabs: Vec<Tab>,
@@ -480,6 +491,9 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(id: u32, label: String, pane: u32, tab: u32) -> Self {
         Self {
+            origin: None,
+            machine: None,
+            folder: None,
             id,
             label,
             tabs: vec![Tab::new(tab, pane)],
@@ -540,7 +554,7 @@ pub struct SavedState {
 }
 
 impl SavedState {
-    pub const SCHEMA: u32 = 2;
+    pub const SCHEMA: u32 = 3;
 
     pub fn empty() -> Self {
         Self {
@@ -569,6 +583,12 @@ impl SavedState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedWorkspace {
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
     pub id: u32,
     #[serde(default)]
     pub label: String,
@@ -580,6 +600,10 @@ pub struct SavedWorkspace {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedTab {
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub settled: bool,
     pub id: u32,
     #[serde(default)]
     pub label: String,
@@ -594,6 +618,10 @@ pub struct SavedTab {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedPane {
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub module: Option<serde_json::Value>,
     #[serde(default)]
     pub terminal: Option<String>,
     #[serde(default)]
@@ -725,10 +753,15 @@ mod tests {
             schema_version: SavedState::SCHEMA,
             active_workspace: 0,
             workspaces: vec![SavedWorkspace {
+                origin: None,
+                machine: None,
+                folder: None,
                 id: 1,
                 label: "main".to_string(),
                 active_tab: 0,
                 tabs: vec![SavedTab {
+                    origin: None,
+                    settled: false,
                     id: 1,
                     label: String::new(),
                     focus: 2,

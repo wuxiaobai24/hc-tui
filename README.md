@@ -3,11 +3,10 @@
 基于 [herdr-core](https://github.com/herdrdev/herdr-core)（`hc`）的 Rust 原生终端工作台。
 Core 拥有终端与进程，本仓库拥有 Workspace / Tab / Pane / 渲染。
 
-当前状态：**P2 + 交互基线**。真实 core 上可交互运行 sh / less / nvim / htop / fzf；
-Workspace → Tab → BSP Pane，每个 Pane 一条独立 attach 流，detach 后进程存活。
-布局写入 core 的 `doc`（CAS）并在重启后恢复，Agent 有完成/未读模型与注意力队列，
-Copy Mode 支持选区、搜索与系统剪贴板。与 Herdr 的逐项差距见
-[docs/gap-vs-herdr.md](docs/gap-vs-herdr.md)。
+Workspace → Tab → Pane 的 TUI 工作台，与 herdr-app 共享各机器的结构文档和稳定 ID。
+支持 Agent 父子树、共享置顶/已读、命令面板、多机布局、脚本面板和原生 Kitty 图片。
+关闭 Pane/Tab/space 会结束对应程序；退出客户端只 detach，程序继续运行。
+当前行为契约和验证边界见 [herdr-app 对齐契约](docs/herdr-app-alignment.md)。
 
 ## 快速开始
 
@@ -16,7 +15,7 @@ Copy Mode 支持选区、搜索与系统剪贴板。与 Herdr 的逐项差距见
 mise install                 # 或自行安装 zig 0.16
 cargo build
 cargo run -- probe           # 连上 core，打印握手结果
-cargo run                    # 打开 TUI，起一个新的 shell 并 attach
+cargo run                    # 打开 TUI，恢复共享工作区；没有布局时新建 shell
 cargo run -- --attach t3     # attach 一个已存在的终端
 cargo run -- --config ./hc-tui.toml   # 指定配置文件
 cargo run -- --no-restore    # 忽略 doc 里保存的布局
@@ -33,7 +32,7 @@ HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach -- --nocapture   # 真实 cor
 |---|---|
 | `hc::codec` | framed 编解码（9 B header、DATA/CREDIT/CLOSE/RESIZE/FOCUS/FACTS），有单测 |
 | `hc::client` | `hc connect` 子进程、明文 hello、generation 与方法校验、帧读写 |
-| `hc::net` | 后台线程：单 reader 按帧序分发、RPC 关联、每个 Pane 一条 attach 流、两条流都回 credit、FACTS、断线退避重连与换新 shell 恢复 |
+| `hc::net` | 后台线程：单 reader 按帧序分发、RPC 关联、每个 Pane 一条 attach 流、两条流都回 credit、FACTS、断线退避重连；普通终端的 keep 恢复由 core 负责 |
 | `hc::proto` | 终端记录、事件、attach/subscribe 结果、CLOSE reason 的宽松解析 |
 | `term::view` | 本地 VT → Ratatui Buffer 的桥：样式、宽字符、真彩、反显、光标；key/mouse 编码、bracketed paste、透传查询的否定应答 |
 | `term::input` | crossterm 键盘 → ghostty 键码与修饰键映射 |
@@ -106,7 +105,7 @@ kill_pane = "prefix+shift+d"
 # 自定义命令：key 支持 prefix+... 或 ctrl+alt+...
 [[keys.command]]
 key = "prefix+alt+g"
-type = "popup"          # shell | pane | popup
+type = "popup"          # shell | pane | popup | action
 command = "lazygit"
 width = "80%"
 height = "80%"
@@ -365,3 +364,42 @@ macOS（aarch64 / x86_64）默认不构建。需要时在 Actions 页手动触�
 - Rust stable（骨架验证于 1.99.1）
 
 许可：Apache-2.0。第三方组件见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+### Agent 导航、命令和图片
+
+Agents 在打开前读取名称、状态和目录，按机器和稳定 space ID 分组。
+点击分组折叠，点击 agents 标题切换分组/优先级；父 agent 可折叠子项。
+点击已有 agent 回到原位置；外部会话独立开 Tab。
+
+`prefix :` 搜索工作台命令；`hc-tui commands` 列出支持的动作。
+运行中的界面可通过同一 session 的 `hc-tui ls` 与 `hc-tui do` 控制：
+
+```sh
+hc-tui do agent.next '{}'
+hc-tui do terminal.park '{"terminal":"t3"}'
+hc-tui do mod.open '{"name":"files"}'
+```
+
+可将这些动作绑定到快捷键，也可注册脚本面板：
+
+```toml
+[[keys.command]]
+key = "prefix+alt+a"
+type = "action"
+command = 'agent.prev {}'
+
+[[panels]]
+name = "status"
+command = "git status --short"
+refresh = 5
+```
+
+面板使用工作区所在机器和目录。`mod.open {"name":"status"}` 打开面板；
+`HC_TUI_PANEL_PROPS` 提供 JSON props。`layout.clone`/`mod.clone` 保存个人克隆。
+
+Kitty、Ghostty、Herdr、WezTerm 自动使用原生像素输出；其他宿主使用半块字符预览。
+`HC_TUI_GRAPHICS=kitty hc-tui` 强制原生输出，`HC_TUI_GRAPHICS=blocks hc-tui`
+使用字符预览；tmux 内默认字符预览。图片粘贴仍是 `prefix shift+v`。
+
+图形、共享布局、生命周期与 GUI 专属能力的区别见
+[对齐契约](docs/herdr-app-alignment.md)。`just parity` 可重跑双 core 的隔离契约验收。

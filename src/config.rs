@@ -125,6 +125,7 @@ pub enum CommandKind {
     Pane,
     /// 会话级浮层终端，不改 Tab 布局。
     Popup,
+    Action,
 }
 
 impl CommandKind {
@@ -133,6 +134,7 @@ impl CommandKind {
             "shell" => Some(Self::Shell),
             "pane" => Some(Self::Pane),
             "popup" => Some(Self::Popup),
+            "action" => Some(Self::Action),
             _ => None,
         }
     }
@@ -200,6 +202,14 @@ impl Binding {
         match self {
             Self::Prefix(code, modifiers) => key_matches(*code, *modifiers, key),
             _ => false,
+        }
+    }
+
+    pub fn matches_mode(&self, key: &KeyEvent, prefix: bool) -> bool {
+        if prefix {
+            self.matches_prefix(key)
+        } else {
+            self.matches_direct(key)
         }
     }
 
@@ -351,6 +361,13 @@ fn parse_key(name: &str) -> Result<KeyCode, String> {
         }
     };
     named.ok_or_else(|| format!("不认识的按键：{name}"))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PanelDefinition {
+    pub name: String,
+    pub command: String,
+    pub refresh: u64,
 }
 
 /// 全部可配置的动作。默认值与原硬编码键位一致。
@@ -681,6 +698,7 @@ pub struct Config {
     pub window_title: String,
     /// `[[keys.command]]` 解析结果，按文件顺序执行第一个命中的绑定。
     pub commands: Vec<CustomCommand>,
+    pub panels: Vec<PanelDefinition>,
     pub config_path: PathBuf,
     pub state_path: PathBuf,
     /// 加载期发现的问题，启动后显示一次。
@@ -743,6 +761,7 @@ impl Default for Config {
             tab_bar_right_separator: " ".to_string(),
             window_title: "{hostname}: {workspace}".to_string(),
             commands: Vec::new(),
+            panels: Vec::new(),
             config_path: xdg_dir("XDG_CONFIG_HOME", ".config").join("hc-tui/config.toml"),
             state_path: xdg_dir("XDG_STATE_HOME", ".local/state").join("hc-tui/state.json"),
             warnings: Vec::new(),
@@ -758,7 +777,10 @@ impl Config {
         config.config_path = path.clone();
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return config,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                config.load_panel_files();
+                return config;
+            }
             Err(error) => {
                 config
                     .warnings
@@ -774,7 +796,40 @@ impl Config {
             }
         };
         config.apply(&document);
+        config.load_panel_files();
         config
+    }
+
+    fn load_panel_files(&mut self) {
+        let path = self
+            .config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("panels");
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<PanelDefinition>(&s).ok())
+            {
+                Some(mut panel) if !self.panels.iter().any(|p| p.name == panel.name) => {
+                    panel.refresh = panel.refresh.clamp(1, 3600);
+                    self.panels.push(panel)
+                }
+                Some(_) => {}
+                None => self
+                    .warnings
+                    .push(format!("Invalid panel {}", path.display())),
+            }
+        }
     }
 
     fn apply(&mut self, document: &Document) {
@@ -1004,6 +1059,25 @@ impl Config {
     /// 解析 `[[keys.command]]` 数组表。坏条目只警告，不影响其它条目。
     fn parse_commands(&mut self, document: &Document, warnings: &mut Vec<String>) {
         for (index, (name, table)) in document.arrays.iter().enumerate() {
+            if name == "panels" {
+                if let (Some(name), Some(command)) = (
+                    table.get("name").and_then(Value::text),
+                    table.get("command").and_then(Value::text),
+                ) {
+                    self.panels.push(PanelDefinition {
+                        name: name.to_string(),
+                        command: command.to_string(),
+                        refresh: table
+                            .get("refresh")
+                            .and_then(|value| value.number(warnings, "panels.refresh"))
+                            .unwrap_or(5)
+                            .clamp(1, 3600) as u64,
+                    });
+                } else {
+                    warnings.push("[[panels]] requires name and command".to_string());
+                }
+                continue;
+            }
             if name != "keys.command" {
                 warnings.push(format!("未知的数组表 [[{name}]]，已忽略"));
                 continue;
@@ -1035,7 +1109,7 @@ impl Config {
                     Some(kind) => kind,
                     None => {
                         warnings.push(format!(
-                            "第 {position} 条自定义命令：type 只支持 shell / pane / popup"
+                            "第 {position} 条自定义命令：type 只支持 shell / pane / popup / action"
                         ));
                         continue;
                     }
@@ -1182,7 +1256,14 @@ pub fn default_config_text() -> String {
     out.push_str("sidebar_collapsed_mode = \"compact\" # compact | hidden\n");
     out.push_str("host_cursor = \"native\"      # native | drawn\n");
     out.push_str("status_indicators = \"dots\"   # dots | symbols\n");
-    out.push_str("agent_panel_sort = \"priority\" # spaces | priority\n");
+    out.push_str(&format!(
+        "agent_panel_sort = \"{}\" # spaces | priority\n",
+        if config.agent_sort == AgentSort::Spaces {
+            "spaces"
+        } else {
+            "priority"
+        }
+    ));
     out.push_str(&format!(
         "prompt_new_tab_name = {}\n",
         config.prompt_new_tab
@@ -1234,7 +1315,7 @@ pub fn default_config_text() -> String {
         out.push_str(&format!("{name} = {binding}\n"));
     }
     out.push_str(
-        "\n# 自定义命令：key 支持 prefix+... 或 ctrl+alt+...；type 为 shell / pane / popup\n\
+        "\n# 自定义命令：key 支持 prefix+... 或 ctrl+alt+...；type 为 shell / pane / popup / action\n\
          # [[keys.command]]\n\
          # key = \"prefix+alt+g\"\n\
          # type = \"popup\"\n\

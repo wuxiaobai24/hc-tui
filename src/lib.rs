@@ -19,3 +19,7 @@ pub mod term;
 pub mod theme;
 pub mod tui;
 pub mod ui;
+
+pub mod shared;
+
+pub mod control;

@@ -50,6 +50,8 @@ pub struct PlacementImage {
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<Vec<u8>>,
+    pub source: [u32; 4],
+    pub offset: [u32; 2],
 }
 
 impl TerminalView {
@@ -93,12 +95,16 @@ impl TerminalView {
             .kitty_graphics_may_have_placements()
             .unwrap_or(false)
         {
+            self.image_cache.clear();
             return Vec::new();
         }
         let Ok(placements) = self.terminal.kitty_image_placements() else {
             return Vec::new();
         };
         let mut out = Vec::new();
+        let live: std::collections::HashSet<_> =
+            placements.iter().map(|p| p.data_fingerprint).collect();
+        self.image_cache.retain(|key, _| live.contains(key));
         for placement in placements {
             let rgba = match self.image_cache.get(&placement.data_fingerprint) {
                 Some(cached) => Arc::clone(cached),
@@ -121,6 +127,13 @@ impl TerminalView {
                 width: placement.image_width.max(1),
                 height: placement.image_height.max(1),
                 rgba,
+                source: [
+                    placement.render.source_x,
+                    placement.render.source_y,
+                    placement.render.source_width,
+                    placement.render.source_height,
+                ],
+                offset: [placement.x_offset, placement.y_offset],
             });
         }
         out.sort_by_key(|image| image.z);
@@ -485,6 +498,22 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 70, 12));
         view.render(&mut buf, Rect::new(0, 0, 70, 12)).unwrap();
         buf
+    }
+
+    #[test]
+    fn virtual_kitty_placeholders_expose_the_correct_source_crop() {
+        use base64::Engine;
+        let mut view = TerminalView::new(20, 5, 1 << 20).unwrap();
+        let pixels = [255, 0, 0, 255].repeat(8);
+        let payload = base64::engine::general_purpose::STANDARD.encode(pixels);
+        view.write(
+            format!("\x1b_Ga=T,f=32,s=4,v=2,U=1,i=7,c=4,r=1,q=2;{payload}\x1b\\").as_bytes(),
+        );
+        view.write("\x1b[H\x1b[38;2;0;0;7m\u{10eeee}\u{0305}\u{0305}\x1b[0m".as_bytes());
+        let images = view.placement_images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].source, [0, 0, 1, 2]);
+        assert_eq!(images[0].width, 4);
     }
 
     #[test]

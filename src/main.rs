@@ -12,6 +12,39 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("probe") => probe(&args[1..]),
+        Some("commands") => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hc_tui::app::command_catalog())?
+            );
+            Ok(())
+        }
+        Some("ls") => {
+            let config = parse_options(&args[1..])?;
+            println!(
+                "{}",
+                hc_tui::control::call(&config, serde_json::json!({"method":"snapshot"}))?
+            );
+            Ok(())
+        }
+        Some("do") => {
+            let command = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("do requires a command"))?;
+            let (value, start) = match args.get(2).filter(|s| s.starts_with('{')) {
+                Some(value) => (serde_json::from_str::<serde_json::Value>(value)?, 3),
+                None => (serde_json::json!({}), 2),
+            };
+            let config = parse_options(&args[start..])?;
+            println!(
+                "{}",
+                hc_tui::control::call(
+                    &config,
+                    serde_json::json!({"method":"do","command":command,"args":value})
+                )?
+            );
+            Ok(())
+        }
         Some("--help" | "-h") => {
             usage();
             Ok(())
@@ -39,6 +72,8 @@ fn usage() {
     println!("usage: hc-tui [options]");
     println!("       hc-tui probe [options]");
     println!("       hc-tui --default-config");
+    println!("       hc-tui commands | ls [options]");
+    println!("       hc-tui do <command> [JSON arguments] [options]");
     println!();
     println!("  --session <name>   hc session to connect to (default: HC_SESSION)");
     println!("  --attach <t>       attach an existing terminal instead of starting a shell");

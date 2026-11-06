@@ -1,5 +1,15 @@
 # 变更记录
 
+## 未发布
+
+- 与 herdr-app 共享稳定 space/tab/pane 身份和多机器布局，CAS 合并并发修改；同步时复用 VT 与 attach 流。
+- 补齐父子 Agent 树、共享置顶/已读、Done 焦点保持、双向 Agent 导航和 settle 恢复。
+- 区分 close、park、keep、kill 与客户端 detach；普通终端由 core keep 恢复，禁止静默换成无关 shell。
+- 新增命令面板、`commands`/`ls`/`do` 本地控制、直接快捷键、action 绑定、脚本面板与布局/模块克隆。
+- RPC 不再阻塞键盘；修复前缀松键、搜索 j/k、输入/粘贴不回底部和模态鼠标穿透。
+- 原生 Kitty 图形支持源裁剪、Unicode placement、浮动层遮挡和资源清理，通用宿主使用半块预览。
+- 新增双 core 机器传输和 GUI 文档双向同步的隔离契约验收：`just parity`。
+
 ## 0.3.0 — 2026-11-05
 
 ### Chat 视图

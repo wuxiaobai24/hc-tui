@@ -10,8 +10,18 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSummary {
     pub address: String,
+    pub parent: Option<String>,
+    pub space_id: Option<String>,
+    pub tab_id: Option<String>,
     pub name: Option<String>,
     pub title: String,
+    pub cwd: Option<String>,
+    pub program: Option<String>,
+    pub space: Option<String>,
+    pub session: Option<String>,
+    pub turn: u64,
+    pub seen_turn: u64,
+    pub pinned: bool,
     pub cols: u16,
     pub rows: u16,
     pub live: bool,
@@ -33,9 +43,62 @@ impl TerminalSummary {
         };
         let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0) as u16;
         Some(Self {
-            address,
-            name: string("name"),
+            address: address.clone(),
+            parent: string("parent").map(|parent| {
+                if !parent.contains('/') {
+                    if let Some((machine, _)) = address.split_once('/') {
+                        return format!("{machine}/{parent}");
+                    }
+                }
+                parent
+            }),
+            space_id: value
+                .pointer("/labels/herdr.space")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            tab_id: value
+                .pointer("/labels/herdr.tab")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            name: value
+                .pointer("/labels/hctui")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| string("name")),
+            cwd: value
+                .pointer("/foreground/cwd")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| string("cwd")),
+            program: value
+                .pointer("/status/app")
+                .and_then(Value::as_str)
+                .or_else(|| value.pointer("/foreground/name").and_then(Value::as_str))
+                .map(str::to_string)
+                .or_else(|| string("agent")),
+            space: value
+                .pointer("/labels/where")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("where").and_then(Value::as_str))
+                .and_then(|s| s.rsplit_once(" / ").map(|(space, _)| space).or(Some(s)))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            session: value
+                .pointer("/labels/session")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             title: string("title").unwrap_or_default(),
+            turn: value.get("turn").and_then(Value::as_u64).unwrap_or(0),
+            seen_turn: value
+                .pointer("/labels/herdr.seen")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            pinned: value
+                .pointer("/labels/herdr.pinned")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty() && s != "false" && s != "0"),
             cols: number("cols"),
             rows: number("rows"),
             live: value.get("state").and_then(Value::as_str) != Some("finished"),
@@ -55,8 +118,28 @@ impl TerminalSummary {
         self.name
             .as_deref()
             .filter(|name| !name.is_empty())
-            .or_else(|| (!self.title.is_empty()).then_some(self.title.as_str()))
+            .or_else(|| {
+                (!self.title.is_empty() && self.title != self.address)
+                    .then_some(self.title.as_str())
+            })
+            .or(self.program.as_deref())
+            .or(self.cwd.as_deref())
             .unwrap_or(&self.address)
+    }
+    pub fn machine(&self) -> &str {
+        self.address
+            .split_once('/')
+            .map(|(machine, _)| machine)
+            .unwrap_or("local")
+    }
+
+    pub fn group(&self) -> String {
+        let space = self
+            .space
+            .as_deref()
+            .or(self.cwd.as_deref())
+            .unwrap_or("Other terminals");
+        format!("{} / {space}", self.machine())
     }
 }
 
@@ -214,6 +297,26 @@ pub fn close_is_program_exit(payload: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_names_and_groups_do_not_require_attach() {
+        let terminal = TerminalSummary::parse(&serde_json::json!({
+            "address": "vps/t3", "title": "Fix login race", "cwd": "/old",
+            "foreground": {"name": "codex", "cwd": "/project"},
+            "labels": {"where": "backend / 1", "session": "/session"},
+            "status": {"app": "Codex", "state": "working"}
+        }))
+        .unwrap();
+        assert_eq!(terminal.label(), "Fix login race");
+        assert_eq!(terminal.group(), "vps / backend");
+        assert_eq!(terminal.cwd.as_deref(), Some("/project"));
+        assert_eq!(terminal.program.as_deref(), Some("Codex"));
+        let named = TerminalSummary::parse(&serde_json::json!({
+            "address": "t3", "title": "shell", "labels": {"hctui": "Review"}
+        }))
+        .unwrap();
+        assert_eq!(named.label(), "Review");
+    }
 
     #[test]
     fn parses_a_real_subscribe_result() {

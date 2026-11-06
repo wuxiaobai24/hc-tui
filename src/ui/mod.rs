@@ -13,8 +13,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, Chooser, Connection, GotoOverlay, HelpOverlay, MobileAction, MobileTarget, Prompt, Reader,
-    SettingsOverlay, Toast,
+    App, Chooser, Connection, GotoOverlay, HelpOverlay, MobileAction, MobileTarget, NavigationRow,
+    Prompt, Reader, SettingsOverlay, Toast,
 };
 use crate::config::{CollapsedSidebar, HostCursor, TabBarPosition};
 use crate::model::{Badge, PaneState, Slot};
@@ -30,6 +30,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         && app.config.mobile_width_threshold > 0
         && area.width <= app.config.mobile_width_threshold;
     app.mobile = mobile;
+    app.agent_group_hits.clear();
+    app.agent_sort_hit = Rect::default();
+    app.machine_hits.clear();
     if mobile {
         draw_mobile(frame, app, area, &theme);
         return;
@@ -136,31 +139,35 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.chat.is_some() {
         chat::render(frame, app, body, &theme);
     }
+    render_modals(frame, app, area, &theme);
+    if let (Some(status), Some(line)) = (status, mode_line) {
+        render_mode_line(frame, app, status, &line, &theme);
+    }
+}
+
+fn render_modals(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if let Some(reader) = &app.reader {
-        render_reader(frame, reader, app.content, &theme);
+        render_reader(frame, reader, app.content, theme);
     }
     if let Some(chooser) = &app.chooser {
-        render_chooser(frame, chooser, app.content, &theme);
+        render_chooser(frame, chooser, app.content, theme);
     }
     if let Some(help) = &app.help {
         let rows = app.help_view();
-        clear_area(frame, app.content, &theme);
-        render_help(frame, help, &rows, app.content, &theme);
+        clear_area(frame, app.content, theme);
+        render_help(frame, help, &rows, app.content, theme);
     }
     if let Some(settings) = &app.settings {
-        clear_area(frame, app.content, &theme);
-        render_settings(frame, settings, app, app.content, &theme);
+        clear_area(frame, app.content, theme);
+        render_settings(frame, settings, app, app.content, theme);
     }
     if let Some(goto) = &app.goto {
         let rows = app.goto_rows();
-        clear_area(frame, area, &theme);
-        render_goto(frame, goto, &rows, area, &theme);
+        clear_area(frame, area, theme);
+        render_goto(frame, goto, &rows, area, theme, app.palette);
     }
     if let Some(prompt) = &app.prompt {
-        render_prompt(frame, prompt, app.content, &theme);
-    }
-    if let (Some(status), Some(line)) = (status, mode_line) {
-        render_mode_line(frame, app, status, &line, &theme);
+        render_prompt(frame, prompt, app.content, theme);
     }
 }
 
@@ -178,10 +185,12 @@ fn draw_mobile(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     app.reflow(content);
     if app.switcher {
         render_mobile_switcher(frame, app, content, theme);
+        render_modals(frame, app, area, theme);
         return;
     }
     if app.chat.is_some() {
         chat::render(frame, app, content, theme);
+        render_modals(frame, app, area, theme);
         return;
     }
     let slots = app.slots.clone();
@@ -189,12 +198,7 @@ fn draw_mobile(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         render_pane(frame, app, *slot, theme);
     }
     render_overlays(frame, app, theme);
-    if let Some(reader) = &app.reader {
-        render_reader(frame, reader, app.content, theme);
-    }
-    if let Some(chooser) = &app.chooser {
-        render_chooser(frame, chooser, app.content, theme);
-    }
+    render_modals(frame, app, area, theme);
 }
 
 /// 手机顶栏：左边一行状态，右边一个按钮；按钮在面板打开时是 `close`。
@@ -320,6 +324,9 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
     rows.push(section("tabs"));
     if let Some(workspace) = app.workspace() {
         for (index, tab) in workspace.tabs.iter().enumerate() {
+            if tab.settled {
+                continue;
+            }
             let style = if index == workspace.active {
                 Style::default()
                     .bg(theme.color("selection_bg"))
@@ -351,50 +358,37 @@ fn mobile_rows(app: &App, theme: &Theme, width: usize) -> Vec<MobileRow> {
 
     rows.push(section("agents"));
     let symbols = app.config.indicators == crate::config::Indicators::Symbols;
-    let mut agents = app.agent_rows();
-    // 没有状态上报的 Pane 也列在这里，任何一个 Pane 都能点过去。
-    let reporting: Vec<u32> = agents.iter().map(|(pane, _, _)| *pane).collect();
-    let mut idle: Vec<(u32, Badge, String)> = app
-        .panes
-        .iter()
-        .filter(|(pane, _)| !reporting.contains(pane))
-        .map(|(pane, state)| (*pane, Badge::None, state.label()))
-        .collect();
-    idle.sort_by_key(|(pane, _, _)| *pane);
-    agents.extend(idle);
-    if agents.is_empty() {
-        rows.push(MobileRow {
-            text: "  (none)".to_string(),
-            style: Style::default().fg(theme.color("dim")),
-            target: None,
+    let mut previous = String::new();
+    for NavigationRow {
+        group,
+        group_id,
+        pane,
+        terminal,
+        badge,
+        label,
+    } in app.navigation_rows()
+    {
+        if previous != group_id {
+            rows.push(section(&group));
+            previous = group_id.clone();
+        }
+        let target = pane.map(MobileTarget::Agent).or_else(|| {
+            terminal
+                .and_then(|address| app.terminals.iter().position(|t| t.address == address))
+                .map(MobileTarget::Terminal)
         });
-    }
-    for (pane, badge, label) in agents {
-        let position = app
-            .locate_public(pane)
-            .map(|(workspace, tab)| {
-                format!(
-                    " w{}:t{}",
-                    app.workspaces[workspace].id, app.workspaces[workspace].tabs[tab].id
-                )
-            })
-            .unwrap_or_default();
-        let text = format!(
-            "  {} {}{position}",
-            badge.glyph(symbols),
-            truncate(&label, width.saturating_sub(4 + position.chars().count()))
-        );
-        let style = if pane == app.focused() {
-            Style::default()
-                .bg(theme.color("selection_bg"))
-                .fg(theme.color("selection_fg"))
-        } else {
-            Style::default().fg(theme.color(badge.token()))
-        };
         rows.push(MobileRow {
-            text,
-            style,
-            target: Some(MobileTarget::Agent(pane)),
+            text: format!(
+                "  {} {}",
+                badge.glyph(symbols),
+                truncate(&label, width.saturating_sub(4))
+            ),
+            style: Style::default().fg(theme.color(if badge == Badge::None {
+                "fg"
+            } else {
+                badge.token()
+            })),
+            target,
         });
     }
 
@@ -476,6 +470,7 @@ fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
                 .tabs
                 .iter()
                 .enumerate()
+                .filter(|(_, tab)| !tab.settled)
                 .map(|(index, tab)| {
                     let attention = tab
                         .panes()
@@ -494,14 +489,23 @@ fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .map(|workspace| workspace.active)
         .unwrap_or(0);
 
-    for (index, _label, badge) in tabs {
+    for (index, label, badge) in tabs {
         let selected = index == active_tab;
         let zoom = if selected && app.zoom { "Z" } else { " " };
         let flag = match badge {
             Badge::Blocked | Badge::Error | Badge::Done => badge.glyph(false),
             _ => " ",
         };
-        let text = format!(" {} {} {} ", index + 1, zoom, flag);
+        let label = if app
+            .workspace()
+            .and_then(|w| w.tabs.get(index))
+            .is_some_and(|t| !t.label.is_empty())
+        {
+            truncate(&label, 20)
+        } else {
+            (index + 1).to_string()
+        };
+        let text = format!(" {label} {zoom} {flag} ");
         let width = text.chars().count() as u16;
         let style = if selected {
             Style::default()
@@ -613,10 +617,34 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     row = row.saturating_add(1);
 
     // 每个 space 两行：名字与分支。
-    let spaces: Vec<String> = (0..app.workspaces.len())
-        .map(|index| app.workspace_label(index))
+    let mut spaces: Vec<_> = (0..app.workspaces.len())
+        .map(|index| {
+            (
+                app.workspace_machine(index),
+                index,
+                app.workspace_label(index),
+            )
+        })
         .collect();
-    for (index, label) in spaces.into_iter().enumerate() {
+    spaces.sort_by(|a, b| (a.0 != "local", &a.0, a.1).cmp(&(b.0 != "local", &b.0, b.1)));
+    let grouped = spaces.iter().any(|(machine, _, _)| machine != "local");
+    let mut previous_machine = String::new();
+    for (machine, index, label) in spaces {
+        if grouped && previous_machine != machine {
+            if row >= inner.y + inner.height {
+                break;
+            }
+            lines.push(title(format!(
+                " {}",
+                if machine == "local" {
+                    "This computer"
+                } else {
+                    &machine
+                }
+            )));
+            row = row.saturating_add(1);
+            previous_machine = machine.clone();
+        }
         if row + 2 > inner.y + inner.height {
             break;
         }
@@ -644,8 +672,10 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         lines.push(Line::from(Span::styled(text, style)));
         row = row.saturating_add(1);
 
-        if let Some(cwd) = app.workspace_cwd(index) {
-            app.refresh_branch(&cwd);
+        if machine == "local" {
+            if let Some(cwd) = app.workspace_cwd(index) {
+                app.refresh_branch(&cwd);
+            }
         }
         let branch = app
             .workspace_cwd(index)
@@ -669,6 +699,32 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     if row < inner.y + inner.height {
         lines.push(Line::from(""));
         row = row.saturating_add(1);
+    }
+
+    let empty_machines: Vec<_> = app
+        .machines
+        .iter()
+        .filter(|m| !(0..app.workspaces.len()).any(|wi| app.workspace_machine(wi) == m.name))
+        .cloned()
+        .collect();
+    for machine in empty_machines {
+        if row + 2 > inner.bottom() {
+            break;
+        }
+        lines.push(title(format!(" {} · {}", machine.name, machine.state)));
+        row += 1;
+        let text = if machine.state == "connected" {
+            " + New space there"
+        } else {
+            " ↻ Reconnect"
+        };
+        lines.push(Line::from(Span::styled(
+            text,
+            Style::default().fg(theme.color("accent")),
+        )));
+        app.machine_hits
+            .push((machine.name, Rect::new(inner.x, row, inner.width, 1)));
+        row += 1;
     }
 
     // `new` 与 `menu`：与 herdr 的侧栏底行同位置同含义。
@@ -721,54 +777,50 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             crate::config::AgentSort::Spaces => "grouped",
             crate::config::AgentSort::Priority => "priority",
         };
+        app.agent_sort_hit = Rect::new(inner.x, row, inner.width, 1);
         lines.push(nav_title(" agents", sort, width, theme));
         row = row.saturating_add(1);
     }
 
-    // agents 段：先是有状态上报的 Pane，再是其它客户端创建的终端。
-    let mut rows: Vec<(u32, Badge, String)> = app.agent_rows();
-    let reporting: Vec<u32> = rows.iter().map(|(pane, _, _)| *pane).collect();
-    let mut idle_panes: Vec<(u32, Badge, String)> = app
-        .panes
-        .iter()
-        .filter(|(pane, _)| !reporting.contains(pane))
-        .map(|(pane, state)| (*pane, Badge::None, state.label()))
-        .collect();
-    idle_panes.sort_by_key(|(pane, _, _)| *pane);
-    rows.extend(idle_panes);
-    let unowned: Vec<(String, String)> = app
-        .terminals_without_pane()
-        .into_iter()
-        .map(|terminal| {
-            let label = if terminal.title.is_empty() {
-                terminal.address.clone()
-            } else {
-                format!("{} · {}", terminal.address, terminal.title)
-            };
-            (
-                terminal.address.clone(),
-                truncate(&label, width.saturating_sub(4)),
-            )
-        })
-        .collect();
-    let total = rows.len() + unowned.len();
-    let available = (inner.y + inner.height).saturating_sub(row) as usize;
-    let max_scroll = total.saturating_sub(available);
-    if app.sidebar_scroll > max_scroll {
-        app.sidebar_scroll = max_scroll;
-    }
-    let start = app.sidebar_scroll.min(total);
-    for (pane, badge, label) in rows.iter().skip(start) {
-        if row >= inner.y + inner.height {
-            break;
+    app.agent_group_hits.clear();
+    let mut entries = Vec::new();
+    let mut previous = String::new();
+    for NavigationRow {
+        group,
+        group_id,
+        pane,
+        terminal,
+        badge,
+        label,
+    } in app.navigation_rows()
+    {
+        if group_id != previous {
+            entries.push((
+                None,
+                None,
+                Badge::None,
+                group.clone(),
+                true,
+                group_id.clone(),
+            ));
+            previous = group_id.clone();
         }
-        let focused = *pane == app.focused();
-        let text = format!(
-            " {} {}",
-            badge.glyph(app.config.indicators == crate::config::Indicators::Symbols),
-            truncate(label, width.saturating_sub(4))
-        );
-        let style = if focused {
+        if !app.folded_agent_groups.contains(&group_id) {
+            entries.push((pane, terminal, badge, label, false, group_id));
+        }
+    }
+    let total = entries.len();
+    let available = (inner.y + inner.height).saturating_sub(row) as usize;
+    app.sidebar_scroll = app.sidebar_scroll.min(total.saturating_sub(available));
+    for (pane, terminal, badge, label, header, group_id) in
+        entries.iter().skip(app.sidebar_scroll).take(available)
+    {
+        let focused = pane.is_some_and(|pane| pane == app.focused());
+        let style = if *header {
+            Style::default()
+                .fg(theme.color("sidebar_title"))
+                .add_modifier(Modifier::BOLD)
+        } else if focused {
             Style::default()
                 .bg(theme.color("selection_bg"))
                 .fg(theme.color("selection_fg"))
@@ -777,22 +829,41 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         } else {
             Style::default().fg(theme.color(badge.token()))
         };
-        app.agent_hits
-            .push((*pane, Rect::new(inner.x, row, inner.width, 1)));
-        lines.push(Line::from(Span::styled(text, style)));
-        row = row.saturating_add(1);
-    }
-    let skip_panes = start.saturating_sub(rows.len());
-    for (address, label) in unowned.iter().skip(skip_panes) {
-        if row >= inner.y + inner.height {
-            break;
+        let text = if *header {
+            format!(
+                " {} {}",
+                if app.folded_agent_groups.contains(group_id) {
+                    "▸"
+                } else {
+                    "▾"
+                },
+                truncate(label, width.saturating_sub(4))
+            )
+        } else {
+            format!(
+                " {} {}",
+                badge.glyph(app.config.indicators == crate::config::Indicators::Symbols),
+                truncate(label, width.saturating_sub(4))
+            )
+        };
+        let hit = Rect::new(inner.x, row, inner.width, 1);
+        if !*header && label.contains("▾ ") || !*header && label.contains("▸ ") {
+            if let Some(address) = terminal {
+                app.agent_group_hits.push((
+                    format!("agent:{address}"),
+                    Rect::new(inner.x, row, 4.min(inner.width), 1),
+                ));
+            }
         }
-        app.terminal_hits
-            .push((address.clone(), Rect::new(inner.x, row, inner.width, 1)));
-        lines.push(Line::from(Span::styled(
-            format!(" · {label}"),
-            Style::default().fg(theme.color("dim")),
-        )));
+        if *header {
+            app.agent_group_hits.push((group_id.clone(), hit));
+        }
+        if let Some(pane) = pane {
+            app.agent_hits.push((*pane, hit));
+        } else if let Some(terminal) = terminal {
+            app.terminal_hits.push((terminal.clone(), hit));
+        }
+        lines.push(Line::from(Span::styled(text, style)));
         row = row.saturating_add(1);
     }
     if total == 0 && row < inner.y + inner.height {
@@ -937,6 +1008,10 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
     let Some(pane) = app.panes.get_mut(&slot.pane) else {
         return;
     };
+    if pane.module.is_some() {
+        let _ = pane.view.render(frame.buffer_mut(), slot.inner);
+        return;
+    }
     if !matches!(pane.state, PaneState::Live { .. } | PaneState::Ended { .. }) {
         let text = vec![
             Line::from(Span::styled(note, Style::default().fg(theme.color("fg")))),
@@ -969,8 +1044,10 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
     if let Some((start, end)) = drag {
         paint_selection(buffer, slot.inner, start, end, theme.color("selection_bg"));
     }
-    for image in &images {
-        paint_placement(buffer, slot.inner, image);
+    if !crate::term::graphics::native_enabled() {
+        for image in &images {
+            paint_placement(buffer, slot.inner, image);
+        }
     }
     if let Some(matches) = copy_matches {
         for (x, y) in matches {
@@ -1434,6 +1511,7 @@ fn render_goto(
     rows: &[crate::app::GotoRow],
     screen: Rect,
     theme: &Theme,
+    palette: bool,
 ) {
     let area = Rect::new(
         screen.x + 2,
@@ -1452,14 +1530,31 @@ fn render_goto(
     frame.render_widget(block, area);
     let width = inner.width as usize;
     let terminals = rows.iter().filter(|row| !row.section).count();
-    let title_right = format!("{terminals} terminals");
+    let title_right = format!(
+        "{terminals} {}",
+        if palette { "commands" } else { "terminals" }
+    );
     let mut lines = vec![
-        nav_title("─ Go to ", &format!("{title_right} "), width, theme),
+        nav_title(
+            if palette {
+                "─ Commands "
+            } else {
+                "─ Go to "
+            },
+            &format!("{title_right} "),
+            width,
+            theme,
+        ),
         Line::from(vec![
             Span::styled(" / ", Style::default().fg(theme.color("accent"))),
             Span::styled(
                 if goto.query.is_empty() {
-                    "search agents and terminals".to_string()
+                    if palette {
+                        "search commands"
+                    } else {
+                        "search agents and terminals"
+                    }
+                    .to_string()
                 } else {
                     goto.query.clone()
                 },
@@ -1526,7 +1621,7 @@ fn render_goto(
         }
     }
     lines.push(Line::from(Span::styled(
-        " / search · ↑↓/j/k rows · enter open · esc close",
+        " / search · ↑↓ rows · enter open · esc close",
         Style::default().fg(theme.color("dim")),
     )));
     frame.render_widget(
@@ -1723,39 +1818,69 @@ fn paint_selection(
     }
 }
 
-/// kitty 图像按单元格采样：每个 cell 取图像对应区域中心的颜色作为背景。
+/// 通用宿主使用上下半块，每格保留两个像素采样，并遵守源裁剪与透明度。
 fn paint_placement(buffer: &mut Buffer, area: Rect, image: &PlacementImage) {
-    if image.width == 0 || image.height == 0 || image.cols == 0 || image.rows == 0 {
+    if image.cols == 0 || image.rows == 0 || image.width == 0 || image.height == 0 {
         return;
     }
-    let start_x = image.col.max(0) as u16;
-    let start_y = image.row.max(0) as u16;
-    let columns = image.cols.min(u32::from(u16::MAX)) as u16;
-    let rows = image.rows.min(u32::from(u16::MAX)) as u16;
-    for cell_y in 0..rows {
-        for cell_x in 0..columns {
-            let x = start_x.saturating_add(cell_x);
-            let y = start_y.saturating_add(cell_y);
-            if x >= area.width || y >= area.height {
-                continue;
+    let [sx, sy, sw, sh] = image.source;
+    let sw = if sw == 0 {
+        image.width.saturating_sub(sx)
+    } else {
+        sw.min(image.width.saturating_sub(sx))
+    };
+    let sh = if sh == 0 {
+        image.height.saturating_sub(sy)
+    } else {
+        sh.min(image.height.saturating_sub(sy))
+    };
+    if sw == 0 || sh == 0 {
+        return;
+    }
+    let left = i64::from(image.col).max(0);
+    let top = i64::from(image.row).max(0);
+    let right = (i64::from(image.col) + i64::from(image.cols)).min(i64::from(area.width));
+    let bottom = (i64::from(image.row) + i64::from(image.rows)).min(i64::from(area.height));
+    for y in top..bottom {
+        for x in left..right {
+            let cell = &mut buffer[(area.x + x as u16, area.y + y as u16)];
+            let background = cell.bg;
+            let blend = |pixel: &[u8]| {
+                if pixel[3] == 0 {
+                    return background;
+                }
+                let base = match background {
+                    Color::Rgb(r, g, b) => [r, g, b],
+                    _ => [0, 0, 0],
+                };
+                let alpha = u16::from(pixel[3]);
+                let mut color = [0; 3];
+                for i in 0..3 {
+                    color[i] = ((u16::from(pixel[i]) * alpha + u16::from(base[i]) * (255 - alpha))
+                        / 255) as u8;
+                }
+                Color::Rgb(color[0], color[1], color[2])
+            };
+            let px = sx
+                + (((x - i64::from(image.col)) as u64 * 2 + 1) * u64::from(sw)
+                    / (u64::from(image.cols) * 2))
+                    .min(u64::from(sw - 1)) as u32;
+            let sample = |half: u64| {
+                let py = sy
+                    + (((y - i64::from(image.row)) as u64 * 4 + half) * u64::from(sh)
+                        / (u64::from(image.rows) * 4))
+                        .min(u64::from(sh - 1)) as u32;
+                let offset = (u64::from(py) * u64::from(image.width) + u64::from(px)) as usize * 4;
+                image.rgba.get(offset..offset + 4)
+            };
+            if let (Some(upper), Some(lower)) = (sample(1), sample(3)) {
+                if upper[3] == 0 && lower[3] == 0 {
+                    continue;
+                }
+                cell.set_symbol("▀")
+                    .set_fg(blend(upper))
+                    .set_bg(blend(lower));
             }
-            let pixel_x = u64::from(image.width) * u64::from(cell_x) / u64::from(columns.max(1));
-            let pixel_y = u64::from(image.height) * u64::from(cell_y) / u64::from(rows.max(1));
-            let pixel_x = (pixel_x as u32).min(image.width - 1);
-            let pixel_y = (pixel_y as u32).min(image.height - 1);
-            let offset =
-                ((u64::from(pixel_y) * u64::from(image.width) + u64::from(pixel_x)) * 4) as usize;
-            if offset + 3 >= image.rgba.len() {
-                continue;
-            }
-            let color = Color::Rgb(
-                image.rgba[offset],
-                image.rgba[offset + 1],
-                image.rgba[offset + 2],
-            );
-            let cell = &mut buffer[(area.x + x, area.y + y)];
-            cell.set_symbol(" ");
-            cell.set_bg(color);
         }
     }
 }

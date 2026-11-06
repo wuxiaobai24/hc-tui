@@ -44,6 +44,7 @@ pub const CELL_PX: [u32; 2] = [8, 16];
 pub enum Command {
     /// 让这个 Pane 拥有一个 attach 流：必要时先 `terminal.run` 起一个 shell。
     Spawn {
+        keep: bool,
         pane: u32,
         target: Option<String>,
         /// 首次 attach 时要起的程序；空表示 core 的 shell。
@@ -197,6 +198,7 @@ impl Drop for NetHandle {
 
 /// 每个 Pane 的 attach 意图，跨重连保留。
 struct PaneIntent {
+    keep: bool,
     target: Option<String>,
     argv: Vec<String>,
     cwd: Option<String>,
@@ -209,6 +211,7 @@ struct PaneIntent {
 impl PaneIntent {
     fn new(target: Option<String>, cols: u16, rows: u16) -> Self {
         Self {
+            keep: true,
             target,
             argv: Vec::new(),
             cwd: None,
@@ -257,6 +260,8 @@ struct Session<'a> {
     /// 持有子进程，drop 时结束连接。
     _child: Child,
     next_id: u64,
+    pending: BTreeMap<u64, (String, String, Instant)>,
+    last_frame: Instant,
     events_channel: Option<u32>,
     event_lines: Vec<u8>,
     streams: Vec<Stream>,
@@ -327,6 +332,7 @@ fn apply_offline_command(
 ) {
     match command {
         Command::Spawn {
+            keep,
             pane,
             target,
             argv,
@@ -350,6 +356,7 @@ fn apply_offline_command(
             if on.is_some() {
                 intent.on = on;
             }
+            intent.keep = keep;
             intent.size(cols, rows);
             intent.wanted = true;
         }
@@ -431,6 +438,8 @@ async fn serve(
         frames: frames_rx,
         _child: child,
         next_id: 0,
+        pending: BTreeMap::new(),
+        last_frame: Instant::now(),
         events_channel: None,
         event_lines: Vec::new(),
         streams: Vec::new(),
@@ -456,7 +465,7 @@ impl Session<'_> {
             terminals: subscribe.terminals,
         });
 
-        // 重连之后按意图把每个 Pane 接回来；终端已经不在时会换新 shell。
+        // 重连后恢复每个 Pane 的 attach；缺失的终端报告错误，由 core 负责 keep 恢复。
         let panes: Vec<u32> = self
             .intents
             .iter()
@@ -496,14 +505,25 @@ impl Session<'_> {
                         }
                     }
                 },
-                _ = tokio::time::sleep(LIVENESS_TIMEOUT) => {
-                    return self.lost("no frames for a long time".to_string());
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if self.last_frame.elapsed() >= LIVENESS_TIMEOUT {return self.lost("no frames for a long time".to_string());}
+                    let expired:Vec<_>=self.pending.iter().filter(|(_,(_,_,deadline))|*deadline<=Instant::now()).map(|(id,_)|*id).collect();
+                    for id in expired {if let Some((tag,method,_))=self.pending.remove(&id){let _=self.events.send(NetEvent::Reply{tag,result:Err(RpcFailure{kind:"timeout".into(),message:format!("{method} timed out")})});}}
                 }
             }
         }
     }
 
     fn lost(&self, reason: String) -> Outcome {
+        for (tag, _, _) in self.pending.values() {
+            let _ = self.events.send(NetEvent::Reply {
+                tag: tag.clone(),
+                result: Err(RpcFailure {
+                    kind: "offline".into(),
+                    message: reason.clone(),
+                }),
+            });
+        }
         Outcome::Lost {
             reason,
             was_connected: true,
@@ -514,6 +534,7 @@ impl Session<'_> {
         match command {
             Command::Shutdown => {}
             Command::Spawn {
+                keep,
                 pane,
                 target,
                 argv,
@@ -538,6 +559,7 @@ impl Session<'_> {
                 if on.is_some() {
                     intent.on = on;
                 }
+                intent.keep = keep;
                 intent.size(cols, rows);
                 intent.wanted = true;
                 if self.stream_by_pane(pane).is_none() {
@@ -608,14 +630,44 @@ impl Session<'_> {
                 method,
                 params,
             } => {
-                let reply = match self.rpc(&method, params).await {
-                    Ok(value) => Ok(value),
-                    Err(error) => Err(RpcFailure {
-                        kind: error.kind,
-                        message: error.message,
-                    }),
+                if self.pending.len() >= 128 {
+                    let _ = self.events.send(NetEvent::Reply {
+                        tag,
+                        result: Err(RpcFailure {
+                            kind: "busy".into(),
+                            message: "too many pending calls".into(),
+                        }),
+                    });
+                    return Ok(());
+                }
+                self.next_id += 1;
+                let id = self.next_id;
+                let seconds = if method == "terminal.wait" || method == "machine.exec" {
+                    params
+                        .get("timeout")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(60.0)
+                        .clamp(0.0, 600.0)
+                        + 5.0
+                } else {
+                    RPC_TIMEOUT.as_secs_f64()
                 };
-                let _ = self.events.send(NetEvent::Reply { tag, result: reply });
+                let frame = codec::encode(
+                    0,
+                    DATA,
+                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                        .to_string()
+                        .as_bytes(),
+                )?;
+                self.pending.insert(
+                    id,
+                    (
+                        tag,
+                        method,
+                        Instant::now() + Duration::from_secs_f64(seconds),
+                    ),
+                );
+                self.write(&frame).await?;
             }
         }
         Ok(())
@@ -623,9 +675,32 @@ impl Session<'_> {
 
     /// 处理一帧。返回 `Some(reply)` 表示这是一条 RPC 回复，交给 `rpc` 匹配 `id`。
     async fn on_frame(&mut self, frame: Frame) -> Result<Option<Value>> {
+        self.last_frame = Instant::now();
         match frame.kind {
             DATA => match frame.channel {
-                0 => Ok(serde_json::from_slice::<Value>(&frame.payload).ok()),
+                0 => {
+                    let reply = serde_json::from_slice::<Value>(&frame.payload).ok();
+                    if let Some(value) = &reply {
+                        if let Some((tag, method, _)) = value
+                            .get("id")
+                            .and_then(Value::as_u64)
+                            .and_then(|id| self.pending.remove(&id))
+                        {
+                            let result = if let Some(error) = value.get("error") {
+                                let error = RpcError::from_error(&method, error);
+                                Err(RpcFailure {
+                                    kind: error.kind,
+                                    message: error.message,
+                                })
+                            } else {
+                                Ok(value.get("result").cloned().unwrap_or(Value::Null))
+                            };
+                            let _ = self.events.send(NetEvent::Reply { tag, result });
+                            return Ok(None);
+                        }
+                    }
+                    Ok(reply)
+                }
                 channel if Some(channel) == self.events_channel => {
                     self.on_events(&frame.payload).await?;
                     Ok(None)
@@ -794,26 +869,13 @@ impl Session<'_> {
         };
         let (cols, rows) = (intent.cols, intent.rows);
         let launch = AttachLaunch {
+            keep: intent.keep,
             target: intent.target.clone(),
             argv: intent.argv.clone(),
             cwd: intent.cwd.clone(),
             on: intent.on.clone(),
         };
-        match self.attach_once(pane, launch.clone(), cols, rows).await {
-            Ok(()) => Ok(()),
-            // 终端在重连期间结束了：换一个新 shell 再来一次。
-            Err(error) if error.retryable() => {
-                if let Some(intent) = self.intents.get_mut(&pane) {
-                    intent.target = None;
-                }
-                let retry = AttachLaunch {
-                    target: None,
-                    ..launch
-                };
-                self.attach_once(pane, retry, cols, rows).await
-            }
-            Err(error) => Err(error),
-        }
+        self.attach_once(pane, launch, cols, rows).await
     }
 
     async fn attach_once(
@@ -826,7 +888,7 @@ impl Session<'_> {
         let target = match launch.target {
             Some(target) => target,
             None => {
-                let mut params = json!({});
+                let mut params = json!({"keep":launch.keep});
                 if !launch.argv.is_empty() {
                     params["argv"] = json!(launch.argv);
                 }
@@ -960,13 +1022,14 @@ impl Session<'_> {
 /// 一次 attach 需要的启动参数。
 #[derive(Debug, Clone)]
 struct AttachLaunch {
+    keep: bool,
     target: Option<String>,
     argv: Vec<String>,
     cwd: Option<String>,
     on: Option<String>,
 }
 
-/// RPC 失败，带上 core 给的 `kind` 以便判断要不要换终端重试。
+/// RPC 失败，保留 core 的稳定 `kind`，供界面重试或报告。
 #[derive(Debug)]
 pub struct RpcError {
     pub kind: String,
@@ -991,11 +1054,6 @@ impl RpcError {
             .and_then(Value::as_str)
             .unwrap_or("error");
         Self::new(kind, format!("{method}: {}", client::describe_error(error)))
-    }
-
-    /// 终端已经不在时换一个新 shell 是合理恢复。
-    fn retryable(&self) -> bool {
-        matches!(self.kind.as_str(), "not_found" | "finished" | "unavailable")
     }
 }
 

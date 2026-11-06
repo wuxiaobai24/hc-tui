@@ -184,6 +184,7 @@ fn two_panes_have_independent_streams() -> Result<()> {
     let mut harness = Harness::new();
 
     harness.net.send(Command::Spawn {
+        keep: true,
         pane: 1,
         target: None,
         argv: Vec::new(),
@@ -193,6 +194,7 @@ fn two_panes_have_independent_streams() -> Result<()> {
         rows: 20,
     });
     harness.net.send(Command::Spawn {
+        keep: true,
         pane: 2,
         target: None,
         argv: Vec::new(),
@@ -227,6 +229,25 @@ fn two_panes_have_independent_streams() -> Result<()> {
     assert!(
         !harness.screen(2).contains("PANE-ONE"),
         "pane 2 must not receive pane 1's output"
+    );
+
+    // A slow RPC must not stop keyboard input, credit or Ctrl+C on attach streams.
+    harness.net.send(Command::Call {
+        tag: "slow-rpc".to_string(),
+        method: "machine.exec".to_string(),
+        params: serde_json::json!({"argv":["sh","-c","sleep 3"],"timeout":5}),
+    });
+    harness.net.send(Command::Input {
+        pane: 1,
+        bytes: b"printf 'RPC-INPUT-LIVE\\n'\r".to_vec(),
+    });
+    let responsive = Instant::now();
+    harness.wait_until("input while slow RPC is pending", |h| {
+        h.screen(1).contains("RPC-INPUT-LIVE")
+    })?;
+    assert!(
+        responsive.elapsed() < Duration::from_secs(2),
+        "slow RPC blocked the keyboard"
     );
 
     // 关掉一个视图：只断它自己的流，另一个继续工作。

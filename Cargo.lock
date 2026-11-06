@@ -221,6 +221,7 @@ name = "hc-tui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64",
  "crossterm",
  "ghostty-vt",
  "png",

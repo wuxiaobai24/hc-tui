@@ -28,6 +28,10 @@ probe:
 smoke: build-smoke
     HC_TUI_BIN=target/debug/hc-tui scripts/ui-smoke.sh
 
+# 与 GUI 共享文档 + 双 core 机器传输 + 控制命令的契约验收。
+parity: build-smoke
+    python3 scripts/herdr-parity-smoke.py
+
 build-smoke:
     cargo build -p hc-tui
 

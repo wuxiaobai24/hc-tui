@@ -34,6 +34,30 @@ use crate::term::view::TerminalView;
 use crate::tui;
 use crate::ui;
 
+mod actions;
+mod agent_tree;
+mod layouts;
+mod panels;
+mod shared_sync;
+
+/// 分组、已有视图、终端地址、状态和显示名。
+#[derive(Clone, Debug)]
+pub struct NavigationRow {
+    pub group: String,
+    pub group_id: String,
+    pub pane: Option<u32>,
+    pub terminal: Option<String>,
+    pub badge: Badge,
+    pub label: String,
+}
+
+pub fn command_catalog() -> serde_json::Value {
+    json!(actions::COMMANDS
+        .iter()
+        .map(|(name, about)| json!({"name":name,"about":about}))
+        .collect::<Vec<_>>())
+}
+
 /// 一个 Pane 能正常使用的最小内容区。
 const MIN_PANE_WIDTH: u16 = 20;
 const MIN_PANE_HEIGHT: u16 = 5;
@@ -90,12 +114,14 @@ pub enum PromptKind {
     CloseTab(usize),
     CloseWorkspace(usize),
     KillPane(u32),
+    Command,
 }
 
 impl PromptKind {
     /// 浮层顶部的标题，跟 herdr 的面板标题一致。
     pub fn title(&self) -> &'static str {
         match self {
+            Self::Command => "command",
             Self::NewTab => "new tab",
             Self::NewWorkspace => "new workspace",
             Self::RenameTab { .. } => "rename tab",
@@ -204,6 +230,7 @@ pub struct GotoRow {
 pub enum ChooserKind {
     Templates,
     Machines,
+    Commands,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +270,8 @@ struct LocalState {
     schema_version: u32,
     #[serde(default)]
     seen: BTreeMap<String, u64>,
+    #[serde(default)]
+    folded_agent_groups: std::collections::HashSet<String>,
 }
 
 /// 普通模式下鼠标拖选。
@@ -274,6 +303,7 @@ pub enum MobileTarget {
     Workspace(usize),
     Tab(usize),
     Agent(u32),
+    Terminal(usize),
     Action(MobileAction),
 }
 
@@ -313,6 +343,9 @@ pub struct App {
     pub tab_hits: Vec<(usize, Rect)>,
     /// 侧栏里 Agent 行的点击区域。
     pub agent_hits: Vec<(u32, Rect)>,
+    pub agent_group_hits: Vec<(String, Rect)>,
+    pub folded_agent_groups: std::collections::HashSet<String>,
+    pub agent_sort_hit: Rect,
     /// 侧栏里工作区行的点击区域。
     pub workspace_hits: Vec<(usize, Rect)>,
     /// 侧栏里其它客户端终端的点击区域。
@@ -336,8 +369,15 @@ pub struct App {
     pub help: Option<HelpOverlay>,
     pub settings: Option<SettingsOverlay>,
     pub goto: Option<GotoOverlay>,
+    pub palette: bool,
+    shown_original: HashMap<u32, Option<String>>,
+    held_done: Option<(String, u64)>,
+    initial_tasks: HashMap<u32, String>,
+    program_right_click: std::collections::HashSet<String>,
     pub chooser: Option<Chooser>,
     pub machines: Vec<MachineInfo>,
+    machine_refresh: Option<Instant>,
+    pub machine_hits: Vec<(String, Rect)>,
     /// `tab_bar_right` 里 `cmd:` 条目的最近一次输出。
     pub command_output: HashMap<String, String>,
     /// 侧栏滚动偏移（行）。
@@ -358,6 +398,10 @@ pub struct App {
     /// core doc 的版本；`0` 表示从未写过。
     pub doc_version: u64,
     pub doc_loaded: bool,
+    shared_docs: HashMap<String, shared_sync::Replica>,
+    shared_dirty: bool,
+    panel_refresh: HashMap<u32, Instant>,
+    shared_labels: HashMap<String, (String, String, String)>,
     pub last_pane: Option<u32>,
     /// 最近一次后台完成或需要人工介入的 Pane（`prefix+o` 跳过去）。
     pub last_attention: Option<u32>,
@@ -388,18 +432,27 @@ pub struct App {
     command_since: HashMap<String, Instant>,
     net: Option<NetHandle>,
     events: Receiver<NetEvent>,
+    control: Option<Receiver<crate::control::Request>>,
 }
 
 impl App {
     pub fn new(config: Config) -> Result<Self> {
         let (sender, events) = std::sync::mpsc::channel();
-        let (command_tx, command_rx) = std::sync::mpsc::channel();
         let net = NetHandle::spawn(
             NetConfig {
                 session: config.session.clone(),
             },
             sender,
         );
+        Self::with_network(config, Some(net), events)
+    }
+
+    fn with_network(
+        config: Config,
+        net: Option<NetHandle>,
+        events: Receiver<NetEvent>,
+    ) -> Result<Self> {
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
         let note = if config.warnings.is_empty() {
             "starting hc connect".to_string()
         } else {
@@ -425,6 +478,9 @@ impl App {
             sidebar_menu: Rect::new(0, 0, 0, 0),
             tab_hits: Vec::new(),
             agent_hits: Vec::new(),
+            agent_group_hits: Vec::new(),
+            folded_agent_groups: std::collections::HashSet::new(),
+            agent_sort_hit: Rect::default(),
             workspace_hits: Vec::new(),
             terminal_hits: Vec::new(),
             zoom: false,
@@ -443,8 +499,15 @@ impl App {
             help: None,
             settings: None,
             goto: None,
+            palette: false,
+            shown_original: HashMap::new(),
+            held_done: None,
+            initial_tasks: HashMap::new(),
+            program_right_click: std::collections::HashSet::new(),
             chooser: None,
             machines: Vec::new(),
+            machine_refresh: None,
+            machine_hits: Vec::new(),
             command_output: HashMap::new(),
             sidebar_scroll: 0,
             sidebar_area: Rect::new(0, 0, 0, 0),
@@ -458,6 +521,10 @@ impl App {
             events_seen: 0,
             doc_version: 0,
             doc_loaded: false,
+            shared_docs: HashMap::new(),
+            shared_dirty: false,
+            panel_refresh: HashMap::new(),
+            shared_labels: HashMap::new(),
             last_pane: None,
             last_attention: None,
             branches: HashMap::new(),
@@ -482,8 +549,9 @@ impl App {
             command_rx,
             command_tx,
             command_since: HashMap::new(),
-            net: Some(net),
+            net,
             events,
+            control: None,
             config,
         };
         app.load_local_state();
@@ -592,11 +660,7 @@ impl App {
             let pane = self.alloc_pane();
             let tab = self.alloc_tab();
             let workspace = self.alloc_workspace();
-            let label = std::env::current_dir()
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-                .map(|path| dir_label(Some(path), String::new()))
-                .unwrap_or_default();
+            let label = String::new();
             self.workspaces
                 .push(Workspace::new(workspace, label, pane, tab));
             self.active_ws = 0;
@@ -611,6 +675,31 @@ impl App {
     }
 
     pub fn pump(&mut self) {
+        let requests: Vec<_> = self
+            .control
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for request in requests {
+            let response = match request.body["method"].as_str() {
+                Some("snapshot") => {
+                    json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent})).collect::<Vec<_>>()})
+                }
+                Some("do") if self.restore_pending => json!({"error":"layout is still loading"}),
+                Some("do") => {
+                    let command = request.body["command"].as_str().unwrap_or("");
+                    let args = request.body.get("args").cloned().unwrap_or(json!({}));
+                    match self.execute_action(command, args) {
+                        Ok(()) => {
+                            json!({"accepted":true,"confirmation_pending":self.prompt.is_some()})
+                        }
+                        Err(error) => json!({"error":error.to_string()}),
+                    }
+                }
+                _ => json!({"error":"unknown request method"}),
+            };
+            let _ = request.reply.send(response);
+        }
         let mut credits: Vec<(u32, usize)> = Vec::new();
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -691,6 +780,18 @@ impl App {
             }
         }
         self.refresh_tab_commands(now);
+        self.refresh_panels(now);
+        self.refresh_shared_labels();
+        if self.config.restore
+            && matches!(self.connection, Connection::Ready { .. })
+            && self
+                .machine_refresh
+                .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(5))
+            && !self.inflight.contains_key("machines.sync")
+        {
+            self.machine_refresh = Some(now);
+            self.call_rpc("machines.sync", "machine.list", json!({}));
+        }
         if self.seen_dirty
             && self
                 .seen_since
@@ -705,6 +806,10 @@ impl App {
                 .is_some_and(|since| now.duration_since(since) >= LAYOUT_DEBOUNCE)
         {
             self.push_layout();
+            self.flush_shared();
+        }
+        if self.shared_dirty && !self.layout_dirty {
+            self.flush_shared();
         }
     }
 
@@ -947,6 +1052,9 @@ impl App {
             let Some(pane) = self.panes.get_mut(&slot.pane) else {
                 continue;
             };
+            if pane.module.is_some() {
+                continue;
+            }
             let size = (slot.inner.width, slot.inner.height);
             if pane.needs_spawn() {
                 pane.mark_spawned(size);
@@ -955,13 +1063,22 @@ impl App {
                     .as_ref()
                     .map(|launch| (launch.argv.clone(), launch.cwd.clone(), launch.on.clone()))
                     .unwrap_or_default();
-                spawns.push((slot.pane, pane.terminal.clone(), argv, cwd, on, size));
+                spawns.push((
+                    slot.pane,
+                    pane.terminal.clone(),
+                    argv,
+                    cwd,
+                    on,
+                    size,
+                    !pane.transient,
+                ));
             } else if pane.mark_resized(size) {
                 resizes.push((slot.pane, size));
             }
         }
-        for (pane, target, argv, cwd, on, (cols, rows)) in spawns {
+        for (pane, target, argv, cwd, on, (cols, rows), keep) in spawns {
             self.send(Command::Spawn {
+                keep,
                 pane,
                 target,
                 argv,
@@ -979,6 +1096,25 @@ impl App {
     // ---------------------------------------------------------------- 输入
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Release {
+            let local = self.prefix
+                || self.prompt.is_some()
+                || self.help.is_some()
+                || self.settings.is_some()
+                || self.goto.is_some()
+                || self.reader.is_some()
+                || self.chooser.is_some()
+                || self.copy.is_some()
+                || self.chat.is_some()
+                || self.switcher
+                || self.resize_mode
+                || self.move_mode
+                || self.workspace_mode;
+            if !local {
+                self.forward_key(key);
+            }
+            return;
+        }
         if self.prompt.is_some() {
             self.on_prompt_key(key);
             return;
@@ -1031,6 +1167,10 @@ impl App {
             return;
         }
         if self.prefix {
+            // 增强键盘会报告松键；前缀只由下一次按下消费。
+            if key.kind != KeyEventKind::Press {
+                return;
+            }
             self.prefix = false;
             self.dirty = true;
             if key.kind == KeyEventKind::Press {
@@ -1045,6 +1185,16 @@ impl App {
             return;
         }
         if key.kind == KeyEventKind::Press {
+            if self
+                .config
+                .keys
+                .entries()
+                .iter()
+                .any(|(name, binding)| *name != "prefix" && binding.matches_direct(&key))
+            {
+                self.dispatch_binding(key, false);
+                return;
+            }
             if let Some(index) = self.custom_command(&key, false) {
                 self.run_custom(index);
                 return;
@@ -1063,6 +1213,10 @@ impl App {
             return;
         }
         if let Some(bytes) = pane.view.encode_key(key) {
+            if key.kind != KeyEventKind::Release {
+                pane.view.scroll_bottom();
+                self.dirty = true;
+            }
             self.send(Command::Input {
                 pane: pane_id,
                 bytes,
@@ -1086,13 +1240,15 @@ impl App {
             return;
         }
         let pane_id = self.input_pane();
-        let Some(pane) = self.panes.get(&pane_id) else {
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
             return;
         };
         if !pane.is_live() {
             return;
         }
+        pane.view.scroll_bottom();
         let bytes = pane.view.encode_paste(&text);
+        self.dirty = true;
         self.send(Command::Input {
             pane: pane_id,
             bytes,
@@ -1104,6 +1260,28 @@ impl App {
             return;
         }
         if self.mobile && self.on_mobile_mouse(mouse) {
+            return;
+        }
+        if self.prompt.is_some()
+            || self.help.is_some()
+            || self.settings.is_some()
+            || self.goto.is_some()
+            || self.chooser.is_some()
+        {
+            return;
+        }
+        if let Some(reader) = self.reader.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    reader.scroll = reader.scroll.saturating_sub(self.config.mouse_scroll_lines)
+                }
+                MouseEventKind::ScrollDown => {
+                    reader.scroll = (reader.scroll + self.config.mouse_scroll_lines)
+                        .min(reader.lines.len().saturating_sub(1))
+                }
+                _ => {}
+            }
+            self.dirty = true;
             return;
         }
         // popup 打开时独占鼠标：点在外面不改变下面分屏的焦点。
@@ -1152,13 +1330,78 @@ impl App {
                 }
                 _ => {}
             }
-            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            if !matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
+            ) {
                 return;
             }
         }
 
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            let address = self
+                .agent_hits
+                .iter()
+                .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                .and_then(|(pane, _)| self.panes.get(pane))
+                .and_then(|pane| pane.terminal.clone())
+                .or_else(|| {
+                    self.terminal_hits
+                        .iter()
+                        .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                        .map(|(address, _)| address.clone())
+                });
+            if let Some(address) = address {
+                let pinned = self
+                    .terminals
+                    .iter()
+                    .find(|t| t.address == address)
+                    .is_some_and(|t| t.pinned);
+                self.update_terminal(Some(&address), |t| t.pinned = !pinned);
+                self.call_rpc("pin", "terminal.label", json!({"terminal": address, "labels": {"herdr.pinned": if pinned { "" } else { "1" }}}));
+                self.dirty = true;
+                return;
+            }
+        }
         let pressed = mouse.kind == MouseEventKind::Down(MouseButton::Left);
         if pressed {
+            if contains(self.agent_sort_hit, mouse.column, mouse.row) {
+                self.config.agent_sort = if self.config.agent_sort == AgentSort::Spaces {
+                    AgentSort::Priority
+                } else {
+                    AgentSort::Spaces
+                };
+                let sort = if self.config.agent_sort == AgentSort::Spaces {
+                    "spaces"
+                } else {
+                    "priority"
+                };
+                if let Err(error) = crate::config::write_setting(
+                    &self.config.config_path,
+                    "ui.agent_panel_sort",
+                    &format!("\"{sort}\""),
+                ) {
+                    self.note = format!("sort applied; {error}");
+                }
+                self.sidebar_scroll = 0;
+                self.dirty = true;
+                return;
+            }
+            if let Some((group, _)) = self
+                .agent_group_hits
+                .iter()
+                .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                .cloned()
+            {
+                if !self.folded_agent_groups.remove(&group) {
+                    self.folded_agent_groups.insert(group);
+                }
+                self.seen_dirty = true;
+                self.seen_since = Some(Instant::now());
+                self.dirty = true;
+                return;
+            }
+
             if contains(self.tab_add, mouse.column, mouse.row) {
                 if self.config.prompt_new_tab {
                     let suggested = format!("{}", self.tabs_in_workspace() + 1);
@@ -1190,6 +1433,30 @@ impl App {
                 .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
             {
                 self.select_tab(*index);
+                return;
+            }
+            if let Some((machine, _)) = self
+                .machine_hits
+                .iter()
+                .find(|(_, area)| contains(*area, mouse.column, mouse.row))
+                .cloned()
+            {
+                let connected = self
+                    .machines
+                    .iter()
+                    .any(|m| m.name == machine && m.state == "connected");
+                if connected {
+                    if let Err(error) = self.execute_action("space.new", json!({"machine":machine}))
+                    {
+                        self.note = error.to_string();
+                    }
+                } else {
+                    self.call_rpc(
+                        "machine.connect",
+                        "machine.connect",
+                        json!({"machine":machine}),
+                    );
+                }
                 return;
             }
             if let Some((index, _)) = self
@@ -1228,6 +1495,20 @@ impl App {
         else {
             return;
         };
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            if let Some(pane) = self.panes.get(&slot.pane) {
+                if let Some(address) = pane.terminal.clone() {
+                    let passthrough = self.program_right_click.contains(&address)
+                        && pane.view.mouse_tracking()
+                        && !mouse.modifiers.contains(KeyModifiers::SHIFT);
+                    if !passthrough {
+                        self.set_focus(slot.pane);
+                        self.open_terminal_menu(&address);
+                        return;
+                    }
+                }
+            }
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.set_focus(slot.pane);
@@ -1402,6 +1683,12 @@ impl App {
             MobileTarget::Workspace(index) => self.select_workspace(index),
             MobileTarget::Tab(index) => self.select_tab(index),
             MobileTarget::Agent(pane) => self.focus_pane(pane),
+            MobileTarget::Terminal(index) => {
+                if let Some(terminal) = self.terminals.get(index) {
+                    let address = terminal.address.clone();
+                    self.open_terminal(&address);
+                }
+            }
             MobileTarget::Action(action) => self.run_mobile_action(action),
         }
     }
@@ -1699,18 +1986,21 @@ impl App {
     }
 
     fn on_prefix_key(&mut self, key: KeyEvent) {
+        self.dispatch_binding(key, true);
+    }
+    fn dispatch_binding(&mut self, key: KeyEvent, prefix: bool) {
         let keys = self.config.keys.clone();
 
         // 前缀键再按一次：把这次按键原样交给程序（发送字面 ctrl+b）。
-        if keys.prefix.matches_direct(&key) {
+        if prefix && keys.prefix.matches_direct(&key) {
             self.forward_key(key);
             return;
         }
-        if let Some(index) = self.custom_command(&key, true) {
+        if let Some(index) = self.custom_command(&key, prefix) {
             self.run_custom(index);
             return;
         }
-        if keys.help.matches_prefix(&key) {
+        if keys.help.matches_mode(&key, prefix) {
             self.help = Some(HelpOverlay {
                 query: String::new(),
                 selected: 0,
@@ -1719,7 +2009,7 @@ impl App {
             self.dirty = true;
             return;
         }
-        if keys.settings.matches_prefix(&key) {
+        if keys.settings.matches_mode(&key, prefix) {
             self.settings = Some(SettingsOverlay {
                 section: 0,
                 selected: self.settings_selected(0),
@@ -1727,7 +2017,12 @@ impl App {
             self.dirty = true;
             return;
         }
-        if keys.goto.matches_prefix(&key) {
+        if key.code == KeyCode::Char(':') {
+            self.open_palette();
+            return;
+        }
+        if keys.goto.matches_mode(&key, prefix) {
+            self.palette = false;
             self.goto = Some(GotoOverlay {
                 query: String::new(),
                 selected: 1,
@@ -1735,19 +2030,19 @@ impl App {
             self.dirty = true;
             return;
         }
-        if keys.open_notification_target.matches_prefix(&key) {
+        if keys.open_notification_target.matches_mode(&key, prefix) {
             self.open_notification_target();
             return;
         }
-        if keys.detach.matches_prefix(&key) {
+        if keys.detach.matches_mode(&key, prefix) {
             self.quit = true;
             return;
         }
-        if keys.reload_config.matches_prefix(&key) {
+        if keys.reload_config.matches_mode(&key, prefix) {
             self.reload_config();
             return;
         }
-        if keys.new_tab.matches_prefix(&key) {
+        if keys.new_tab.matches_mode(&key, prefix) {
             if self.config.prompt_new_tab {
                 let suggested = format!("{}", self.tabs_in_workspace() + 1);
                 self.ask_with(PromptKind::NewTab, "tab name", suggested);
@@ -1756,7 +2051,7 @@ impl App {
             }
             return;
         }
-        if keys.rename_tab.matches_prefix(&key) {
+        if keys.rename_tab.matches_mode(&key, prefix) {
             if let Some(tab) = self.tab() {
                 let (workspace, id, label) = (self.active_ws, tab.id, tab.display(&self.panes));
                 self.ask_with(
@@ -1767,23 +2062,23 @@ impl App {
             }
             return;
         }
-        if keys.next_tab.matches_prefix(&key) {
+        if keys.next_tab.matches_mode(&key, prefix) {
             self.cycle_tab(1);
             return;
         }
-        if keys.previous_tab.matches_prefix(&key) {
+        if keys.previous_tab.matches_mode(&key, prefix) {
             self.cycle_tab(-1);
             return;
         }
-        if keys.move_tab_previous.matches_prefix(&key) {
+        if keys.move_tab_previous.matches_mode(&key, prefix) {
             self.move_tab(-1);
             return;
         }
-        if keys.move_tab_next.matches_prefix(&key) {
+        if keys.move_tab_next.matches_mode(&key, prefix) {
             self.move_tab(1);
             return;
         }
-        if keys.close_tab.matches_prefix(&key) {
+        if keys.close_tab.matches_mode(&key, prefix) {
             if self.config.confirm_close {
                 self.ask(
                     PromptKind::CloseTab(self.active_ws),
@@ -1795,7 +2090,7 @@ impl App {
             }
             return;
         }
-        if keys.new_workspace.matches_prefix(&key) {
+        if keys.new_workspace.matches_mode(&key, prefix) {
             if self.config.prompt_new_workspace {
                 self.ask(PromptKind::NewWorkspace, "workspace name");
             } else {
@@ -1803,7 +2098,7 @@ impl App {
             }
             return;
         }
-        if keys.rename_workspace.matches_prefix(&key) {
+        if keys.rename_workspace.matches_mode(&key, prefix) {
             let (index, label) = self
                 .workspace()
                 .map(|workspace| (self.active_ws, workspace.label.clone()))
@@ -1815,24 +2110,24 @@ impl App {
             );
             return;
         }
-        if keys.close_workspace.matches_prefix(&key) {
+        if keys.close_workspace.matches_mode(&key, prefix) {
             self.ask(
                 PromptKind::CloseWorkspace(self.active_ws),
                 "close workspace and all its tabs? (y/N)",
             );
             return;
         }
-        if keys.workspace_picker.matches_prefix(&key) {
+        if keys.workspace_picker.matches_mode(&key, prefix) {
             self.workspace_mode = true;
             self.note = String::new();
             self.dirty = true;
             return;
         }
-        if keys.next_workspace.matches_prefix(&key) {
+        if keys.next_workspace.matches_mode(&key, prefix) {
             self.select_workspace((self.active_ws + 1) % self.workspaces.len().max(1));
             return;
         }
-        if keys.previous_workspace.matches_prefix(&key) {
+        if keys.previous_workspace.matches_mode(&key, prefix) {
             let index = self
                 .active_ws
                 .checked_sub(1)
@@ -1840,84 +2135,84 @@ impl App {
             self.select_workspace(index);
             return;
         }
-        if keys.split_vertical.matches_prefix(&key) {
+        if keys.split_vertical.matches_mode(&key, prefix) {
             self.split_focused(Axis::Horizontal);
             return;
         }
-        if keys.split_horizontal.matches_prefix(&key) {
+        if keys.split_horizontal.matches_mode(&key, prefix) {
             self.split_focused(Axis::Vertical);
             return;
         }
-        if keys.focus_pane_left.matches_prefix(&key) {
+        if keys.focus_pane_left.matches_mode(&key, prefix) {
             self.move_focus(Direction::Left);
             return;
         }
-        if keys.focus_pane_down.matches_prefix(&key) {
+        if keys.focus_pane_down.matches_mode(&key, prefix) {
             self.move_focus(Direction::Down);
             return;
         }
-        if keys.focus_pane_up.matches_prefix(&key) {
+        if keys.focus_pane_up.matches_mode(&key, prefix) {
             self.move_focus(Direction::Up);
             return;
         }
-        if keys.focus_pane_right.matches_prefix(&key) {
+        if keys.focus_pane_right.matches_mode(&key, prefix) {
             self.move_focus(Direction::Right);
             return;
         }
-        if keys.cycle_pane_next.matches_prefix(&key) {
+        if keys.cycle_pane_next.matches_mode(&key, prefix) {
             self.cycle_pane(1);
             return;
         }
-        if keys.cycle_pane_previous.matches_prefix(&key) {
+        if keys.cycle_pane_previous.matches_mode(&key, prefix) {
             self.cycle_pane(-1);
             return;
         }
-        if keys.last_pane.matches_prefix(&key) {
+        if keys.last_pane.matches_mode(&key, prefix) {
             self.toggle_last_pane();
             return;
         }
-        if keys.zoom.matches_prefix(&key) {
+        if keys.zoom.matches_mode(&key, prefix) {
             self.zoom = !self.zoom;
             self.note = String::new();
             self.dirty = true;
             return;
         }
-        if keys.layout_next.matches_prefix(&key) {
+        if keys.layout_next.matches_mode(&key, prefix) {
             self.cycle_layout(1);
             return;
         }
-        if keys.layout_previous.matches_prefix(&key) {
+        if keys.layout_previous.matches_mode(&key, prefix) {
             self.cycle_layout(-1);
             return;
         }
-        if keys.stack_panes.matches_prefix(&key) {
+        if keys.stack_panes.matches_mode(&key, prefix) {
             self.stack_tab_panes();
             return;
         }
-        if keys.float_pane.matches_prefix(&key) {
+        if keys.float_pane.matches_mode(&key, prefix) {
             self.toggle_float();
             return;
         }
-        if keys.float_pin.matches_prefix(&key) {
+        if keys.float_pin.matches_mode(&key, prefix) {
             self.toggle_float_pin();
             return;
         }
-        if keys.float_hide.matches_prefix(&key) {
+        if keys.float_hide.matches_mode(&key, prefix) {
             self.toggle_floating_hidden();
             return;
         }
-        if keys.close_pane.matches_prefix(&key) {
+        if keys.close_pane.matches_mode(&key, prefix) {
             self.close_focused_pane();
             return;
         }
-        if keys.rename_pane.matches_prefix(&key) {
+        if keys.rename_pane.matches_mode(&key, prefix) {
             self.ask(
                 PromptKind::RenamePane(self.focused()),
                 "pane 名字（留空清除）",
             );
             return;
         }
-        if keys.kill_pane.matches_prefix(&key) {
+        if keys.kill_pane.matches_mode(&key, prefix) {
             let terminal = self
                 .focused_pane()
                 .and_then(|pane| pane.terminal.clone())
@@ -1928,7 +2223,7 @@ impl App {
             );
             return;
         }
-        if keys.move_pane.matches_prefix(&key) {
+        if keys.move_pane.matches_mode(&key, prefix) {
             self.move_mode = true;
             self.note = format!(
                 "move: 1-{} 移到目标 tab，t 移成新 tab，Esc 取消",
@@ -1937,18 +2232,18 @@ impl App {
             self.dirty = true;
             return;
         }
-        if keys.resize_mode.matches_prefix(&key) {
+        if keys.resize_mode.matches_mode(&key, prefix) {
             self.resize_mode = true;
             self.note = String::new();
             self.dirty = true;
             return;
         }
-        if keys.toggle_sidebar.matches_prefix(&key) {
+        if keys.toggle_sidebar.matches_mode(&key, prefix) {
             self.sidebar = !self.sidebar;
             self.dirty = true;
             return;
         }
-        if keys.scroll_bottom.matches_prefix(&key) {
+        if keys.scroll_bottom.matches_mode(&key, prefix) {
             if let Some(pane) = self.panes.get_mut(&self.focused()) {
                 pane.view.scroll_bottom();
             }
@@ -1956,19 +2251,19 @@ impl App {
             self.dirty = true;
             return;
         }
-        if keys.copy_mode.matches_prefix(&key) {
+        if keys.copy_mode.matches_mode(&key, prefix) {
             self.enter_copy_mode();
             return;
         }
-        if keys.next_agent.matches_prefix(&key) {
-            self.focus_next_attention();
+        if keys.next_agent.matches_mode(&key, prefix) {
+            self.cycle_agent(1);
             return;
         }
-        if keys.chat.matches_prefix(&key) {
+        if keys.chat.matches_mode(&key, prefix) {
             self.toggle_chat();
             return;
         }
-        if keys.send_text.matches_prefix(&key) {
+        if keys.send_text.matches_mode(&key, prefix) {
             let pane = self.input_pane();
             let terminal = self
                 .panes
@@ -1978,7 +2273,7 @@ impl App {
             self.ask(PromptKind::SendText(pane), &format!("发给 {terminal}"));
             return;
         }
-        if keys.interrupt.matches_prefix(&key) {
+        if keys.interrupt.matches_mode(&key, prefix) {
             let terminal = self
                 .panes
                 .get(&self.input_pane())
@@ -1993,50 +2288,50 @@ impl App {
             }
             return;
         }
-        if keys.toggle_keep.matches_prefix(&key) {
+        if keys.toggle_keep.matches_mode(&key, prefix) {
             self.toggle_keep();
             return;
         }
-        if keys.remove_terminal.matches_prefix(&key) {
+        if keys.remove_terminal.matches_mode(&key, prefix) {
             self.remove_finished_terminal();
             return;
         }
-        if keys.open_link.matches_prefix(&key) {
+        if keys.open_link.matches_mode(&key, prefix) {
             self.open_link_at_cursor();
             return;
         }
-        if keys.edit_history.matches_prefix(&key) {
+        if keys.edit_history.matches_mode(&key, prefix) {
             self.edit_history_popup();
             return;
         }
-        if keys.read_pane.matches_prefix(&key) {
+        if keys.read_pane.matches_mode(&key, prefix) {
             self.open_reader();
             return;
         }
-        if keys.send_keys.matches_prefix(&key) {
+        if keys.send_keys.matches_mode(&key, prefix) {
             let pane = self.input_pane();
             self.ask(PromptKind::SendKeys(pane), "按下按键：enter, ctrl+c, esc");
             return;
         }
-        if keys.wait_output.matches_prefix(&key) {
+        if keys.wait_output.matches_mode(&key, prefix) {
             let pane = self.input_pane();
             self.ask(PromptKind::WaitOutput(pane), "等待输出包含");
             return;
         }
-        if keys.put_file.matches_prefix(&key) {
+        if keys.put_file.matches_mode(&key, prefix) {
             let pane = self.input_pane();
             self.ask(PromptKind::PutFile(pane), "发送文件路径");
             return;
         }
-        if keys.templates.matches_prefix(&key) {
+        if keys.templates.matches_mode(&key, prefix) {
             self.call_rpc("templates", "templates.list", json!({}));
             return;
         }
-        if keys.machines.matches_prefix(&key) {
+        if keys.machines.matches_mode(&key, prefix) {
             self.call_rpc("machines", "machine.list", json!({}));
             return;
         }
-        if keys.paste_image.matches_prefix(&key) {
+        if keys.paste_image.matches_mode(&key, prefix) {
             self.paste_image();
             return;
         }
@@ -2441,7 +2736,7 @@ impl App {
                 "toggle_sidebar" => "toggle sidebar",
                 "scroll_bottom" => "scroll to bottom",
                 "copy_mode" => "copy mode",
-                "next_agent" => "next agent needing attention",
+                "next_agent" => "next agent in displayed order",
                 "chat" => "chat view of the agent session",
                 "send_text" => "send text to pane",
                 "interrupt" => "interrupt turn",
@@ -2778,6 +3073,25 @@ impl App {
     }
 
     fn goto_rows_for(&self, query: &str) -> Vec<GotoRow> {
+        if self.palette {
+            return actions::COMMANDS
+                .iter()
+                .filter(|(name, description)| {
+                    format!("{name} {description}")
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
+                })
+                .map(|(name, description)| GotoRow {
+                    pane: None,
+                    terminal: None,
+                    text: name.to_string(),
+                    right: String::new(),
+                    section: false,
+                    context: description.to_string(),
+                    cwd: String::new(),
+                })
+                .collect();
+        }
         let query = query.to_ascii_lowercase();
         let matches = |text: &str, extra: &str| -> bool {
             query.is_empty()
@@ -2870,11 +3184,7 @@ impl App {
                 )
             })
             .map(|terminal| {
-                let label = if terminal.title.is_empty() {
-                    terminal.address.clone()
-                } else {
-                    format!("{} · {}", short(&terminal.address), short(&terminal.title))
-                };
+                let label = format!("{} · {}", short(&terminal.address), short(terminal.label()));
                 GotoRow {
                     pane: None,
                     terminal: Some(terminal.address.clone()),
@@ -2919,6 +3229,16 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(row) = rows.get(goto.selected) {
+                    if self.palette {
+                        self.palette = false;
+                        self.ask_with(
+                            PromptKind::Command,
+                            "command + JSON arguments",
+                            format!("{} {{}}", row.text),
+                        );
+                        self.dirty = true;
+                        return;
+                    }
                     if let Some(pane) = row.pane {
                         self.focus_pane(pane);
                     } else if let Some(terminal) = &row.terminal {
@@ -2928,8 +3248,8 @@ impl App {
                 self.dirty = true;
                 return;
             }
-            KeyCode::Char('k') | KeyCode::Up => goto.selected = goto.selected.saturating_sub(1),
-            KeyCode::Char('j') | KeyCode::Down => goto.selected = (goto.selected + 1).min(max),
+            KeyCode::Up => goto.selected = goto.selected.saturating_sub(1),
+            KeyCode::Down => goto.selected = (goto.selected + 1).min(max),
             KeyCode::PageUp => goto.selected = goto.selected.saturating_sub(10),
             KeyCode::PageDown => goto.selected = (goto.selected + 10).min(max),
             KeyCode::Backspace => {
@@ -2944,6 +3264,8 @@ impl App {
             }
             _ => {}
         }
+        let rows = self.goto_rows_for(&goto.query);
+        let max = rows.len().saturating_sub(1);
         // 过滤后选不中标题行时，落到第一条真正的终端上。
         if rows.get(goto.selected).is_some_and(|row| row.section) {
             if let Some(index) = rows
@@ -2977,19 +3299,23 @@ impl App {
     pub fn workspace_cwd(&self, workspace: usize) -> Option<String> {
         let state = self.workspaces.get(workspace)?;
         state
-            .focus()
-            .and_then(|pane| self.panes.get(&pane))
-            .and_then(|pane| pane.cwd.clone())
-            .or_else(|| {
-                state
-                    .panes()
-                    .into_iter()
-                    .find_map(|pane| self.panes.get(&pane.0).and_then(|state| state.cwd.clone()))
+            .panes()
+            .into_iter()
+            .filter_map(|pane| self.panes.get(&pane.0))
+            .find_map(|pane| {
+                pane.cwd
+                    .clone()
+                    .or_else(|| pane.launch.as_ref().and_then(|launch| launch.cwd.clone()))
             })
+            .or_else(|| state.folder.clone())
             .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
+                if self.workspace_machine(workspace) == "local" {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
             })
     }
 
@@ -3001,7 +3327,35 @@ impl App {
         if !state.label.is_empty() {
             return state.label.clone();
         }
-        format!("w{}", state.id)
+        dir_label(self.workspace_cwd(workspace), format!("w{}", state.id))
+    }
+
+    pub fn workspace_machine(&self, workspace: usize) -> String {
+        if let Some(machine) = self
+            .workspaces
+            .get(workspace)
+            .and_then(|w| w.machine.clone())
+        {
+            return machine;
+        }
+        self.workspaces
+            .get(workspace)
+            .into_iter()
+            .flat_map(|w| w.panes())
+            .filter_map(|p| self.panes.get(&p.0))
+            .find_map(|p| {
+                p.terminal
+                    .as_deref()
+                    .map(|address| {
+                        address
+                            .split_once('/')
+                            .map(|(machine, _)| machine)
+                            .unwrap_or("local")
+                            .to_string()
+                    })
+                    .or_else(|| p.launch.as_ref().and_then(|l| l.on.clone()))
+            })
+            .unwrap_or_else(|| "local".to_string())
     }
 
     /// 写给宿主终端的窗口标题。
@@ -3085,20 +3439,69 @@ impl App {
             .collect()
     }
 
-    /// 打开一个已有终端：已有视图就切焦点，没有就在当前 Tab 右侧建一个视图。
+    /// 已有视图切焦点；外部终端在独立 Tab 打开，保留当前布局。
     pub fn open_terminal(&mut self, address: &str) {
         if let Some(pane) = self.pane_by_terminal(address) {
             self.focus_pane(pane);
             return;
         }
-        let Some(pane) = self.split_new(Axis::Horizontal) else {
-            self.note = "no room for a new view".to_string();
-            return;
-        };
+        if let Some(terminal) = self
+            .terminals
+            .iter()
+            .find(|t| t.address == address)
+            .cloned()
+        {
+            let space = terminal
+                .space
+                .clone()
+                .unwrap_or_else(|| dir_label(terminal.cwd.clone(), "Terminals".to_string()));
+            let machine = terminal.machine().to_string();
+            let source = terminal.space_id.as_ref().map(|id| {
+                if machine == "local" {
+                    id.clone()
+                } else {
+                    format!("{machine}/{id}")
+                }
+            });
+            if let Some(index) = (0..self.workspaces.len()).find(|index| {
+                if let Some(source) = &source {
+                    self.workspaces[*index].origin.as_ref() == Some(source)
+                } else {
+                    self.workspace_label(*index) == space
+                        && self.workspace_machine(*index) == machine
+                }
+            }) {
+                self.active_ws = index;
+            } else {
+                let id = self.alloc_workspace();
+                self.workspaces.push(Workspace {
+                    origin: source,
+                    machine: (machine != "local").then_some(machine.clone()),
+                    folder: terminal.cwd.clone(),
+                    id,
+                    label: space,
+                    tabs: Vec::new(),
+                    active: 0,
+                });
+                self.active_ws = self.workspaces.len() - 1;
+            }
+        }
+        let pane = self.alloc_pane();
+        let tab = self.alloc_tab();
         self.spawn_pane(pane);
+        if !self.panes.contains_key(&pane) {
+            return;
+        }
         if let Some(state) = self.panes.get_mut(&pane) {
             state.terminal = Some(address.to_string());
         }
+        if let Some(workspace) = self.workspaces.get_mut(self.active_ws) {
+            workspace.tabs.push(Tab::new(tab, pane));
+            workspace.active = workspace.tabs.len() - 1;
+        }
+        self.sync_terminals();
+        self.zoom = false;
+        self.mark_layout();
         self.focus_pane(pane);
         self.dirty = true;
     }
@@ -3111,6 +3514,17 @@ impl App {
             return;
         }
         match prompt.kind {
+            PromptKind::Command => {
+                let (name, arguments) = text
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((&text, "{}"));
+                let result = serde_json::from_str(arguments.trim())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|args| self.execute_action(name, args));
+                if let Err(error) = result {
+                    self.note = error.to_string();
+                }
+            }
             PromptKind::NewTab => self.new_tab(Some(text)),
             PromptKind::NewWorkspace => self.new_workspace(Some(text)),
             PromptKind::RenameTab { workspace, tab } => {
@@ -3271,6 +3685,13 @@ impl App {
     }
 
     fn new_tab(&mut self, label: Option<String>) {
+        if self.workspaces.is_empty() {
+            self.new_workspace(None);
+            if let Some(tab) = self.workspaces[self.active_ws].tab_mut() {
+                tab.label = label.unwrap_or_default();
+            }
+            return;
+        }
         let pane = self.alloc_pane();
         let id = self.alloc_tab();
         self.spawn_pane(pane);
@@ -3296,15 +3717,16 @@ impl App {
         let id = self.alloc_workspace();
         self.spawn_pane(pane);
         let launch = self.new_pane_launch();
-        let cwd = launch.as_ref().and_then(|launch| launch.cwd.clone());
         if let Some(state) = self.panes.get_mut(&pane) {
             state.launch = launch;
         }
-        let label = match label {
-            Some(text) if !text.is_empty() => text,
-            _ => dir_label(cwd, format!("w{id}")),
-        };
-        self.workspaces.push(Workspace::new(id, label, pane, tab));
+        let label = label.unwrap_or_default();
+        let mut workspace = Workspace::new(id, label, pane, tab);
+        if let Some(launch) = self.panes.get(&pane).and_then(|p| p.launch.as_ref()) {
+            workspace.machine = launch.on.clone();
+            workspace.folder = launch.cwd.clone();
+        }
+        self.workspaces.push(workspace);
         self.active_ws = self.workspaces.len() - 1;
         self.zoom = false;
         self.note = "new workspace".to_string();
@@ -3773,6 +4195,7 @@ impl App {
             state.active = tab;
             if let Some(tab) = state.tab_mut() {
                 tab.focus = pane;
+                tab.settled = false;
                 tab.raise_floating(pane);
             }
         }
@@ -3812,12 +4235,39 @@ impl App {
         let Some(state) = self.panes.get_mut(&pane) else {
             return;
         };
+        let changed = state.agent.turn > state.agent.seen_turn;
+        let address = state.terminal.clone();
+        if state.agent.badge() == Badge::Done {
+            if let Some(address) = address.clone() {
+                self.held_done = Some((address, state.agent.turn));
+            }
+        } else if self.held_done.as_ref().is_some_and(|(held, turn)| {
+            Some(held) != address.as_ref()
+                || *turn != state.agent.turn
+                || !matches!(state.agent.status.as_deref(), Some("idle" | "done"))
+        }) {
+            self.held_done = None;
+        }
         state.agent.mark_seen();
+        let acknowledged = state
+            .terminal
+            .clone()
+            .map(|terminal| (terminal, state.agent.turn));
         if let Some(terminal) = state.terminal.clone() {
             let turn = state.agent.turn;
             self.seen.insert(terminal, turn);
             self.seen_dirty = true;
             self.seen_since = Some(Instant::now());
+        }
+        if changed {
+            if let Some((terminal, turn)) = acknowledged {
+                self.update_terminal(Some(&terminal), |summary| summary.seen_turn = turn);
+                self.call_rpc(
+                    "seen",
+                    "terminal.label",
+                    json!({"terminal": terminal, "labels": {"herdr.seen": turn.to_string()}}),
+                );
+            }
         }
         self.dirty = true;
     }
@@ -3842,63 +4292,39 @@ impl App {
                 self.focus_pane(pane);
                 self.note = format!("{} · {label}", badge.text());
             }
-            None => self.note = "no agent needs attention".to_string(),
+            None => {
+                let external = self
+                    .navigation_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        row.pane.is_none()
+                            && matches!(row.badge, Badge::Blocked | Badge::Error | Badge::Done)
+                    })
+                    .min_by_key(|row| row.badge)
+                    .and_then(|row| row.terminal);
+                if let Some(address) = external {
+                    self.open_terminal(&address);
+                } else {
+                    self.note = "no agent needs attention".to_string();
+                }
+            }
         }
         self.dirty = true;
     }
 
     fn close_focused_pane(&mut self) {
         let pane = self.focused();
-        let tab_panes = {
-            let Some(tab) = self.tab() else {
-                return;
-            };
-            tab.panes()
-        };
-        if tab_panes.len() <= 1 {
-            if self.config.confirm_close {
-                self.ask(
-                    PromptKind::CloseTab(self.active_ws),
-                    "这是 tab 里最后一个 pane，关闭整个 tab？(y/N)",
-                );
-            } else {
-                let workspace = self.active_ws;
-                self.close_tab_in(workspace);
-            }
+        if self.tab().is_some_and(|t| t.panes().len() == 1) && self.config.confirm_close {
+            self.ask(
+                PromptKind::CloseTab(self.active_ws),
+                "End the last terminal and close this tab? (y/N)",
+            );
             return;
         }
-        self.remove_pane_view(pane);
-        let remaining = {
-            let Some(tab) = self.workspace_mut().and_then(Workspace::tab_mut) else {
-                return;
-            };
-            if let Some(index) = tab.floating.iter().position(|entry| entry.pane == pane) {
-                tab.floating.remove(index);
-                let panes = tab.tree.panes();
-                tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
-                Some(tab.focus)
-            } else {
-                let tree = tab.tree.clone();
-                match tree.remove_pane(PaneId(pane)) {
-                    Some(tree) => {
-                        tab.tree = tree;
-                        let panes = tab.tree.panes();
-                        tab.focus = panes.first().map(|pane| pane.0).unwrap_or_default();
-                        Some(tab.focus)
-                    }
-                    None => tab.promote_floating().then_some(tab.focus),
-                }
-            }
-        };
-        if let Some(next) = remaining {
-            self.send(Command::Focus {
-                pane: next,
-                focused: true,
-            });
-            self.zoom = false;
-            self.note = "pane closed; the program keeps running in core".to_string();
+        if let Some(address) = self.panes.get(&pane).and_then(|p| p.terminal.clone()) {
+            self.kill_terminal_tree(&address);
         }
-        self.mark_layout();
+        self.detach_view_from_layout(pane);
     }
 
     /// 只断视图，不杀进程。
@@ -3911,16 +4337,6 @@ impl App {
     }
 
     fn close_tab_in(&mut self, workspace_index: usize) {
-        let tab_count = self
-            .workspaces
-            .get(workspace_index)
-            .map(|workspace| workspace.tabs.len())
-            .unwrap_or(0);
-        if tab_count <= 1 && self.workspaces.len() <= 1 {
-            self.note = "last tab; prefix q detaches".to_string();
-            self.dirty = true;
-            return;
-        }
         let removed = {
             let Some(workspace) = self.workspaces.get_mut(workspace_index) else {
                 return;
@@ -3932,6 +4348,9 @@ impl App {
             removed
         };
         for pane in removed.panes() {
+            if let Some(address) = self.panes.get(&pane.0).and_then(|p| p.terminal.clone()) {
+                self.kill_terminal_tree(&address);
+            }
             self.remove_pane_view(pane.0);
         }
         let empty = self
@@ -3949,19 +4368,19 @@ impl App {
         if index >= self.workspaces.len() {
             return;
         }
-        if self.workspaces.len() <= 1 {
-            self.note = "last workspace; prefix q detaches".to_string();
-            self.dirty = true;
-            return;
-        }
         let workspace = self.workspaces.remove(index);
         for tab in &workspace.tabs {
             for pane in tab.panes() {
+                if let Some(address) = self.panes.get(&pane.0).and_then(|p| p.terminal.clone()) {
+                    self.kill_terminal_tree(&address);
+                }
                 self.remove_pane_view(pane.0);
             }
         }
         if self.active_ws >= self.workspaces.len() {
-            self.active_ws = self.workspaces.len() - 1;
+            self.active_ws = self.workspaces.len().saturating_sub(1);
+        } else if index < self.active_ws {
+            self.active_ws -= 1;
         }
         self.zoom = false;
         self.mark_layout();
@@ -3971,11 +4390,17 @@ impl App {
         let Some(workspace) = self.workspaces.get_mut(self.active_ws) else {
             return;
         };
-        if index >= workspace.tabs.len() || index == workspace.active {
+        if index >= workspace.tabs.len() {
+            return;
+        }
+        workspace.tabs[index].settled = false;
+        if index == workspace.active {
+            self.dirty = true;
             return;
         }
         let previous = workspace.focus().unwrap_or_default();
         workspace.active = index;
+        workspace.tabs[index].settled = false;
         let next = workspace.focus().unwrap_or_default();
         self.zoom = false;
         self.note = format!("tab {}", index + 1);
@@ -4017,16 +4442,22 @@ impl App {
     }
 
     fn cycle_tab(&mut self, delta: isize) {
-        let count = self.tabs_in_workspace();
-        if count < 2 {
+        let Some(ws) = self.workspace() else {
+            return;
+        };
+        let visible: Vec<_> = ws
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.settled)
+            .map(|(i, _)| i)
+            .collect();
+        if visible.is_empty() {
             return;
         }
-        let current = self
-            .workspace()
-            .map(|workspace| workspace.active)
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
-        self.select_tab(next);
+        let current = visible.iter().position(|i| *i == ws.active).unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(visible.len() as isize) as usize;
+        self.select_tab(visible[next]);
     }
 
     fn move_tab(&mut self, delta: isize) {
@@ -4214,15 +4645,21 @@ impl App {
 
     /// 新建 Pane 时的 shell 启动参数：按 `terminal.new_cwd` 决定目录。
     fn new_pane_launch(&self) -> Option<Launch> {
+        let machine = self.workspace_machine(self.active_ws);
+        let on = (machine != "local").then_some(machine);
         let cwd = match &self.config.new_cwd {
             crate::config::NewCwd::Follow => self
                 .focused_pane()
                 .and_then(|pane| pane.cwd.clone())
                 .or_else(|| {
+                    if on.is_some() {
+                        return None;
+                    }
                     std::env::current_dir()
                         .ok()
                         .map(|p| p.to_string_lossy().into_owned())
                 }),
+            crate::config::NewCwd::Home if on.is_some() => None,
             crate::config::NewCwd::Home => std::env::var("HOME").ok(),
             crate::config::NewCwd::Current => std::env::current_dir()
                 .ok()
@@ -4234,14 +4671,10 @@ impl App {
         } else {
             vec![self.config.default_shell.clone()]
         };
-        if argv.is_empty() && cwd.is_none() {
+        if argv.is_empty() && cwd.is_none() && on.is_none() {
             None
         } else {
-            Some(Launch {
-                argv,
-                cwd,
-                on: None,
-            })
+            Some(Launch { argv, cwd, on })
         }
     }
 
@@ -4275,9 +4708,18 @@ impl App {
     }
 
     fn pane_by_terminal(&self, terminal: &str) -> Option<u32> {
-        self.panes.iter().find_map(|(pane, state)| {
-            (state.terminal.as_deref() == Some(terminal)).then_some(*pane)
-        })
+        self.panes
+            .iter()
+            .filter(|(_, state)| state.terminal.as_deref() == Some(terminal))
+            .min_by_key(|(id, _)| {
+                (
+                    **id != self.focused(),
+                    !self.is_visible(**id),
+                    self.locate(**id).unwrap_or((usize::MAX, usize::MAX)),
+                    **id,
+                )
+            })
+            .map(|(id, _)| *id)
     }
 
     // ------------------------------------------------------------- 网络事件
@@ -4291,6 +4733,7 @@ impl App {
         };
         if state.schema_version <= 1 {
             self.seen = state.seen;
+            self.folded_agent_groups = state.folded_agent_groups;
         }
     }
 
@@ -4300,6 +4743,7 @@ impl App {
         let state = LocalState {
             schema_version: 1,
             seen: self.seen.clone(),
+            folded_agent_groups: self.folded_agent_groups.clone(),
         };
         let path = self.config.state_path.clone();
         if let Some(parent) = path.parent() {
@@ -4344,19 +4788,28 @@ impl App {
             return;
         };
         let cwd = self.focused_pane().and_then(|pane| pane.cwd.clone());
+        let machine = self.workspace_machine(self.active_ws);
+        let on = (machine != "local").then_some(machine);
         match command.kind {
+            CommandKind::Action => {
+                let (name, arguments) = command
+                    .command
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((&command.command, "{}"));
+                let result = serde_json::from_str(arguments.trim())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|args| self.execute_action(name, args));
+                if let Err(error) = result {
+                    self.note = error.to_string();
+                }
+            }
             CommandKind::Shell => {
-                let argv = shell_argv(&command.command);
-                let spawned = std::process::Command::new(&argv[0])
-                    .args(&argv[1..])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
-                self.note = match spawned {
-                    Ok(_) => format!("running in background: {}", command.command),
-                    Err(error) => format!("failed to start: {error}"),
-                };
+                self.call_rpc(
+                    "custom.exec",
+                    "machine.exec",
+                    json!({"line":command.command,"cwd":cwd,"on":on}),
+                );
+                self.note = format!("running in background: {}", command.command);
             }
             CommandKind::Pane => {
                 let axis = if self.content.width >= self.content.height {
@@ -4367,7 +4820,11 @@ impl App {
                 match self.split_new(axis) {
                     Some(pane) => {
                         self.spawn_pane(pane);
-                        let launch = Launch::local(shell_argv(&command.command), cwd);
+                        let launch = Launch {
+                            argv: shell_argv(&command.command),
+                            cwd,
+                            on: on.clone(),
+                        };
                         if let Some(state) = self.panes.get_mut(&pane) {
                             state.transient = true;
                             state.launch = Some(launch);
@@ -4383,6 +4840,11 @@ impl App {
             }
             CommandKind::Popup => {
                 self.open_popup(shell_argv(&command.command), cwd);
+                if let Some(pane) = self.popup.and_then(|p| self.panes.get_mut(&p.pane)) {
+                    if let Some(launch) = pane.launch.as_mut() {
+                        launch.on = on;
+                    }
+                }
                 if let Some(popup) = &mut self.popup {
                     popup.width = command.width.unwrap_or(Span::Percent(80));
                     popup.height = command.height.unwrap_or(Span::Percent(80));
@@ -4545,6 +5007,15 @@ impl App {
         match chooser.kind {
             ChooserKind::Templates => self.spawn_program_in_new_tab(vec![item.value], None),
             ChooserKind::Machines => self.open_remote_pane(item.value),
+            ChooserKind::Commands => {
+                let (name, args) = item.value.split_once(' ').unwrap_or((&item.value, "{}"));
+                let result = serde_json::from_str(args)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|args| self.execute_action(name, args));
+                if let Err(error) = result {
+                    self.note = error.to_string();
+                }
+            }
         }
         self.dirty = true;
     }
@@ -4671,6 +5142,13 @@ impl App {
                     self.request_doc("doc.get");
                 } else {
                     self.note = "subscribing".to_string();
+                    if self.config.restore {
+                        let machines: Vec<_> = self.shared_docs.keys().cloned().collect();
+                        for machine in machines {
+                            self.request_shared(&machine);
+                        }
+                        self.call_rpc("machines.sync", "machine.list", json!({}));
+                    }
                 }
                 self.dirty = true;
             }
@@ -4706,6 +5184,14 @@ impl App {
                     if let Some(seen) = self.seen.get(&terminal) {
                         state.agent.seen_turn = state.agent.seen_turn.max(*seen);
                     }
+                }
+                self.sync_terminals();
+                if let Some(task) = self.initial_tasks.remove(&pane) {
+                    self.call_rpc(
+                        &format!("send-task:{pane}"),
+                        "terminal.send",
+                        json!({"terminal":terminal,"text":task}),
+                    );
                 }
                 if pane == self.focused() {
                     self.send(Command::Focus {
@@ -4793,6 +5279,23 @@ impl App {
                 }
             }
         }
+        if let Some(id) = tag
+            .strip_prefix("panel:")
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            self.panel_reply(id, result);
+            return;
+        }
+        if tag.starts_with("kill:") {
+            if let Err(error) = result {
+                self.note = format!("Kill failed: {}", error.message);
+            }
+            return;
+        }
+        if tag.starts_with("shared.") {
+            self.shared_reply(tag, result);
+            return;
+        }
         match tag {
             "doc.get" => match result {
                 Ok(value) => {
@@ -4803,7 +5306,7 @@ impl App {
                         .filter(|value| !value.is_null())
                         .and_then(|value| match value {
                             Value::String(text) => SavedState::parse(text),
-                            other => serde_json::from_value::<SavedState>(other.clone()).ok(),
+                            other => SavedState::parse(&other.to_string()),
                         })
                         .filter(SavedState::is_usable);
                     if let Some(state) = restored {
@@ -4812,6 +5315,10 @@ impl App {
                     }
                     self.restore_pending = false;
                     self.ensure_layout();
+                    if self.config.restore {
+                        self.request_shared("");
+                        self.call_rpc("machines.sync", "machine.list", json!({}));
+                    }
                     self.dirty = true;
                 }
                 Err(error) => {
@@ -4976,6 +5483,57 @@ impl App {
                 }
                 Err(error) => self.note = format!("templates failed: {}", error.message),
             },
+            "machines.sync" => {
+                if let Ok(value) = result {
+                    self.machines = parse_machines(&value);
+                    let machines: Vec<_> = self
+                        .machines
+                        .iter()
+                        .filter(|m| m.state == "connected")
+                        .map(|m| m.name.clone())
+                        .collect();
+                    for machine in machines {
+                        self.request_shared(&machine);
+                    }
+                    self.dirty = true;
+                }
+            }
+            "custom.exec" => match result {
+                Ok(value) => {
+                    self.note = if value["timed_out"] == true {
+                        "Command timed out".into()
+                    } else {
+                        format!("Command finished · exit {}", value["code"])
+                    };
+                    self.dirty = true;
+                }
+                Err(error) => self.note = error.message,
+            },
+            "panel.exec" | "panel.file" => match result {
+                Ok(value) => {
+                    use base64::Engine;
+                    let text = if tag == "panel.file" {
+                        value["text"].as_str().unwrap_or("").to_string()
+                    } else {
+                        let decode = |key: &str| {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(value[key].as_str().unwrap_or(""))
+                                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                                .unwrap_or_default()
+                        };
+                        format!("{}{}", decode("stdout"), decode("stderr"))
+                    };
+                    self.reader = Some(Reader {
+                        title: "Workspace".into(),
+                        lines: text.lines().map(str::to_string).collect(),
+                        scroll: 0,
+                        complete: !value["truncated"].as_bool().unwrap_or(false),
+                        how: "workspace".into(),
+                    });
+                    self.dirty = true;
+                }
+                Err(error) => self.note = error.message,
+            },
             "machines" => match result {
                 Ok(value) => {
                     self.machines = parse_machines(&value);
@@ -5076,7 +5634,12 @@ impl App {
                 }
                 Err(error) => self.note = format!("kill failed: {}", error.message),
             },
-            _ => {}
+            _ => {
+                if let Err(error) = result {
+                    self.note = format!("{tag}: {}", error.message);
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -5099,6 +5662,8 @@ impl App {
     }
 
     fn mark_layout(&mut self) {
+        self.assign_origins();
+        self.shared_dirty = true;
         self.layout_dirty = true;
         self.layout_since = Some(Instant::now());
         self.dirty = true;
@@ -5110,7 +5675,13 @@ impl App {
             panes.insert(
                 id.to_string(),
                 SavedPane {
-                    terminal: pane.terminal.clone(),
+                    origin: pane.origin.clone(),
+                    module: pane.module.clone(),
+                    terminal: self
+                        .shown_original
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| pane.terminal.clone()),
                     name: pane.name.clone(),
                 },
             );
@@ -5122,6 +5693,9 @@ impl App {
                 .workspaces
                 .iter()
                 .map(|workspace| SavedWorkspace {
+                    origin: workspace.origin.clone(),
+                    machine: workspace.machine.clone(),
+                    folder: workspace.folder.clone(),
                     id: workspace.id,
                     label: workspace.label.clone(),
                     active_tab: workspace.active,
@@ -5129,6 +5703,8 @@ impl App {
                         .tabs
                         .iter()
                         .map(|tab| SavedTab {
+                            origin: tab.origin.clone(),
+                            settled: tab.settled,
                             id: tab.id,
                             label: tab.label.clone(),
                             focus: tab.focus,
@@ -5143,95 +5719,173 @@ impl App {
         }
     }
 
-    /// 恢复布局：Pane 重新编号，终端地址照旧，界面尺寸交给 reconcile。
+    /// Reconcile saved structure while retaining unchanged VT views and attach streams.
     fn restore(&mut self, state: SavedState) {
-        for pane in self.panes.keys().copied().collect::<Vec<_>>() {
-            self.send(Command::Close { pane });
+        let mut previous = std::mem::take(&mut self.panes);
+        let old_workspaces = std::mem::take(&mut self.workspaces);
+        let mut mapping = BTreeMap::new();
+        let mut ids = std::collections::HashSet::new();
+        for workspace in &state.workspaces {
+            for tab in &workspace.tabs {
+                ids.extend(tab.tree.panes());
+                ids.extend(tab.floating.iter().map(|f| f.pane));
+            }
         }
-        self.panes.clear();
-        self.workspaces.clear();
-        self.zoom = false;
-        self.copy = None;
-
-        let mut mapping: BTreeMap<u32, u32> = BTreeMap::new();
-        let mut counter = 0u32;
+        for original in ids {
+            let saved = state.panes.get(&original.to_string());
+            let matched = saved.and_then(|saved| {
+                previous
+                    .iter()
+                    .find(|(_, pane)| saved.origin.is_some() && pane.origin == saved.origin)
+                    .or_else(|| {
+                        previous.iter().find(|(id, pane)| {
+                            let owned = self
+                                .shown_original
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| pane.terminal.clone());
+                            saved.terminal.is_some() && owned == saved.terminal
+                        })
+                    })
+                    .map(|(id, _)| *id)
+            });
+            let id = matched.unwrap_or_else(|| self.alloc_pane());
+            mapping.insert(original, id);
+            let old = matched.and_then(|id| previous.remove(&id));
+            let compatible = old.as_ref().is_some_and(|pane| {
+                saved.is_some_and(|saved| {
+                    let owned = self
+                        .shown_original
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| pane.terminal.clone());
+                    owned == saved.terminal && pane.module == saved.module
+                })
+            });
+            if compatible {
+                self.panes.insert(id, old.unwrap());
+            } else {
+                if old.is_some() {
+                    self.send(Command::Close { pane: id });
+                    self.shown_original.remove(&id);
+                    self.panel_refresh.remove(&id);
+                }
+                self.spawn_pane(id);
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.terminal = saved.and_then(|p| p.terminal.clone());
+                    pane.module = saved.and_then(|p| p.module.clone());
+                }
+            }
+            if let Some(pane) = self.panes.get_mut(&id) {
+                pane.origin = saved.and_then(|p| p.origin.clone());
+                pane.name = saved.and_then(|p| p.name.clone());
+            }
+        }
+        fn remap(node: &mut SavedNode, mapping: &BTreeMap<u32, u32>) {
+            match node {
+                SavedNode::Leaf { pane } => *pane = mapping[pane],
+                SavedNode::Split { first, second, .. } => {
+                    remap(first, mapping);
+                    remap(second, mapping);
+                }
+                SavedNode::Stack { panes, .. } => {
+                    for pane in panes {
+                        *pane = mapping[pane];
+                    }
+                }
+            }
+        }
         for saved in &state.workspaces {
-            let workspace_id = self.alloc_workspace();
+            let id = old_workspaces
+                .iter()
+                .find(|w| w.origin.is_some() && w.origin == saved.origin)
+                .map(|w| w.id)
+                .unwrap_or_else(|| self.alloc_workspace());
             let mut workspace = Workspace {
-                id: workspace_id,
+                origin: saved.origin.clone(),
+                machine: saved.machine.clone(),
+                folder: saved.folder.clone(),
+                id,
                 label: saved.label.clone(),
                 tabs: Vec::new(),
                 active: saved.active_tab,
             };
             for saved_tab in &saved.tabs {
                 let mut node = saved_tab.tree.clone();
-                renumber_node(&mut node, &mut mapping, &mut counter);
+                remap(&mut node, &mapping);
                 if node.panes().is_empty() {
                     continue;
-                }
-                let tree: SplitNode = (&node).into();
-                let tab_id = self.alloc_tab();
-                let mut floating = Vec::with_capacity(saved_tab.floating.len());
-                for entry in &saved_tab.floating {
-                    let fresh = counter;
-                    counter += 1;
-                    mapping.insert(entry.pane, fresh);
-                    floating.push(FloatingPane {
-                        pane: fresh,
-                        ..entry.clone()
-                    });
                 }
                 let focus = mapping
                     .get(&saved_tab.focus)
                     .copied()
-                    .or_else(|| tree.panes().first().map(|pane| pane.0))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| node.panes()[0]);
+                let mut tree: SplitNode = (&node).into();
+                tree.activate_in_stack(PaneId(focus));
+                let id = old_workspaces
+                    .iter()
+                    .flat_map(|w| &w.tabs)
+                    .find(|t| t.origin.is_some() && t.origin == saved_tab.origin)
+                    .map(|t| t.id)
+                    .unwrap_or_else(|| self.alloc_tab());
+                let floating = saved_tab
+                    .floating
+                    .iter()
+                    .map(|f| FloatingPane {
+                        pane: mapping[&f.pane],
+                        ..f.clone()
+                    })
+                    .collect();
                 workspace.tabs.push(Tab {
-                    id: tab_id,
+                    origin: saved_tab.origin.clone(),
+                    settled: saved_tab.settled,
+                    id,
                     label: saved_tab.label.clone(),
                     tree,
                     focus,
                     floating,
                     layout: saved_tab.layout,
                 });
-                for original in saved_tab
-                    .tree
-                    .panes()
-                    .into_iter()
-                    .chain(saved_tab.floating.iter().map(|entry| entry.pane))
-                {
-                    let Some(fresh) = mapping.get(&original).copied() else {
-                        continue;
-                    };
-                    let saved_pane = state.panes.get(&original.to_string());
-                    self.spawn_pane(fresh);
-                    if let Some(pane) = self.panes.get_mut(&fresh) {
-                        pane.terminal = saved_pane.and_then(|pane| pane.terminal.clone());
-                        pane.name = saved_pane.and_then(|pane| pane.name.clone());
-                    }
-                }
             }
-            if workspace.tabs.is_empty() {
-                continue;
+            if !workspace.tabs.is_empty() {
+                workspace.active = workspace.active.min(workspace.tabs.len() - 1);
+                self.workspaces.push(workspace);
             }
-            if workspace.active >= workspace.tabs.len() {
-                workspace.active = workspace.tabs.len() - 1;
-            }
-            if workspace.label.is_empty() {
-                let cwd = std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned());
-                workspace.label = dir_label(cwd, format!("w{}", workspace.id));
-            }
-            self.workspaces.push(workspace);
         }
-        if self.workspaces.is_empty() {
-            return;
+        if let Some(popup) = self.popup {
+            if let Some(pane) = previous.remove(&popup.pane) {
+                self.panes.insert(popup.pane, pane);
+            }
         }
-        self.next_pane = self.next_pane.max(counter);
-        self.active_ws = state.active_workspace.min(self.workspaces.len() - 1);
+        for id in previous.keys() {
+            self.send(Command::Close { pane: *id });
+        }
+        self.shown_original
+            .retain(|id, _| self.panes.contains_key(id));
+        self.panel_refresh
+            .retain(|id, _| self.panes.contains_key(id));
+        self.initial_tasks
+            .retain(|id, _| self.panes.contains_key(id));
+        if self
+            .copy
+            .as_ref()
+            .is_some_and(|copy| !self.panes.contains_key(&copy.pane))
+        {
+            self.copy = None;
+        }
+        if self
+            .popup
+            .is_some_and(|popup| !self.panes.contains_key(&popup.pane))
+        {
+            self.popup = None;
+        }
+        self.active_ws = state
+            .active_workspace
+            .min(self.workspaces.len().saturating_sub(1));
+        self.sync_terminals();
         self.layout_dirty = false;
         self.layout_since = None;
+        self.dirty = true;
     }
 
     /// 用终端列表补齐 Pane 上还没从事件里拿到的名字。
@@ -5248,19 +5902,37 @@ impl App {
             else {
                 continue;
             };
-            if pane.title.is_empty() && !terminal.title.is_empty() {
+            if (pane.title.is_empty() || pane.title == terminal.address)
+                && !terminal.title.is_empty()
+            {
                 pane.title = terminal.title.clone();
+            }
+            if pane.title == terminal.address {
+                pane.title.clear();
             }
             if pane.name.is_none() {
                 pane.name = terminal.name.clone();
             }
-            if pane.agent.status.is_none() {
-                pane.agent.set_status(terminal.status.clone());
-            }
+            pane.cwd = terminal.cwd.clone();
+            pane.foreground = terminal.program.clone();
+            pane.agent_session = terminal.session.clone();
+            pane.agent.set_status(terminal.status.clone());
+            pane.agent.observe_turn(terminal.turn);
+            pane.agent.seen_turn = pane
+                .agent
+                .seen_turn
+                .max(terminal.seen_turn)
+                .max(self.seen.get(&terminal.address).copied().unwrap_or(0));
         }
     }
 
     fn apply_event(&mut self, event: TerminalEvent) {
+        if event.kind.starts_with("machine")
+            && self.config.restore
+            && !self.inflight.contains_key("machines.sync")
+        {
+            self.call_rpc("machines.sync", "machine.list", json!({}));
+        }
         if event.seq > self.events_seen {
             self.events_seen = event.seq;
         }
@@ -5297,20 +5969,71 @@ impl App {
                     .unwrap_or_default()
                     .to_string();
                 self.update_terminal(target.as_deref(), |terminal| terminal.title = title.clone());
-                if let Some(pane) = target
+                for pane in target
                     .as_deref()
-                    .and_then(|terminal| self.pane_by_terminal(terminal))
+                    .map(|terminal| {
+                        self.panes
+                            .iter()
+                            .filter(|(_, p)| p.terminal.as_deref() == Some(terminal))
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
                 {
                     if let Some(state) = self.panes.get_mut(&pane) {
-                        state.title = title;
+                        state.title = title.clone();
                     }
                 }
                 self.dirty = true;
             }
             "labels" => {
-                if let Some(pane) = target
+                if let Some(labels) = event.data.get("labels") {
+                    self.update_terminal(target.as_deref(), |terminal| {
+                        terminal.space_id = labels
+                            .get("herdr.space")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        terminal.tab_id = labels
+                            .get("herdr.tab")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        terminal.name = labels
+                            .get("hctui")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                        terminal.space = labels.get("where").and_then(Value::as_str).map(|s| {
+                            s.rsplit_once(" / ")
+                                .map(|(space, _)| space)
+                                .unwrap_or(s)
+                                .to_string()
+                        });
+                        terminal.seen_turn = labels
+                            .get("herdr.seen")
+                            .and_then(Value::as_str)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        terminal.pinned = labels
+                            .get("herdr.pinned")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty() && s != "false" && s != "0");
+                        terminal.session = labels
+                            .get("session")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    });
+                }
+                self.dirty = true;
+                for pane in target
                     .as_deref()
-                    .and_then(|terminal| self.pane_by_terminal(terminal))
+                    .map(|terminal| {
+                        self.panes
+                            .iter()
+                            .filter(|(_, p)| p.terminal.as_deref() == Some(terminal))
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
                 {
                     let label = |key: &str| {
                         event
@@ -5327,13 +6050,32 @@ impl App {
                         state.name = name;
                         state.agent_session = session;
                     }
+                    self.sync_terminals();
                     self.dirty = true;
                 }
             }
             "foreground" => {
-                if let Some(pane) = target
+                self.update_terminal(target.as_deref(), |terminal| {
+                    terminal.program = event
+                        .data
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Some(cwd) = event.data.get("cwd").and_then(Value::as_str) {
+                        terminal.cwd = Some(cwd.to_string());
+                    }
+                });
+                self.dirty = true;
+                for pane in target
                     .as_deref()
-                    .and_then(|terminal| self.pane_by_terminal(terminal))
+                    .map(|terminal| {
+                        self.panes
+                            .iter()
+                            .filter(|(_, p)| p.terminal.as_deref() == Some(terminal))
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
                 {
                     let program = event
                         .data
@@ -5365,9 +6107,16 @@ impl App {
                 self.update_terminal(target.as_deref(), |terminal| {
                     terminal.status = status.clone()
                 });
-                if let Some(pane) = target
+                for pane in target
                     .as_deref()
-                    .and_then(|terminal| self.pane_by_terminal(terminal))
+                    .map(|terminal| {
+                        self.panes
+                            .iter()
+                            .filter(|(_, p)| p.terminal.as_deref() == Some(terminal))
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
                 {
                     let before = self
                         .panes
@@ -5375,7 +6124,7 @@ impl App {
                         .map(|state| state.agent.badge())
                         .unwrap_or(Badge::None);
                     if let Some(state) = self.panes.get_mut(&pane) {
-                        state.agent.set_status(status);
+                        state.agent.set_status(status.clone());
                     }
                     self.notify_attention(pane, before);
                 }
@@ -5383,9 +6132,17 @@ impl App {
             }
             "turn" => {
                 let turn = event.data.get("turn").and_then(Value::as_u64).unwrap_or(0);
-                if let Some(pane) = target
+                self.update_terminal(target.as_deref(), |terminal| terminal.turn = turn);
+                for pane in target
                     .as_deref()
-                    .and_then(|terminal| self.pane_by_terminal(terminal))
+                    .map(|terminal| {
+                        self.panes
+                            .iter()
+                            .filter(|(_, p)| p.terminal.as_deref() == Some(terminal))
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
                 {
                     let before = self
                         .panes
@@ -5425,6 +6182,24 @@ impl App {
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                if name == crate::shared::DOCUMENT && self.config.restore {
+                    let machine = event
+                        .data
+                        .get("on")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    self.request_shared(&machine);
+                    let machines: Vec<_> = self
+                        .shared_docs
+                        .keys()
+                        .filter(|m| *m != &machine)
+                        .cloned()
+                        .collect();
+                    for machine in machines {
+                        self.request_shared(&machine);
+                    }
+                }
                 if name == DOC_NAME && self.doc_loaded {
                     self.request_doc("doc.remote");
                 }
@@ -5446,6 +6221,9 @@ impl App {
             .unwrap_or(Badge::None);
         if after == before || !matches!(after, Badge::Blocked | Badge::Done) {
             return;
+        }
+        if let Some((wi, ti)) = self.locate(pane) {
+            self.workspaces[wi].tabs[ti].settled = false;
         }
         if self.is_visible(pane) {
             self.mark_seen(pane);
@@ -5527,6 +6305,154 @@ impl App {
         rows
     }
 
+    /// 同一份分组列表供侧栏和窄屏使用，外部终端无需 attach 就能展示。
+    pub fn navigation_rows(&self) -> Vec<NavigationRow> {
+        let mut entries = Vec::new();
+        for (id, pane) in &self.panes {
+            if pane.transient || pane.module.is_some() {
+                continue;
+            }
+            let terminal = self
+                .terminals
+                .iter()
+                .find(|t| Some(t.address.as_str()) == pane.terminal.as_deref());
+            let machine = terminal.map(|t| t.machine()).unwrap_or("local");
+            let mut group = terminal
+                .filter(|t| t.space.is_some())
+                .map(|t| t.group())
+                .or_else(|| {
+                    self.locate(*id)
+                        .map(|(ws, _)| format!("{machine} / {}", self.workspace_label(ws)))
+                })
+                .unwrap_or_else(|| format!("{machine} / Other terminals"));
+            let detail = self
+                .locate(*id)
+                .and_then(|(ws, tab)| self.workspaces.get(ws)?.tabs.get(tab))
+                .filter(|tab| {
+                    !tab.label.is_empty() && !tab.label.chars().all(|c| c.is_ascii_digit())
+                })
+                .map(|tab| tab.label.clone())
+                .unwrap_or_else(|| pane.label());
+            let badge = if self.focused() == *id
+                && self.held_done.as_ref().is_some_and(|(address, turn)| {
+                    pane.terminal.as_ref() == Some(address)
+                        && pane.agent.turn == *turn
+                        && matches!(pane.agent.status.as_deref(), Some("idle" | "done"))
+                }) {
+                Badge::Done
+            } else {
+                pane.agent.badge()
+            };
+            let pinned = terminal.is_some_and(|t| t.pinned);
+            let label = if pinned || self.config.agent_sort == AgentSort::Priority {
+                format!("{group} · {detail}")
+            } else {
+                detail
+            };
+            if pinned {
+                group = "Pinned".to_string();
+            } else if self.config.agent_sort == AgentSort::Priority {
+                group = attention_section(badge).to_string();
+            }
+            let group_id = if group == "Pinned" {
+                "pinned".to_string()
+            } else if self.config.agent_sort == AgentSort::Priority {
+                format!("priority:{group}")
+            } else {
+                self.locate(*id)
+                    .map(|(ws, _)| {
+                        self.workspaces[ws]
+                            .origin
+                            .clone()
+                            .unwrap_or_else(|| format!("space:{}", self.workspaces[ws].id))
+                    })
+                    .unwrap_or_else(|| group.clone())
+            };
+            entries.push(NavigationRow {
+                group,
+                group_id,
+                pane: Some(*id),
+                terminal: pane.terminal.clone(),
+                badge,
+                label,
+            });
+        }
+        for terminal in self.terminals_without_pane().into_iter().filter(|t| t.live) {
+            let mut agent = crate::model::Agent::default();
+            agent.set_status(terminal.status.clone());
+            agent.observe_turn(terminal.turn);
+            agent.seen_turn = terminal
+                .seen_turn
+                .max(self.seen.get(&terminal.address).copied().unwrap_or(0));
+            let badge = agent.badge();
+            let full = terminal.pinned || self.config.agent_sort == AgentSort::Priority;
+            let label = if full {
+                format!("{} · {}", terminal.group(), terminal.label())
+            } else {
+                terminal.label().to_string()
+            };
+            let group = if terminal.pinned {
+                "Pinned".to_string()
+            } else if self.config.agent_sort == AgentSort::Priority {
+                attention_section(badge).to_string()
+            } else {
+                terminal.group()
+            };
+            let group_id = if terminal.pinned {
+                "pinned".to_string()
+            } else if self.config.agent_sort == AgentSort::Priority {
+                format!("priority:{group}")
+            } else {
+                terminal
+                    .space_id
+                    .as_ref()
+                    .map(|id| {
+                        if terminal.machine() == "local" {
+                            id.clone()
+                        } else {
+                            format!("{}/{id}", terminal.machine())
+                        }
+                    })
+                    .unwrap_or_else(|| group.clone())
+            };
+            entries.push(NavigationRow {
+                group,
+                group_id,
+                pane: None,
+                terminal: Some(terminal.address.clone()),
+                badge,
+                label,
+            });
+        }
+        entries.sort_by(|a, b| {
+            let pin = (a.group != "Pinned").cmp(&(b.group != "Pinned"));
+            if pin != std::cmp::Ordering::Equal {
+                return pin;
+            }
+            if self.config.agent_sort == AgentSort::Priority {
+                a.badge
+                    .cmp(&b.badge)
+                    .then(a.group.cmp(&b.group))
+                    .then(a.group_id.cmp(&b.group_id))
+                    .then(a.terminal.cmp(&b.terminal))
+                    .then(a.pane.cmp(&b.pane))
+            } else {
+                a.group
+                    .cmp(&b.group)
+                    .then(a.group_id.cmp(&b.group_id))
+                    .then(a.badge.cmp(&b.badge))
+                    .then(a.terminal.cmp(&b.terminal))
+                    .then(a.pane.cmp(&b.pane))
+            }
+        });
+        agent_tree::arrange(
+            entries,
+            &self.terminals,
+            &self.folded_agent_groups,
+            self.config.agent_sort == AgentSort::Priority,
+        )
+    }
+
     /// 一个工作区里有多少待处理 Agent。
     pub fn attention_count(&self, workspace: usize) -> usize {
         self.workspaces
@@ -5555,6 +6481,15 @@ impl App {
         if let Some(net) = self.net.as_ref() {
             net.send(command);
         }
+    }
+}
+
+fn attention_section(badge: Badge) -> &'static str {
+    match badge {
+        Badge::Blocked | Badge::Error => "Needs you",
+        Badge::Done => "Done",
+        Badge::Working => "Working",
+        _ => "Idle",
     }
 }
 
@@ -5838,6 +6773,17 @@ pub fn run(config: Config) -> Result<()> {
     let mut terminal = tui::init_with(mouse)?;
     let _guard = tui::Guard;
     let mut app = App::new(config)?;
+    let _control_server = match crate::control::Server::start(&app.config) {
+        Ok((server, receiver)) => {
+            app.control = Some(receiver);
+            Some(server)
+        }
+        Err(error) => {
+            app.note = format!("Command socket: {error}");
+            None
+        }
+    };
+    let mut graphics = crate::term::graphics::Graphics::default();
     let mut next_draw = Instant::now();
     let mut title = String::new();
 
@@ -5863,6 +6809,7 @@ pub fn run(config: Config) -> Result<()> {
 
         if app.take_dirty() || Instant::now() >= next_draw {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            graphics.draw(&mut app, &mut std::io::stdout())?;
             next_draw = Instant::now() + frame;
             if let Some(next) = app.window_title() {
                 if next != title {
@@ -5876,6 +6823,24 @@ pub fn run(config: Config) -> Result<()> {
         app.reconcile();
 
         if app.should_quit() {
+            if app.doc_loaded && app.layout_dirty {
+                app.push_layout();
+            }
+            app.flush_shared();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline
+                && app
+                    .inflight
+                    .keys()
+                    .any(|tag| tag.starts_with("doc.") || tag.starts_with("shared."))
+            {
+                app.pump();
+                app.flush_shared();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if app.seen_dirty {
+                app.save_local_state();
+            }
             break;
         }
     }
@@ -5886,6 +6851,157 @@ pub fn run(config: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offline_app() -> App {
+        let (_, events) = std::sync::mpsc::channel();
+        App::with_network(
+            Config {
+                restore: false,
+                state_path: std::path::PathBuf::from("/nonexistent/hctui-test-state"),
+                ..Config::default()
+            },
+            None,
+            events,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn right_click_on_sidebar_agent_toggles_shared_pin() {
+        let mut app = offline_app();
+        app.terminals =
+            vec![TerminalSummary::parse(&json!({"address": "t9", "title": "Review"})).unwrap()];
+        app.sidebar_area = Rect::new(0, 0, 25, 30);
+        app.terminal_hits
+            .push(("t9".to_string(), Rect::new(0, 8, 24, 1)));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 5,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(mouse);
+        assert!(app.terminals[0].pinned);
+        app.on_mouse(mouse);
+        assert!(!app.terminals[0].pinned);
+    }
+
+    #[test]
+    fn goto_search_keeps_j_and_k_and_selects_fresh_results() {
+        let mut app = offline_app();
+        app.terminals =
+            vec![TerminalSummary::parse(&json!({"address": "t9", "title": "jack"})).unwrap()];
+        app.goto = Some(GotoOverlay {
+            query: String::new(),
+            selected: 0,
+        });
+        for c in "jack".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.goto.as_ref().unwrap().query, "jack");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.focused_pane().unwrap().terminal.as_deref(), Some("t9"));
+    }
+
+    #[test]
+    fn typing_control_key_returns_scrolled_view_to_bottom() {
+        let mut app = offline_app();
+        let id = app.focused();
+        let pane = app.panes.get_mut(&id).unwrap();
+        pane.attached(1, 80, 24);
+        pane.view.write(&b"line\r\n".repeat(100));
+        pane.view.scroll(-20);
+        let before = pane.view.scrollbar().unwrap();
+        assert!(before.1 + before.2 < before.0);
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let after = app.panes[&id].view.scrollbar().unwrap();
+        assert_eq!(after.1 + after.2, after.0);
+    }
+
+    #[test]
+    fn unnamed_workspace_follows_first_pane_directory() {
+        let mut app = offline_app();
+        let id = app.focused();
+        app.panes.get_mut(&id).unwrap().cwd = Some("/repo/backend".to_string());
+        assert_eq!(app.workspace_label(0), "backend");
+        app.workspaces[0].label = "Production".to_string();
+        app.panes.get_mut(&id).unwrap().cwd = Some("/repo/frontend".to_string());
+        assert_eq!(app.workspace_label(0), "Production");
+    }
+
+    #[test]
+    fn external_agent_opens_in_its_space_without_mutating_current_tab() {
+        let mut app = offline_app();
+        let original_ws = app.active_ws;
+        let original_tab = app.tab().unwrap().id;
+        let original_panes = app.tab().unwrap().panes();
+        app.on_net(NetEvent::Snapshot {
+            seq: 1,
+            terminals: vec![TerminalSummary::parse(&json!({
+                "address": "vps/t3", "title": "Review auth", "cwd": "/repo",
+                "labels": {"where": "backend / 1"}, "status": {"state": "working"}
+            }))
+            .unwrap()],
+        });
+        assert!(app
+            .navigation_rows()
+            .iter()
+            .any(|r| r.group == "vps / backend" && r.label == "Review auth"));
+        app.open_terminal("vps/t3");
+        let target = app.focused();
+        assert_ne!(app.active_ws, original_ws);
+        assert_eq!(app.workspace_label(app.active_ws), "backend");
+        assert_eq!(app.new_pane_launch().unwrap().on.as_deref(), Some("vps"));
+        assert_eq!(app.workspaces[original_ws].tabs[0].id, original_tab);
+        assert_eq!(app.workspaces[original_ws].tabs[0].panes(), original_panes);
+        let tabs = app.workspace().unwrap().tabs.len();
+        app.open_terminal("vps/t3");
+        assert_eq!(app.focused(), target);
+        assert_eq!(app.workspace().unwrap().tabs.len(), tabs);
+    }
+
+    #[test]
+    fn shared_seen_and_pinned_labels_apply_before_opening() {
+        let mut app = offline_app();
+        app.terminals = vec![TerminalSummary::parse(&json!({
+            "address": "t3", "title": "Review", "turn": 4, "status": "idle",
+            "labels": {"herdr.seen": "3", "herdr.pinned": "1"}
+        }))
+        .unwrap()];
+        let row = app
+            .navigation_rows()
+            .into_iter()
+            .find(|r| r.terminal.as_deref() == Some("t3"))
+            .unwrap();
+        assert_eq!(row.group, "Pinned");
+        assert_eq!(row.badge, Badge::Done);
+        app.apply_event(TerminalEvent {
+            kind: "labels".to_string(),
+            terminal: Some("t3".to_string()),
+            seq: 2,
+            data: json!({"labels": {"herdr.seen": "4"}}),
+        });
+        let row = app
+            .navigation_rows()
+            .into_iter()
+            .find(|r| r.terminal.as_deref() == Some("t3"))
+            .unwrap();
+        assert_eq!(row.badge, Badge::Idle);
+        assert_ne!(row.group, "Pinned");
+    }
+
+    #[test]
+    fn prefix_release_does_not_consume_next_command() {
+        let mut app = offline_app();
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        let mut release = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        release.kind = KeyEventKind::Release;
+        app.on_key(release);
+        assert!(app.prefix_active());
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(app.help.is_some());
+        assert!(!app.prefix_active());
+    }
 
     #[test]
     fn inner_rect_follows_the_drawn_borders() {
