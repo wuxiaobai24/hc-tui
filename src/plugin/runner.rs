@@ -1,9 +1,13 @@
 //! 插件动作执行：受限子进程、超时与取消、进程组回收、有界输出与并发队列。
 //!
 //! 每条调用在后台线程里启动独立进程，cwd 为插件目录，stdin 一次性写入
-//! 上下文 JSON。stdout/stderr 由独立线程持续读取，内存只保留最近
-//! [`Limits::output`] 字节，磁盘写 [`super::logs`]。超时或取消先向进程组
-//! 发 SIGTERM，2 秒后 SIGKILL；槽位释放后按队列顺序启动下一条。
+//! 上下文 JSON。deadline 从启动阶段开始计时；stdin 写入与两个 reader 都在
+//! 独立线程里，同时受取消与 deadline 管理，父进程不会堵在管道上。
+//!
+//! 收尾覆盖完整生命周期：直接子进程退出后仍会终止进程组里的后代、等管道
+//! 关闭、等 reader 收完，全部完成才公布最终状态。宿主退出走同一条终止路径
+//! （[`Runner::shutdown`]）。超时或取消先向进程组发 SIGTERM，2 秒后 SIGKILL；
+//! 槽位释放后按队列顺序启动下一条。
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
@@ -31,6 +35,10 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
 /// SIGTERM 到 SIGKILL 的宽限。
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// 收尾时等 reader 排空管道的上限。
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// 一次调用允许写入 stdin 的上下文上限。
+pub const MAX_STDIN: usize = 256 * 1024;
 
 /// 并发与输出限制；测试与受限宿主可收窄。
 #[derive(Debug, Clone, Copy)]
@@ -97,7 +105,7 @@ impl Status {
 
 /// 一次调用的输入。
 #[derive(Debug, Clone)]
-pub struct Spec {
+pub struct InvocationSpec {
     /// 包 ID。
     pub package: String,
     /// 动作 ID。
@@ -116,6 +124,8 @@ pub struct Spec {
     pub request: Option<String>,
     /// 代码代际的 pin；排队中与运行中都持有，调用结束后由运行器释放。
     pub pin: Option<GenerationPin>,
+    /// stdin 上下文的字节上限；超过 [`MAX_STDIN`] 时按上限拒绝。
+    pub stdin_limit: usize,
 }
 
 /// 调用快照，供 CLI 与控制通道读取。
@@ -152,6 +162,21 @@ pub enum InvokeError {
     Invalid(String),
 }
 
+/// 关闭失败的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownError {
+    /// deadline 到期仍有调用没结束。
+    Unfinished(usize),
+}
+
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShutdownError::Unfinished(count) => write!(f, "{count} invocations unfinished"),
+        }
+    }
+}
+
 impl std::fmt::Display for InvokeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -162,7 +187,7 @@ impl std::fmt::Display for InvokeError {
 }
 
 struct Invocation {
-    spec: Spec,
+    spec: InvocationSpec,
     status: Status,
     cancel: Arc<AtomicBool>,
     stdout: Arc<Mutex<Vec<u8>>>,
@@ -172,10 +197,14 @@ struct Invocation {
     queued_at: Instant,
     started_at: Option<Instant>,
     finished_at: Option<Instant>,
+    /// 直接子进程的 PID；进程组终止用。
+    pid: Option<u32>,
 }
 
 #[derive(Default)]
 struct State {
+    /// 宿主正在退出：不再启动排队项。
+    shutting_down: bool,
     next: u64,
     invocations: BTreeMap<String, Invocation>,
     queue: VecDeque<String>,
@@ -219,9 +248,18 @@ impl Runner {
     }
 
     /// 提交一条调用；立即运行或排队，队列满返回 [`InvokeError::Busy`]。
-    pub fn invoke(&self, spec: Spec) -> Result<String, InvokeError> {
+    pub fn invoke(&self, spec: InvocationSpec) -> Result<String, InvokeError> {
         if spec.argv.is_empty() {
             return Err(InvokeError::Invalid("argv must not be empty".to_string()));
+        }
+        let stdin_limit = spec.stdin_limit.min(MAX_STDIN);
+        let context_bytes = serde_json::to_vec(&spec.context)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        if context_bytes > stdin_limit {
+            return Err(InvokeError::Invalid(format!(
+                "context is {context_bytes} bytes; the stdin limit is {stdin_limit}"
+            )));
         }
         let mut spec = spec;
         let timeout = spec.timeout.min(MAX_TIMEOUT);
@@ -231,6 +269,11 @@ impl Runner {
             timeout
         };
         let mut state = self.lock();
+        if state.shutting_down {
+            return Err(InvokeError::Invalid(
+                "the runner is shutting down".to_string(),
+            ));
+        }
         state.prune();
         let request = match spec.request.take() {
             Some(request) => {
@@ -259,6 +302,7 @@ impl Runner {
                 queued_at: Instant::now(),
                 started_at: None,
                 finished_at: None,
+                pid: None,
             },
         );
         if can_start(&state, &spec.package, self.limits) {
@@ -355,6 +399,73 @@ impl Runner {
     pub fn queued(&self) -> usize {
         self.lock().queue.len()
     }
+
+    /// 宿主正常退出：取消排队与运行中的调用，终止它们的进程组，等收尾完成。
+    ///
+    /// 与 [`Runner::cancel`] 走同一条终止路径；deadline 到期仍没结束时向进程组
+    /// 补 SIGKILL，返回 [`ShutdownError::Unfinished`]。
+    pub fn shutdown(&self, deadline: Instant) -> Result<(), ShutdownError> {
+        {
+            let mut state = self.lock();
+            state.shutting_down = true;
+            let requests: Vec<String> = state
+                .invocations
+                .iter()
+                .filter(|(_, invocation)| {
+                    matches!(invocation.status, Status::Queued | Status::Running)
+                })
+                .map(|(request, _)| request.clone())
+                .collect();
+            state.queue.clear();
+            let mut released = Vec::new();
+            for request in &requests {
+                let Some(invocation) = state.invocations.get_mut(request) else {
+                    continue;
+                };
+                match invocation.status {
+                    Status::Queued => {
+                        invocation.status = Status::Cancelled;
+                        invocation.finished_at = Some(Instant::now());
+                        invocation.error = Some("cancelled at shutdown".to_string());
+                        released.extend(invocation.spec.pin.clone());
+                    }
+                    Status::Running => invocation.cancel.store(true, Ordering::SeqCst),
+                    _ => {}
+                }
+            }
+            for pin in released {
+                pin.release();
+            }
+        }
+        while self.running() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let leftovers: Vec<u32> = {
+            let state = self.lock();
+            state
+                .invocations
+                .iter()
+                .filter(|(_, invocation)| invocation.status == Status::Running)
+                .filter_map(|(_, invocation)| invocation.pid)
+                .collect()
+        };
+        for pid in leftovers {
+            #[cfg(unix)]
+            kill_group(pid, libc::SIGKILL);
+            #[cfg(not(unix))]
+            let _ = pid;
+        }
+        let grace = Instant::now() + KILL_GRACE;
+        while self.running() > 0 && Instant::now() < grace {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let running = self.running();
+        if running > 0 {
+            Err(ShutdownError::Unfinished(running))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn can_start(state: &State, package: &str, limits: Limits) -> bool {
@@ -384,8 +495,11 @@ fn start_one(
     let shared = shared.clone();
     let root = root.to_path_buf();
     let request = request.to_string();
+    let worker = shared.clone();
     std::thread::spawn(move || {
-        let outcome = execute(&request, &spec, &stdout, &stderr, &cancel, &root, limits);
+        let outcome = execute(
+            &request, &spec, &stdout, &stderr, &cancel, &root, limits, &worker,
+        );
         let mut state = shared.lock().unwrap_or_else(|error| error.into_inner());
         record_result(&mut state, &request, outcome);
         release(&mut state, &request);
@@ -451,15 +565,21 @@ fn release_pin(state: &State, request: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute(
     request: &str,
-    spec: &Spec,
+    spec: &InvocationSpec,
     stdout: &Arc<Mutex<Vec<u8>>>,
     stderr: &Arc<Mutex<Vec<u8>>>,
     cancel: &Arc<AtomicBool>,
     root: &Path,
     limits: Limits,
+    shared: &Arc<Mutex<State>>,
 ) -> Outcome {
+    // deadline 从启动阶段开始算，不是启动完成之后。
+    let started = Instant::now();
+    let deadline = started + spec.timeout;
+    let context = serde_json::to_vec(&spec.context).unwrap_or_else(|_| b"{}".to_vec());
     let mut command = std::process::Command::new(resolve_program(&spec.argv[0], &spec.root));
     command.args(spec.argv.iter().skip(1).collect::<Vec<_>>());
     command.current_dir(&spec.root);
@@ -493,11 +613,25 @@ fn execute(
         }
     };
     let pid = child.id();
-    if let Some(mut stdin) = child.stdin.take() {
-        let text = serde_json::to_vec(&spec.context).unwrap_or_else(|_| b"{}".to_vec());
-        let _ = stdin.write_all(&text);
-        drop(stdin);
+    {
+        let mut state = shared.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(invocation) = state.invocations.get_mut(request) {
+            invocation.pid = Some(pid);
+        }
     }
+
+    // stdin 写入独立线程：父进程不再可能堵在管道上。
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&context);
+            let _ = stdin.flush();
+            drop(stdin);
+        })
+    });
+
+    // reader 完成后回报，收尾以管道真正关闭为准。
+    let (drained, drain_rx) = std::sync::mpsc::channel();
+    let mut readers = 0;
     if let Some(pipe) = child.stdout.take() {
         spawn_reader(
             pipe,
@@ -507,7 +641,9 @@ fn execute(
             request.to_string(),
             "stdout",
             limits.output,
+            drained.clone(),
         );
+        readers += 1;
     }
     if let Some(pipe) = child.stderr.take() {
         spawn_reader(
@@ -518,9 +654,12 @@ fn execute(
             request.to_string(),
             "stderr",
             limits.output,
+            drained.clone(),
         );
+        readers += 1;
     }
-    let deadline = Instant::now() + spec.timeout;
+    drop(drained);
+
     let mut terminal = None;
     let mut exit_code = None;
     loop {
@@ -543,21 +682,18 @@ fn execute(
             terminal = Some(Status::TimedOut);
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
     }
+
+    // 收尾：直接子进程退出后仍要终止进程组里的后代并等管道关闭。
+    terminate_group(pid, &mut child, &mut exit_code);
+    drain(readers, &drain_rx);
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+
     match terminal {
         Some(status) => {
-            kill_group(pid, libc::SIGTERM);
-            let until = Instant::now() + KILL_GRACE;
-            while Instant::now() < until {
-                if let Ok(Some(exited)) = child.try_wait() {
-                    exit_code = exited.code();
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            kill_group(pid, libc::SIGKILL);
-            let _ = child.wait();
             let error = if status == Status::TimedOut {
                 format!("timed out after {:?}", spec.timeout)
             } else {
@@ -587,6 +723,54 @@ fn execute(
     }
 }
 
+/// 终止整个进程组并回收直接子进程；后代可能还持有管道。
+fn terminate_group(pid: u32, child: &mut std::process::Child, exit_code: &mut Option<i32>) {
+    if !group_alive(pid) {
+        let _ = child.wait();
+        return;
+    }
+    #[cfg(unix)]
+    kill_group(pid, libc::SIGTERM);
+    let until = Instant::now() + KILL_GRACE;
+    while Instant::now() < until && group_alive(pid) {
+        if let Ok(Some(exited)) = child.try_wait() {
+            *exit_code = exited.code();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    #[cfg(unix)]
+    kill_group(pid, libc::SIGKILL);
+    if let Ok(Some(exited)) = child.try_wait() {
+        *exit_code = exited.code();
+    }
+    let _ = child.wait();
+}
+
+/// 进程组里是否还有成员；非 Unix 上按已结束处理。
+#[cfg(unix)]
+fn group_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks for existence of the process group.
+    let error = unsafe { libc::kill(-(pid as i32), 0) };
+    error == 0
+}
+
+#[cfg(not(unix))]
+fn group_alive(pid: u32) -> bool {
+    let _ = pid;
+    false
+}
+
+/// 等 reader 排空管道；超过 [`DRAIN_GRACE`] 就不再等。
+fn drain(readers: usize, rx: &std::sync::mpsc::Receiver<()>) {
+    let until = Instant::now() + DRAIN_GRACE;
+    for _ in 0..readers {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+}
+
 fn resolve_program(program: &str, root: &Path) -> PathBuf {
     if let Some(relative) = program.strip_prefix("./") {
         root.join(relative)
@@ -595,6 +779,7 @@ fn resolve_program(program: &str, root: &Path) -> PathBuf {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader(
     mut pipe: impl Read + Send + 'static,
     buffer: Arc<Mutex<Vec<u8>>>,
@@ -603,6 +788,7 @@ fn spawn_reader(
     request: String,
     stream: &'static str,
     limit: usize,
+    drained: std::sync::mpsc::Sender<()>,
 ) {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
@@ -625,6 +811,7 @@ fn spawn_reader(
                 Err(_) => break,
             }
         }
+        let _ = drained.send(());
     });
 }
 
@@ -680,8 +867,8 @@ mod tests {
         std::env::temp_dir().join(format!("hctui-plugin-runner-{tag}-{unique}"))
     }
 
-    fn spec(script: &str, timeout_ms: u64) -> Spec {
-        Spec {
+    fn spec(script: &str, timeout_ms: u64) -> InvocationSpec {
+        InvocationSpec {
             package: "dev.example.probe".to_string(),
             action: "run".to_string(),
             root: std::env::temp_dir(),
@@ -691,6 +878,7 @@ mod tests {
             env: BTreeMap::new(),
             request: None,
             pin: None,
+            stdin_limit: MAX_STDIN,
         }
     }
 
@@ -708,6 +896,7 @@ mod tests {
 
     fn runner(tag: &str, limits: Limits) -> (Runner, PathBuf) {
         let root = unique_dir(tag);
+        std::fs::create_dir_all(&root).unwrap();
         (Runner::with_limits(&root, limits), root)
     }
 
@@ -789,6 +978,120 @@ mod tests {
         assert_eq!(wait(&runner, &next).status, Status::Done);
         assert!(runner.cancel("missing").is_err());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 子进程先大量输出、父进程还在写 stdin 时不得死锁。
+    #[test]
+    fn a_large_context_does_not_deadlock_a_child_that_writes_first() {
+        let (runner, root) = runner("deadlock", Limits::default());
+        let mut stalled = spec("head -c 200000 /dev/zero; sleep 30", 300);
+        stalled.context = serde_json::json!({"padding": "x".repeat(96 * 1024)});
+        let request = runner.invoke(stalled).unwrap();
+        let view = wait(&runner, &request);
+        assert!(
+            matches!(view.status, Status::TimedOut | Status::Cancelled),
+            "{view:?}"
+        );
+        assert_eq!(runner.running(), 0);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 直接子进程退出后仍要收尾后代，收尾完成才公布最终状态。
+    #[test]
+    fn a_normal_exit_does_not_leave_descendants_behind() {
+        let (runner, root) = runner("descendants", Limits::default());
+        let pidfile = root.join("child.pid");
+        let script = format!(
+            "sleep 60 & echo $! > {}; sleep 0.05; exit 0",
+            pidfile.display()
+        );
+        let request = runner.invoke(spec(&script, 5000)).unwrap();
+        let view = wait(&runner, &request);
+        assert_eq!(view.status, Status::Done, "{view:?}");
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("child pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!alive(pid), "descendant {pid} survived a normal exit");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 八个死锁型调用不得永久占满运行槽。
+    #[test]
+    fn stalled_invocations_release_their_slots() {
+        let limits = Limits {
+            global: 8,
+            per_package: 8,
+            queue: 32,
+            output: 1024,
+        };
+        let (runner, root) = runner("slots", limits);
+        let mut requests = Vec::new();
+        for _ in 0..8 {
+            let mut stalled = spec("head -c 200000 /dev/zero; sleep 30", 200);
+            stalled.context = serde_json::json!({"padding": "x".repeat(96 * 1024)});
+            requests.push(runner.invoke(stalled).unwrap());
+        }
+        for request in &requests {
+            let view = wait(&runner, request);
+            assert!(view.status.finished(), "{view:?}");
+        }
+        assert_eq!(runner.running(), 0);
+        let next = runner.invoke(spec("true", 5000)).unwrap();
+        assert_eq!(wait(&runner, &next).status, Status::Done);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 关闭时排队项的 pin 必须释放，否则卸载后的代际永远回收不掉。
+    #[test]
+    fn shutdown_releases_the_pins_of_queued_invocations() {
+        let limits = Limits {
+            global: 1,
+            per_package: 1,
+            queue: 2,
+            output: 1024,
+        };
+        let (runner, root) = runner("shutdown-pins", limits);
+        let config = crate::config::Config {
+            config_path: root.join("config").join("config.toml"),
+            state_path: root.join("state").join("state.json"),
+            ..Default::default()
+        };
+        let generation_dir = root.join("gen");
+        std::fs::create_dir_all(&generation_dir).unwrap();
+        let running = runner.invoke(spec("sleep 30", 60000)).unwrap();
+        let mut queued_spec = spec("true", 5000);
+        queued_spec.pin = Some(
+            super::super::lease::pin(
+                &config,
+                "dev.example.probe",
+                1,
+                &generation_dir,
+                super::super::lease::ResourceOwner::Invocation(
+                    super::super::lease::InvocationOwner {
+                        request: "p2".to_string(),
+                    },
+                ),
+            )
+            .unwrap(),
+        );
+        let queued = runner.invoke(queued_spec).unwrap();
+        assert_eq!(runner.status(&queued).unwrap().status, Status::Queued);
+        runner
+            .shutdown(Instant::now() + Duration::from_secs(10))
+            .unwrap();
+        assert!(
+            super::super::lease::pins(&config, "dev.example.probe").is_empty(),
+            "queued pin survived shutdown"
+        );
+        let _ = runner.status(&running);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
     }
 
     #[test]

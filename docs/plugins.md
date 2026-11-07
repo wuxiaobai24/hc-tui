@@ -91,12 +91,12 @@ requires_programs = ["lazygit"]
 ## 4. 动作执行
 
 - 动作在客户端主机运行：cwd 为插件目录，环境为宿主进程环境加上注入变量。
-- 上下文通过 stdin 传入一个 JSON 文档，读完即关闭 stdin；stdout 与 stderr 作为日志捕获，不作为协议。
+- 上下文通过 stdin 传入一个 JSON 文档，读完即关闭 stdin；上限 256 KiB，超过时在调用入口按 `invalid` 拒绝。stdin 写入、stdout 与 stderr 的读取各在独立线程里，同样受取消与 deadline 约束，父进程不会堵在管道上。stdout 与 stderr 作为日志捕获，不作为协议。
 - 工作区操作通过 `hc exec --on <machine> --cwd <folder>`、`hc-tui do`、`hc-tui read`、`hc-tui ls` 完成；动作进程本身不 chdir 到远端路径。
 - 注入变量：`HCTUI_PLUGIN_ID`、`HCTUI_PLUGIN_ROOT`、`HCTUI_PLUGIN_CONFIG_DIR`、`HCTUI_PLUGIN_STATE_DIR`、`HCTUI_BIN`、`HCTUI_SOCKET`、`HCTUI_SESSION`、`HCTUI_CONFIG`、`HCTUI_CONTEXT_ID`、`HCTUI_HOST_API`。宿主注入的键不会被参数覆盖。
 - 时限：默认 30 秒，`timeout_ms` 上限 600000；到期限发送 SIGTERM，2 秒后 SIGKILL，进程组一并结束。
 - 取消：`hc-tui plugins action cancel <request>` 触发同样的终止流程。
-- 输出：stdout 与 stderr 各保留最近 64 KiB，日志文件按包轮转保留两份各 1 MiB；超出继续读取以免堵塞管道，只在内存与界面显示中截断。
+- 输出：stdout 与 stderr 各保留最近 64 KiB；落盘时单份日志超过 1 MiB 轮转，每个包最多保留 32 个日志文件、总计 8 MiB，超出删最旧的请求日志。超出继续读取以免堵塞管道，只在内存与界面显示中截断。
 - 并发：全局 8 条、单包 4 条；超出排队，队列上限 64 条，满了返回 `busy`。
 - 退出码 0 为成功；非零在界面提示 stderr 末尾若干行，并记录 `failed`。
 
@@ -218,7 +218,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 ## 11. 生命周期与故障
 
 - 注册表在启动时扫描配置目录与 state 中的安装记录；清单无效时保留记录并标记 `broken`，不执行。
-- 动作进程按调用创建与回收；宿主退出时等待运行中的调用完成或超时，终端继续由 core 持有。
+- 动作进程按调用创建与回收；宿主退出走与取消相同的终止路径（取消排队项、SIGTERM 后 SIGKILL 终止进程组、等待收尾，3 秒 deadline），终端继续由 core 持有。
 - 连续三次启动即失败或超时的包标记 `failed`，停止自动重试；`plugins enable` 或下一次显式调用恢复。
 - 崩溃与超时写日志并附告警；进程组、管道与子进程一并回收，阻塞在输出管道上的后代不会拖住完成报告。
 - 卸载或更新不触碰用户的终端与动作日志；只回收代码代际。
@@ -262,7 +262,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 |---|---|
 | `src/plugin/manifest.rs` | 标准 TOML 解析、严格校验、命令描述与参数 schema |
 | `src/plugin/registry.rs` | 安装记录、代际、启用状态、来源与预览 |
-| `src/plugin/runner.rs` | 动作进程、上下文 stdin、超时、取消、进程组回收、有界输出 |
+| `src/plugin/runner.rs` | 动作进程、上下文 stdin、deadline、取消、进程组收尾、`shutdown` 与有界输出 |
 | `src/plugin/logs.rs` | 运行日志、轮转与查询 |
 | `src/plugin/terminal.rs` | 入口规划、placement 映射、包内相对程序规则、目标机器程序探测 |
 | `src/plugin/lease.rs` | 代际的显式 pin、core 终结证据与显式 GC |

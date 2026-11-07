@@ -400,7 +400,7 @@ pub struct App {
     /// 请求 ID 的插入顺序，超过 128 条时丢弃最早的。
     pub plugin_pane_order: Vec<String>,
     /// 等目标机器程序探测返回的入口：请求 ID → 规划。
-    pub plugin_pending: HashMap<String, crate::plugin::terminal::Plan>,
+    pub plugin_pending: HashMap<String, crate::plugin::terminal::PreparedTerminal>,
     /// 终端入口请求编号。
     pub next_plugin_pane: u64,
     /// 上一个进程留下的终端 pin（core 地址）；第一次终端快照时对账。
@@ -6894,10 +6894,13 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
-        // 宿主退出时给运行中的插件调用最多 3 秒完成或超时。
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while self.plugin_runner.running() > 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
+        // 宿主退出走与取消相同的终止路径：取消排队项、终止运行中调用的进程组，
+        // 等收尾完成；3 秒后补 SIGKILL。
+        if let Err(error) = self
+            .plugin_runner
+            .shutdown(Instant::now() + Duration::from_secs(3))
+        {
+            tracing::warn!(%error, "plugin runner did not finish shutting down");
         }
         if let Some(net) = self.net.take() {
             drop(net);
