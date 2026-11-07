@@ -108,6 +108,10 @@ fn usage() {
     );
     println!(
         "{}",
+        t("       hc-tui plugins list|install|link|uninstall|enable|disable|gc ...")
+    );
+    println!(
+        "{}",
         t("       hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>]")
     );
     println!(
@@ -706,8 +710,34 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
             );
             Ok(())
         }
+        "gc" => {
+            // 显式回收：只删没有任何 pin 持有者、也没有记录指向的代际。
+            let reports = hc_tui::plugin::lease::gc_all(
+                &config,
+                &hc_tui::plugin::lease::RetentionEvidence::default(),
+            );
+            if json {
+                let entries: Vec<serde_json::Value> = reports
+                    .iter()
+                    .map(|(package, report)| {
+                        serde_json::json!({
+                            "package": package,
+                            "generations": report.generations,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if reports.is_empty() {
+                println!("{}", t("no generations to reclaim"));
+            } else {
+                for (package, report) in reports {
+                    println!("{package}: {}", report.generations.len());
+                }
+            }
+            Ok(())
+        }
         other => anyhow::bail!(t1(
-            "usage: hc-tui plugins list|install|link|uninstall|enable|disable (unknown: {})",
+            "usage: hc-tui plugins list|install|link|uninstall|enable|disable|gc (unknown: {})",
             other
         )),
     }

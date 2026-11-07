@@ -403,6 +403,8 @@ pub struct App {
     pub plugin_pending: HashMap<String, crate::plugin::terminal::Plan>,
     /// 终端入口请求编号。
     pub next_plugin_pane: u64,
+    /// 上一个进程留下的终端 pin（core 地址）；第一次终端快照时对账。
+    pub plugin_startup_pins: Vec<String>,
     /// 有待发的 `state.changed`。
     pub mods_dirty: bool,
     /// 模块通过 `setAgentOrder` 设定的 agent 顺序（按终端地址）。
@@ -576,6 +578,7 @@ impl App {
             plugin_pane_order: Vec::new(),
             plugin_pending: HashMap::new(),
             next_plugin_pane: 0,
+            plugin_startup_pins: Vec::new(),
             mod_revision: 0,
             mod_wake: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mod_chrome_sync: None,
@@ -679,6 +682,11 @@ impl App {
         app.load_local_state();
         app.plugins = crate::plugin::registry::Registry::load(&app.config);
         app.plugin_runner = crate::plugin::runner::Runner::new(app.config.plugins_state_dir());
+        app.plugin_startup_pins = app
+            .plugin_terminals_on_disk()
+            .into_iter()
+            .filter(|address| !address.starts_with("pending/"))
+            .collect();
         crate::mods::store::apply_enabled(&app.config, &mut app.mods);
         for record in crate::store::Store::open(app.config.mods_state_dir()).list() {
             let grants = crate::mods::store::load_grants(&app.config, &record.id);
@@ -5405,6 +5413,12 @@ impl App {
                 self.dirty = true;
             }
             NetEvent::Snapshot { seq, terminals } => {
+                let live: std::collections::BTreeSet<String> = terminals
+                    .iter()
+                    .filter(|terminal| terminal.live)
+                    .map(|terminal| self.terminal_address(&terminal.address).key())
+                    .collect();
+                self.reconcile_plugin_pins(&live);
                 self.terminals = terminals;
                 self.events_seen = seq;
                 self.sync_terminals();
@@ -5494,6 +5508,11 @@ impl App {
                         address.as_deref(),
                         json!({"reason": reason}),
                     );
+                    // 程序结束是 core 侧事实：终结证据。拿不到地址时至少释放占位 pin。
+                    match address.as_deref() {
+                        Some(address) => self.plugin_terminal_ended(address),
+                        None => self.release_pending_plugin_pin(pane),
+                    }
                 }
                 // 插件终端还没拿到地址就断开：请求直接失败，不让状态停在 opening。
                 if let Some(terminal) = self.plugin_terminals.get(&pane) {
@@ -6496,6 +6515,8 @@ impl App {
             "finished" | "removed" | "lost" => {
                 if let Some(target) = target.as_deref() {
                     self.update_terminal(Some(target), |terminal| terminal.live = false);
+                    // core 说这条终端结束了：这是释放它代际 pin 的唯一自动证据。
+                    self.plugin_terminal_ended(target);
                 }
                 self.publish_event(
                     "terminal.finished",

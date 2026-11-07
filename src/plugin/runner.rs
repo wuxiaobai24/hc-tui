@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::logs;
+use super::lease::GenerationPin;
 
 /// 全局同时运行上限。
 pub const DEFAULT_GLOBAL: usize = 8;
@@ -113,6 +114,8 @@ pub struct Spec {
     pub env: BTreeMap<String, String>,
     /// 宿主预先分配的请求 ID；`None` 时由运行器分配。
     pub request: Option<String>,
+    /// 代码代际的 pin；排队中与运行中都持有，调用结束后由运行器释放。
+    pub pin: Option<GenerationPin>,
 }
 
 /// 调用快照，供 CLI 与控制通道读取。
@@ -261,6 +264,7 @@ impl Runner {
         if can_start(&state, &spec.package, self.limits) {
             start_one(&self.state, &mut state, &request, &self.root, self.limits);
         } else if state.queue.len() >= self.limits.queue {
+            release_pin(&state, &request);
             state.invocations.remove(&request);
             return Err(InvokeError::Busy);
         } else {
@@ -303,11 +307,15 @@ impl Runner {
         };
         match invocation.status {
             Status::Queued => {
+                let pin = invocation.spec.pin.clone();
                 invocation.status = Status::Cancelled;
                 invocation.finished_at = Some(Instant::now());
                 invocation.error = Some("cancelled before start".to_string());
                 state.queue.retain(|queued| queued != request);
                 state.finished.push_back(request.to_string());
+                if let Some(pin) = pin {
+                    pin.release();
+                }
                 Ok(())
             }
             Status::Running => {
@@ -411,8 +419,7 @@ struct Outcome {
     exit_code: Option<i32>,
 }
 
-fn record_result(state: &mut State, request: &str, outcome: Outcome) {
-    if let Some(invocation) = state.invocations.get_mut(request) {
+fn record_result(state: &mut State, request: &str, outcome: Outcome) {    if let Some(invocation) = state.invocations.get_mut(request) {
         invocation.status = outcome.status;
         invocation.error = outcome.error;
         invocation.exit_code = outcome.exit_code;
@@ -425,6 +432,7 @@ fn release(state: &mut State, request: &str) {
         .invocations
         .get(request)
         .map(|invocation| invocation.spec.package.clone());
+    release_pin(state, request);
     state.running = state.running.saturating_sub(1);
     if let Some(package) = package {
         if let Some(count) = state.per_package.get_mut(&package) {
@@ -432,6 +440,15 @@ fn release(state: &mut State, request: &str) {
         }
     }
     state.finished.push_back(request.to_string());
+}
+
+/// 释放一条调用持有的代码 pin；调用结束后代际才能被回收。
+fn release_pin(state: &State, request: &str) {
+    if let Some(invocation) = state.invocations.get(request) {
+        if let Some(pin) = invocation.spec.pin.as_ref() {
+            pin.release();
+        }
+    }
 }
 
 fn execute(
@@ -673,6 +690,7 @@ mod tests {
             context: serde_json::json!({"api_version": 1}),
             env: BTreeMap::new(),
             request: None,
+            pin: None,
         }
     }
 

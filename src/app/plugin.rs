@@ -12,6 +12,7 @@ use crate::config::Span;
 use crate::i18n::{t, t1, t2};
 use crate::layout::split::Axis;
 use crate::model::{Launch, Tab};
+use crate::plugin::lease::{self, GenerationPin, ResourceOwner, RetentionEvidence, TerminalAddress};
 use crate::plugin::manifest;
 use crate::plugin::registry::{ActionInfo, Registry};
 use crate::plugin::runner::{InvokeError, Spec};
@@ -31,8 +32,8 @@ pub struct PluginTerminal {
     pub root: PathBuf,
     pub machine: Option<String>,
     pub placement: String,
-    /// 代际引用的键：`<name>#<pane>`。
-    pub lease: String,
+    /// 代际的 pin；Pane 关闭不释放，只有 core 报告终端结束才释放。
+    pub pin: Option<GenerationPin>,
 }
 
 /// 一次终端入口请求的进展。
@@ -94,6 +95,16 @@ impl App {
             None => args,
         };
         let request = self.plugin_runner.allocate_request();
+        let pin = lease::pin(
+            &self.config,
+            &action.package,
+            action.generation,
+            &action.root,
+            ResourceOwner::Invocation(crate::plugin::lease::InvocationOwner {
+                request: request.clone(),
+            }),
+        )
+        .map_err(|error| anyhow::anyhow!(t1("cannot pin plugin generation: {}", error)))?;
         let (target, pane) = self.plugin_target(&action, target_arg);
         let context = self.plugin_context(&action, &request, args, target, pane);
         self.prepare_plugin_dirs(&action);
@@ -107,6 +118,7 @@ impl App {
             context,
             env,
             request: Some(request.clone()),
+            pin: Some(pin),
         };
         match self.plugin_runner.invoke(spec) {
             Ok(request) => {
@@ -117,6 +129,80 @@ impl App {
             }
             Err(InvokeError::Busy) => anyhow::bail!("busy: the plugin queue is full"),
             Err(InvokeError::Invalid(message)) => anyhow::bail!("{message}"),
+        }
+    }
+
+    /// 磁盘上仍被本会话终端 pin 持有的地址（上一个进程留下的）。
+    pub(crate) fn plugin_terminals_on_disk(&self) -> Vec<String> {
+        let session = self.plugin_session();
+        let mut out = Vec::new();
+        for package in lease::packages(&self.config) {
+            for pin in lease::pins(&self.config, &package) {
+                if let ResourceOwner::Terminal(address) = &pin.owner {
+                    // 别的会话的 pin 不参与本会话的终端列表对账。
+                    if address.session != session {
+                        continue;
+                    }
+                    out.push(if address.machine == "local" {
+                        address.address.clone()
+                    } else {
+                        format!("{}/{}", address.machine, address.address)
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// 本实例的 core 会话名；pin 与回收证据都用它作身份。
+    pub(crate) fn plugin_session(&self) -> String {
+        self.config
+            .session
+            .clone()
+            .or_else(|| std::env::var("HC_SESSION").ok())
+            .unwrap_or_default()
+    }
+
+    /// core 报告某条终端结束：释放它的代际 pin，并回收没有持有者的代际。
+    pub fn plugin_terminal_ended(&mut self, address: &str) {
+        let session = self.plugin_session();
+        let mut evidence = RetentionEvidence::default();
+        evidence.ended(&TerminalAddress::from_core(&session, address));
+        let report = lease::gc_all(&self.config, &evidence);
+        let generations: Vec<u64> = report
+            .iter()
+            .flat_map(|(_, report)| report.generations.iter().copied())
+            .collect();
+        if !generations.is_empty() {
+            self.note = t2(
+                "plugin terminal ended; {} generations {} reclaimed",
+                generations.len(),
+                generations
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            self.dirty = true;
+        }
+    }
+
+    /// 上一个进程留下的终端 pin 与 core 的权威终端列表对账：
+    /// 列表里已经不存在的终端才算结束，其余保守保留。
+    pub fn reconcile_plugin_pins(&mut self, live: &std::collections::BTreeSet<String>) {
+        if self.plugin_startup_pins.is_empty() {
+            return;
+        }
+        let session = self.plugin_session();
+        let mut evidence = RetentionEvidence::default();
+        for address in std::mem::take(&mut self.plugin_startup_pins) {
+            let address = TerminalAddress::from_core(&session, &address);
+            if !live.contains(&address.key()) {
+                evidence.ended(&address);
+            }
+        }
+        if !evidence.is_empty() {
+            lease::gc_all(&self.config, &evidence);
         }
     }
 
@@ -640,18 +726,20 @@ impl App {
             root: plan.root.clone(),
             machine: plan.machine.clone(),
             placement: plan.placement.clone(),
-            lease: String::new(),
+            pin: None,
         };
         let pane = self.spawn_plugin_terminal(&terminal, plan)?;
         let mut terminal = terminal;
-        terminal.lease = format!("{}#{pane}", terminal.name);
-        let _ = crate::plugin::lease::acquire(
+        // 地址要等 attach 才知道；先按请求登记，拿到 core 地址后 repin。
+        if let Ok(pin) = lease::pin(
             &self.config,
             &terminal.package,
             terminal.generation,
             &terminal.root,
-            &terminal.lease,
-        );
+            self.pending_owner(request),
+        ) {
+            terminal.pin = Some(pin);
+        }
         self.plugin_terminals.insert(pane, terminal.clone());
         if let Some(record) = self.plugin_panes.get_mut(request) {
             record.pane = Some(pane);
@@ -835,13 +923,56 @@ impl App {
             summary.plugin_terminal = Some(id);
             summary.name = Some(title);
         });
+        // 终端身份从“请求占位”升级为 core 地址；之后只有 core 证据能释放它。
+        let target = ResourceOwner::Terminal(self.terminal_address(address));
+        if let Some(entry) = self.plugin_terminals.get_mut(&pane) {
+            if let Some(pin) = entry.pin.as_ref() {
+                if pin.owner != target {
+                    let from = pin.owner.clone();
+                    if let Ok(pin) = lease::repin(
+                        &self.config,
+                        &entry.package,
+                        entry.generation,
+                        &entry.root,
+                        &from,
+                        target,
+                    ) {
+                        entry.pin = Some(pin);
+                    }
+                }
+            }
+        }
         if let Some(record) = self.plugin_panes.get_mut(&terminal.request) {
             record.terminal = Some(address.to_string());
             record.status = PaneStatus::Opened;
         }
     }
 
-    /// Pane 关闭时释放代际引用；最后一个终端结束后回收已卸载包的代际。
+    /// 按请求 ID 构造 attach 之前的占位终端身份。
+    fn pending_owner(&self, request: &str) -> ResourceOwner {
+        ResourceOwner::Terminal(TerminalAddress {
+            session: self.plugin_session(),
+            machine: "local".to_string(),
+            address: format!("pending/{request}"),
+        })
+    }
+
+    /// core 地址 → 带会话与机器身份的终端地址。
+    pub(crate) fn terminal_address(&self, address: &str) -> TerminalAddress {
+        TerminalAddress::from_core(&self.plugin_session(), address)
+    }
+
+    /// 终端程序还没拿到地址就结束：占位 pin 已经可以释放。
+    pub fn release_pending_plugin_pin(&mut self, pane: u32) {
+        let Some(terminal) = self.plugin_terminals.get(&pane) else {
+            return;
+        };
+        if let Some(pin) = terminal.pin.as_ref() {
+            pin.release();
+        }
+    }
+
+    /// Pane 关闭只断视图，终端 pin 保留到 core 报告结束。
     pub fn release_plugin_terminal(&mut self, pane: u32) {
         let Some(terminal) = self.plugin_terminals.remove(&pane) else {
             return;
@@ -857,22 +988,13 @@ impl App {
                 json!({"reason": "pane_closed"}),
             );
         }
-        if terminal.lease.is_empty() {
+        if terminal.pin.is_none() {
             return;
         }
-        let removed =
-            crate::plugin::lease::release(&self.config, &terminal.package, &terminal.lease);
-        if !removed.is_empty() {
-            self.note = t2(
-                "plugin terminal closed; {} generations {} reclaimed",
-                terminal.package,
-                removed
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
+        self.note = t1(
+            "plugin terminal {} detached; its generation stays until the core ends the terminal",
+            terminal.name,
+        );
     }
 
     fn plugin_where(&self, pane: u32) -> String {
@@ -1047,6 +1169,60 @@ mod tests {
         format!("{id}.ui")
     }
 
+    /// 临时根目录：`<root>/config/config.toml` 的上一级。
+    fn scratch(app: &App) -> PathBuf {
+        app.config
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("config path has two levels")
+            .to_path_buf()
+    }
+
+    /// 写一个安装来源目录；`terminal` 与 `action` 为 argv 数组的 TOML 文本。
+    fn write_source(root: &Path, id: &str, terminal: &str, action: &str) -> PathBuf {
+        let dir = root.join("source").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload.txt"), "payload-v1\n").unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "manifest_version = 1\nid = \"{id}\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\ncontexts = [\"global\", \"pane\"]\nargv = {action}\ntimeout_ms = 20000\n\n[[terminals]]\nid = \"ui\"\ntitle = \"Probe UI\"\nargv = {terminal}\nplacement = \"right\"\n"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn installed_generation(app: &App, id: &str, generation: u64) -> PathBuf {
+        crate::store::Store::open(app.config.plugins_state_dir()).generation_dir(id, generation)
+    }
+
+    fn wait_for_status(app: &App, request: &str) -> crate::plugin::runner::View {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let view = app.plugin_runner.status(request).expect("request exists");
+            if view.status.finished() {
+                return view;
+            }
+            assert!(std::time::Instant::now() < deadline, "{request} stuck");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_file(path: &Path) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "{} never appeared", path.display());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn placements_create_panes_with_injected_environment() {
         for placement in ["tab", "right", "down", "float", "popup", "zoomed"] {
@@ -1073,12 +1249,14 @@ mod tests {
                 app.plugin_panes[&format!("tp{}", app.next_plugin_pane)].placement,
                 placement
             );
-            let lease = app
-                .config
-                .plugins_state_dir()
-                .join("leases")
-                .join(format!("dev.example.term.{}.1.json", std::process::id()));
-            assert!(lease.is_file(), "{placement} lease missing");
+            let pins = crate::plugin::lease::pins(&app.config, "dev.example.term");
+            assert!(
+                pins.iter().any(|pin| matches!(
+                    &pin.owner,
+                    crate::plugin::lease::ResourceOwner::Terminal(_)
+                )),
+                "{placement} terminal pin missing"
+            );
             assert!(app.plugin_terminals.contains_key(&pane));
             if placement == "popup" {
                 assert_eq!(app.popup.map(|popup| popup.pane), Some(pane));
@@ -1090,19 +1268,26 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_pane_releases_the_generation_lease() {
+    fn closing_a_pane_keeps_the_terminal_pin_until_core_ends_the_terminal() {
         let mut app = app();
         app.new_workspace(None);
         let name = install_terminal(&mut app, "dev.example.lease", "right");
         let reply = app.plugin_pane_open(&json!({"name": name}));
         let pane = reply["pane"].as_u64().unwrap() as u32;
-        let lease = crate::plugin::lease::live_generations(&app.config, "dev.example.lease");
-        assert_eq!(lease, vec![1]);
+        assert_eq!(
+            crate::plugin::lease::live_generations(&app.config, "dev.example.lease"),
+            vec![1]
+        );
         app.detach_view_from_layout(pane);
         assert!(!app.plugin_terminals.contains_key(&pane));
-        assert!(
-            crate::plugin::lease::live_generations(&app.config, "dev.example.lease").is_empty()
+        // 关闭视图不是终端结束的证据。
+        assert_eq!(
+            crate::plugin::lease::live_generations(&app.config, "dev.example.lease"),
+            vec![1]
         );
+        // core 说终端结束：pin 才释放。
+        app.plugin_terminal_ended("local/t7");
+        assert!(crate::plugin::lease::pins(&app.config, "dev.example.lease").len() < 2);
     }
 
     #[test]
@@ -1124,6 +1309,131 @@ mod tests {
         let name = install_terminal(&mut app, "dev.example.term", "tab");
         let reply = app.plugin_pane_open(&json!({"name": name, "space": "sp999"}));
         assert_eq!(reply["error_kind"], "target_gone");
+    }
+
+    #[test]
+    fn a_pane_close_does_not_release_the_generation_of_a_running_terminal() {
+        let mut app = app();
+        app.new_workspace(None);
+        let root = scratch(&app);
+        let trigger = root.join("trigger");
+        let out = root.join("out.txt");
+        let script = format!(
+            "#!/bin/sh\nwhile [ ! -f {trigger} ]; do sleep 0.02; done\ncat ./payload.txt > {out}\n",
+            trigger = trigger.display(),
+            out = out.display()
+        );
+        let source = write_source(
+            &root,
+            "dev.example.keep",
+            "[\"./run.sh\"]",
+            "[\"true\"]",
+        );
+        std::fs::write(source.join("run.sh"), script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                source.join("run.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        app.plugins = Registry::load(&app.config);
+        let dir = installed_generation(&app, "dev.example.keep", record.generation);
+        let reply = app.plugin_pane_open(&json!({"name": "dev.example.keep.ui"}));
+        assert_ne!(reply["status"], "failed", "{reply}");
+        let pane = reply["pane"].as_u64().expect("pane opened") as u32;
+
+        // core 里的终端：真实进程，cwd 是代际目录。
+        let mut child = std::process::Command::new(dir.join("run.sh"))
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        // 只断视图，程序继续跑；随后卸载插件。
+        app.release_plugin_terminal(pane);
+        crate::plugin::registry::uninstall(&app.config, "dev.example.keep").unwrap();
+        assert!(
+            dir.is_dir(),
+            "generation removed although the terminal still runs"
+        );
+
+        std::fs::write(&trigger, "go").unwrap();
+        assert_eq!(wait_for_file(&out), "payload-v1\n");
+        let _ = child.wait();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_queued_action_still_runs_after_the_plugin_is_uninstalled() {
+        let mut app = app();
+        let root = scratch(&app);
+        let source = write_source(
+            &root,
+            "dev.example.queue",
+            "[\"true\"]",
+            "[\"sh\", \"-c\", \"sleep 0.5; cat ./payload.txt\"]",
+        );
+        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        app.plugins = Registry::load(&app.config);
+        let dir = installed_generation(&app, "dev.example.queue", record.generation);
+        app.plugin_runner = crate::plugin::runner::Runner::with_limits(
+            app.config.plugins_state_dir(),
+            crate::plugin::runner::Limits {
+                global: 1,
+                per_package: 1,
+                queue: 4,
+                output: 4096,
+            },
+        );
+        app.invoke_plugin("dev.example.queue.run", json!({})).unwrap();
+        let running = app.plugin_request.clone().unwrap();
+        app.invoke_plugin("dev.example.queue.run", json!({})).unwrap();
+        let queued = app.plugin_request.clone().unwrap();
+        assert_eq!(
+            app.plugin_runner.status(&queued).unwrap().status,
+            crate::plugin::runner::Status::Queued
+        );
+
+        crate::plugin::registry::uninstall(&app.config, "dev.example.queue").unwrap();
+
+        let view = wait_for_status(&app, &queued);
+        assert_eq!(view.status, crate::plugin::runner::Status::Done, "{view:?}");
+        assert!(view.stdout.contains("payload-v1"), "{:?}", view.stdout);
+        assert!(dir.is_dir(), "queued action lost its cwd");
+        let _ = wait_for_status(&app, &running);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn uninstalling_during_a_run_keeps_the_action_directory_contents() {
+        let mut app = app();
+        let root = scratch(&app);
+        let source = write_source(
+            &root,
+            "dev.example.live",
+            "[\"true\"]",
+            "[\"sh\", \"-c\", \"sleep 0.5; pwd; cat ./payload.txt\"]",
+        );
+        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        app.plugins = Registry::load(&app.config);
+        let dir = installed_generation(&app, "dev.example.live", record.generation);
+        app.invoke_plugin("dev.example.live.run", json!({})).unwrap();
+        let request = app.plugin_request.clone().unwrap();
+        crate::plugin::registry::uninstall(&app.config, "dev.example.live").unwrap();
+        let view = wait_for_status(&app, &request);
+        assert_eq!(view.status, crate::plugin::runner::Status::Done, "{view:?}");
+        assert!(
+            view.stdout.contains(dir.to_string_lossy().as_ref()),
+            "{:?}",
+            view.stdout
+        );
+        assert!(view.stdout.contains("payload-v1"), "{:?}", view.stdout);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

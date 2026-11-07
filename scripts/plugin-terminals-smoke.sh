@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# M7 插件终端冒烟：远端 placement/cwd/环境/标签、关闭 Pane 不结束程序、detach 后继续运行、
-# 包内相对程序的 unsupported、缺失程序、离线、target_gone，以及卸载保留代际。
+# M7 插件终端冒烟：远端 placement/cwd/环境/标签、关闭 Pane 不结束程序也不释放代际 pin、
+# core 报告终端结束才回收代际、detach 后继续运行、包内相对程序的 unsupported、缺失程序、
+# 离线与 target_gone。
 #
 # 用法：scripts/plugin-terminals-smoke.sh
 # 前置：target/debug/hc-tui、tmux、hc（herdr-core）、jq、ssh 到 localhost 免密。
@@ -139,10 +140,10 @@ else
   echo "ok   installed record is gone"
 fi
 
-step "closing the pane keeps the program running"
+step "closing the pane keeps the program and its generation"
 ui plugins pane close "$GIT_ADDR" >/dev/null
 sleep 0.5
-[ -d "$GEN_DIR" ] && { echo "FAIL generation not reclaimed after the last pane closed"; FAILED=1; } || echo "ok   generation reclaimed after the last pane closed"
+[ -d "$GEN_DIR" ] && echo "ok   generation kept after the pane closed" || { echo "FAIL generation removed while the terminal runs"; FAILED=1; }
 check_json "request reports the closed pane" "$( \
   ui plugins pane status "$GIT_REQ")" '.status == "closed"'
 check "program survives the closed pane" "$(hc get "$GIT_ADDR" --json)" '"state":"live"'
@@ -153,6 +154,11 @@ check_json "focus finds the terminal by plugin label" "$( \
 check_json "close finds the recreated view by label" "$( \
   ui plugins pane close dev.hctui.plugins.git-tools.git-ui)" \
   '.closed == true'
+
+step "core ends the terminal and the generation is reclaimed"
+hc kill "$GIT_ADDR" >/dev/null 2>&1 || true
+sleep 1
+[ -d "$GEN_DIR" ] && { echo "FAIL generation kept after the terminal ended"; FAILED=1; } || echo "ok   generation reclaimed after core reported the terminal ended"
 
 step "package-relative program runs on the client host"
 "$BIN" do space.new '{"name":"m7-local","folder":"/tmp","machine":""}' >/dev/null
@@ -203,7 +209,6 @@ tmux -L "$SOCK" send-keys -t tui C-b q 2>/dev/null || true
 sleep 1
 tmux -L "$SOCK" kill-server 2>/dev/null || true
 sleep 1
-check "git terminal survives detach" "$(hc get "$GIT_ADDR" --json)" '"state":"live"'
 check "review terminal survives detach" "$(hc get "$REVIEW_ADDR" --json)" '"state":"live"'
 
 if [ "$FAILED" -ne 0 ]; then

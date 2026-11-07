@@ -80,7 +80,8 @@ requires_programs = ["lazygit"]
 | 身份 | 含义 | 生命周期 |
 |---|---|---|
 | Package | 已注册的插件：id、版本、来源、代际、启用状态 | 安装到卸载 |
-| Generation | 一次安装的代码目录，`current` 指针指向当前代际 | 创建到最后一个引用释放 |
+| Generation | 一次安装的代码目录，`current` 指针指向当前代际 | 创建到记录不再指向它且没有任何 pin |
+| Pin | 一份显式租约：一次动作调用（排队中也算）或一个带 core/session 身份的终端地址 | 登记到持有者结束；终端只在 core 报告终结时释放 |
 | Invocation | 一次动作运行：请求 id、状态、退出码、日志 | queued → running → done / failed / cancelled / timed_out |
 | Terminal | core 中的真实终端地址 | 按现有 keep / park / kill 契约 |
 | TerminalPane | TUI 中承载终端入口的 Pane | 创建到关闭；关闭不删除终端 |
@@ -132,7 +133,7 @@ requires_programs = ["lazygit"]
 - 注入变量与动作相同；另加 `HCTUI_CONTEXT`（JSON，≤32 KiB，超出时退化成 `{"api_version":1,"truncated":true}`）与 `HCTUI_PLACEMENT`；`HCTUI_CONTEXT_ID` 用完整入口名。大块数据通过文件或 CLI 获取，不塞进环境变量。
 - 终端标签在 attach 成功后写入 `hctui`、`hctui.plugin=<package-id>`、`hctui.terminal=<terminal-id>` 与 `where`；Space 与 Tab 有共享结构来源时同时写 `herdr.space`、`herdr.tab`。`plugins pane focus/close` 先按 Pane 编号与内存登记匹配，再按 core 里的这两条标签定位，所以视图关闭后仍能找回终端。
 - 关闭 Pane 不结束程序，按现有 keep / park 语义；`terminal.kill` 才结束程序与子进程。
-- 打开时为目标代际写引用文件 `<state>/plugins/leases/<package>.<pid>.json`；最后一个终端关闭后删除并回收代际。进程已退出的引用文件在下一次扫描时清理。
+- 打开时为目标代际写 pin 文件 `<state>/plugins/pins/<package>/<generation>/<owner>.json`；动作入队即登记 `invocation` pin，调用结束后释放。终端先按请求登记占位身份，attach 后换成带 session 与机器名的核心地址；**关闭 Pane 不释放终端 pin**，只有 core 报告该终端结束（`finished`/`removed`/`lost` 事件、程序退出）才释放。进程 PID 存活不参与判断。
 - `plugins pane open` 先返回请求 ID；远端需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`unavailable`。
 - 不自动上传插件目录、不执行远端安装、不复制凭证、不转发本机 socket。需要回调客户端时走 `hc-tui` CLI 或事件流。
 
@@ -199,9 +200,10 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 |---|---|
 | `plugins link <目录>` | 注册为开发来源，代码原地读取，清单变化后重载 |
 | `plugins install <目录>` | 预览清单后复制到新代际，`current` 原子切换，默认不启用 |
-| `plugins update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，引用释放后回收 |
+| `plugins update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，pin 释放后回收 |
 | `plugins unlink <id>` | 移除开发注册，不删除目录 |
-| `plugins uninstall <id>` | 先禁用；有运行中的终端时保留代际直到它们结束（引用在 `<state>/plugins/leases/`） |
+| `plugins uninstall <id>` | 只删除记录与 `current` 指针；有 pin 的代际保留（pin 在 `<state>/plugins/pins/`） |
+| `plugins gc` | 显式回收：删除没有记录指向、也没有任何 pin 的代际 |
 | `plugins enable` / `plugins disable <id>` | 只改变是否出现在命令目录与菜单 |
 
 `records/<id>.json` 记录来源、清单哈希、代际、启用状态与安装时间。安装前显示 `id`、版本、`host_api`、平台、动作与终端入口、`requires_programs`；确认后才注册。构建失败不替换旧代际；`current` 指针切换使用临时目录加 rename。
@@ -263,7 +265,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 | `src/plugin/runner.rs` | 动作进程、上下文 stdin、超时、取消、进程组回收、有界输出 |
 | `src/plugin/logs.rs` | 运行日志、轮转与查询 |
 | `src/plugin/terminal.rs` | 入口规划、placement 映射、包内相对程序规则、目标机器程序探测 |
-| `src/plugin/lease.rs` | 终端对代际的引用、进程存活判断与回收 |
+| `src/plugin/lease.rs` | 代际的显式 pin、core 终结证据与显式 GC |
 | `src/plugin/cli.rs` | `plugins` 子命令 |
 | `src/app/plugin.rs` | 菜单与命令目录接入、上下文构造、结果展示、终端入口与标签 |
 | `examples/plugins/git-tools/` | 动作读取远端 Git 摘要；终端入口在远端开 lazygit |

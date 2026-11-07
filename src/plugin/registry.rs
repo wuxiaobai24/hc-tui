@@ -58,6 +58,8 @@ pub struct ActionInfo {
     pub args: Option<serde_json::Value>,
     /// 代码根目录。
     pub root: PathBuf,
+    /// 代码代际。
+    pub generation: u64,
     /// 超时。
     pub timeout: std::time::Duration,
     /// 命令参数。
@@ -193,6 +195,7 @@ impl Registry {
                     contexts: action.contexts().iter().map(|s| s.to_string()).collect(),
                     args: action.args_schema(),
                     root: plugin.root.clone(),
+                    generation: plugin.generation,
                     timeout: action.timeout(),
                     argv: action.argv().iter().map(|s| s.to_string()).collect(),
                 });
@@ -379,15 +382,16 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
     Ok(record)
 }
 
-/// 卸载插件：删除记录与 `current` 指针；仍有终端在用的代际保留到关闭后回收。
-/// 开发目录里的源码与用户日志不动。
+/// 卸载插件：删除记录与 `current` 指针；代际目录只在没有任何 pin 持有者
+/// （动作调用与终端地址）时回收。开发目录里的源码与用户日志不动。
 pub fn uninstall(config: &Config, id: &str) -> Result<(), String> {
     let store = Store::open(config.plugins_state_dir());
-    let live = crate::plugin::lease::live_generations(config, id);
     store.detach(id).map_err(|error| error.to_string())?;
-    if live.is_empty() {
-        store.remove_store(id).map_err(|error| error.to_string())?;
-    }
+    crate::plugin::lease::gc(
+        config,
+        id,
+        &crate::plugin::lease::RetentionEvidence::default(),
+    );
     Ok(())
 }
 
