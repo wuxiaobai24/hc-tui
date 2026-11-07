@@ -794,4 +794,121 @@ mod tests {
             .exists());
         std::fs::remove_dir_all(root).ok();
     }
+
+    /// 临时把目录设成只读，离开作用域恢复原权限。
+    #[cfg(unix)]
+    struct ReadOnlyDir {
+        path: PathBuf,
+        mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadOnlyDir {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ =
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_only(dir: &Path) -> ReadOnlyDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // 注入必须真的拒写，否则这轮用例测到的不是写失败。
+        assert!(
+            std::fs::write(dir.join(".write-probe"), b"x").is_err(),
+            "0o555 on {} still accepts writes",
+            dir.display()
+        );
+        ReadOnlyDir {
+            path: dir.to_path_buf(),
+            mode,
+        }
+    }
+
+    /// `records/<id>.json` 写入失败：记录与指针都停在旧代际，新代际不残留。
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_record_write_keeps_the_published_generation() {
+        let root = unique_dir("record-fail");
+        let config = config_in(&root);
+        let id = "dev.example.recordfail";
+        let source = write_plugin_at(&root.join("source").join("record-fail"), id);
+        let first = install(&config, &source, EnablePolicy::Enable).unwrap();
+        let store = crate::store::Store::open(config.plugins_state_dir());
+        let record_path = store.root().join("records").join(format!("{id}.json"));
+        let before = std::fs::read(&record_path).unwrap();
+        let old_dir = store.current_dir(id).expect("old generation resolves");
+
+        let guard = read_only(&store.root().join("records"));
+        let error = install(&config, &source, EnablePolicy::Keep).unwrap_err();
+        drop(guard);
+        assert!(error.to_lowercase().contains("denied"), "{error}");
+
+        assert_eq!(
+            std::fs::read(&record_path).unwrap(),
+            before,
+            "record changed"
+        );
+        assert_eq!(store.current_dir(id).as_deref(), Some(old_dir.as_path()));
+        assert!(old_dir.join("plugin.toml").is_file());
+        assert_eq!(store.record(id).unwrap().generation, first.generation);
+        assert!(
+            !store.generation_dir(id, first.generation + 1).exists(),
+            "the new generation survived a failed record write"
+        );
+
+        let reopened = crate::store::Store::open(config.plugins_state_dir());
+        assert_eq!(reopened.list().len(), 1, "one record only");
+        assert_eq!(reopened.record(id).unwrap().generation, first.generation);
+        assert_eq!(reopened.current_dir(id).as_deref(), Some(old_dir.as_path()));
+        let package_dir = reopened.root().join("store").join(id);
+        let staging: Vec<String> = std::fs::read_dir(&package_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect();
+        assert!(staging.is_empty(), "staging left behind: {staging:?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// `current/<id>` 切换失败：记录已发布，下一次 `Store::open` 按记录修好指针。
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_pointer_switch_is_repaired_from_the_record() {
+        let root = unique_dir("current-fail");
+        let config = config_in(&root);
+        let id = "dev.example.currentfail";
+        let source = write_plugin_at(&root.join("source").join("current-fail"), id);
+        let first = install(&config, &source, EnablePolicy::Enable).unwrap();
+        let store = crate::store::Store::open(config.plugins_state_dir());
+        let old_dir = store.current_dir(id).expect("old generation resolves");
+
+        let guard = read_only(&store.root().join("current"));
+        let error = install(&config, &source, EnablePolicy::Keep).unwrap_err();
+        drop(guard);
+        assert!(error.to_lowercase().contains("denied"), "{error}");
+
+        // 记录先行：新记录已落盘，指针还停在旧代际。
+        let record = store.record(id).expect("record published");
+        assert_eq!(record.generation, first.generation + 1);
+        assert_eq!(store.current_dir(id).as_deref(), Some(old_dir.as_path()));
+
+        let reopened = crate::store::Store::open(config.plugins_state_dir());
+        assert!(
+            reopened.recovery_issues().is_empty(),
+            "{:?}",
+            reopened.recovery_issues()
+        );
+        assert_eq!(
+            reopened.current_dir(id),
+            Some(reopened.generation_dir(id, first.generation + 1))
+        );
+        let registry = Registry::load(&config);
+        assert!(!registry.actions().is_empty(), "{:?}", registry.issues);
+        std::fs::remove_dir_all(root).ok();
+    }
 }

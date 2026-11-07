@@ -218,9 +218,27 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 - `save_record` 在记录目录写临时文件，`fsync` 后 `rename` 覆盖，再 `fsync` 父目录；失败时旧记录保持原样，不会留下半截 JSON。
 - 包级互斥是 `store/<id>/.lock`（`O_CREAT|O_EXCL`、写入持有者 PID、30 秒超时、持有者进程已消失或锁文件超过 120 秒视为残留）；锁的粒度是一个包，不同包的安装互不阻塞。
 - 代际分配在锁内：`next_generation` → 复制到 `store/<id>/.tmp-<gen>` → 同一文件系统 `rename` 到 `store/<id>/<gen>` → 原子写记录 → 最后切 `current`。复制失败清理暂存目录并返回错误；记录写失败删除刚发布的代际目录，旧记录与旧指针不变。
-- `Store::open` 每次打开做一次幂等恢复：清理持有者已消失的 `.tmp-*` 与记录临时文件；记录存在而 `current` 缺失或指向不存在的目标时按记录重建指针（linked 来源按记录里的 `origin` 重建）；`current` 存在但没有记录时不静默删除，作为 issue 报出来并拒绝加载该包。
+- `Store::open` 每次打开做一次幂等恢复：清理持有者已消失的 `.tmp-*` 与记录临时文件；记录存在而 `current` 缺失、指向不存在的目标或停在旧代际（切换中途失败）时按记录重建指针（linked 来源按记录里的 `origin` 重建）；`current` 存在但没有记录时不静默删除，作为 issue 报出来并拒绝加载该包。
 - 旧格式记录仍可读：新增字段都带 `#[serde(default)]`，schema 变化不要求重装。
 - `hc-tui plugins gc` 语义不变：只回收没有记录指向、也没有任何 pin 的旧代际。
+
+失败注入与并发覆盖范围：
+
+| 分支 | 直接用例 | 断言 |
+| --- | --- | --- |
+| 两个真进程同时安装同一目录 | `tests/plugin_install_race.rs::two_processes_installing_the_same_plugin_serialize` | 两个进程都退出码 0（锁超时不算通过）、各自报告不同代际、一条记录、`current` 跟随记录、无 `.tmp-*`、`.lock` 已删除 |
+| 持有者被 SIGKILL 后锁残留 | `tests/plugin_install_race.rs::a_killed_installer_leaves_a_lock_the_next_process_takes_over` | 锁文件带着死掉的 PID 留下，下一个进程接管并装完，发布态一致 |
+| 复制完、写记录前崩溃 | `src/store.rs::a_crash_between_copy_and_record_keeps_the_old_generation` | 旧记录与旧代际不变，暂存目录被恢复清掉 |
+| `save_record` 写入失败 | `src/plugin/registry.rs::a_failed_record_write_keeps_the_published_generation`（记录目录 0555） | 命令报 `Permission denied`、旧记录逐字节不变、`current` 与旧代际完好、新代际目录被删除、重新打开仍列旧版本 |
+| `set_current` 切换失败 | `src/plugin/registry.rs::a_failed_pointer_switch_is_repaired_from_the_record`（`current` 目录 0555） | 记录已指向新代际、指针仍为旧代际、下一次 `Store::open` 按记录修好指针并加载包 |
+| 缺 `current` / 有指针无记录 / 旧格式记录 / 死锁接管 / 保留代际不复用 | `src/store.rs` 同名用例 | 见各用例断言 |
+
+只靠实现保证、没有直接用例的分支：
+
+- 30 秒 `LOCK_TIMEOUT` 真正走完超时返回 `TimedOut`：用例覆盖的是串行等待与死锁接管，没有真的等 30 秒；
+- `copy_tree` 中途 I/O 失败后清理暂存目录（`discard_staged` 路径）：只验证了「写记录失败删除代际目录」；
+- `clean_temporary_records` 清理记录临时文件：暂存目录的清理有用例，记录临时文件没有；
+- `sync_directory` 失败被忽略：只影响持久性，无法在不破坏文件系统语义的前提下注入。
 
 ### 9.2 启用语义
 

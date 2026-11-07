@@ -73,6 +73,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M8 事件与发行收尾 | ✅ 已交付（本次提交） | `src/control.rs` 事件长连接（`method = events`、按 `plugin`/`kinds` 过滤、每订阅者 256 条有界队列、溢出补发 `events.dropped`、断开即停止）；`src/main.rs` 的 `hc-tui events [--plugin/--kinds/--count]`，`HCTUI_SOCKET` 覆盖便于插件进程连接；App 发布 `terminal.status`/`terminal.turn`/`terminal.finished`/`terminal.opened`/`terminal.closed`（带 machine、terminal、turn、at_ms、data、plugin）；示例 `examples/plugins/events`（动作 `watch` 与终端 `feed`）；`scripts/events-smoke.sh` 覆盖两客户端各一次、过滤、断开、溢出与插件消费，`tests/events_stream.rs` 在控制层回归；共享契约补模块节点/未知字段/props/CAS 冲突断言；`--no-mods`、全部模块禁用、全部插件禁用三态由 `scripts/degraded-smoke.sh` 验证；`scripts/perf-baseline.sh` 与 docs/release.md 记录四目标现状、体积与性能 |
 | M9 默认模块迁移 | ⏳ 未开始 | |
 | M10 插件契约硬化 | ✅ 已交付（本次提交） | `src/store.rs`：`save_record` 同目录临时文件 + `fsync` + `rename` + 父目录 `fsync`，`current` 用临时指针 rename 原子切换，包级 `store/<id>/.lock`（`O_CREAT|O_EXCL`、30 秒超时、持有者 PID 存活判断、粒度一个包），代际分配在锁内（`.tmp-<gen>` 复制后 rename），`Store::open` 幂等恢复（清临时残渣、按记录重建缺失的 `current`、有指针无记录报 issue 并拒绝加载）且旧格式记录仍可读；`src/plugin/registry.rs`：`EnablePolicy::{Keep,Enable,Disable}`，`install`/`link` 默认不启用，更新保留已有状态，注册表磁盘指纹驱动运行中重载并发布 `registry.changed`，停用包的动作调用与 `plugins pane open` 返回 `disabled`；`src/plugin/manifest.rs`：递归参数校验（嵌套 object、array `items`、完整路径错误）、清单期校验 `default`、`integer`/`number` 区分、深度 8/单层 64/`items` 形状上限；新增 12 个用例，`plugins-smoke`、`plugin-terminals-smoke`、`events-smoke` 安装命令显式 `--enable` |
+| M10.1 验证补强 | ✅ 已交付 | 两个真进程安装用例（跨进程串行、SIGKILL 残留锁接管）、两个真实写失败注入用例（记录写失败保留旧代际、指针失败按记录修复）、`Store::open` 把「指针停在旧代际」也算需要重建、mods 安装改为记录先行、四个 smoke 全跑通；细节见 [M10.1](#m101-验证补强) |
 
 验证基线（M2 起，docs/release.md 同步记录）：musl amd64 冷构建约 106 s / 5.78 MiB，arm64 约 182 s / 5.22 MiB；nsh 未接线阶段发行体积增量 +136 KiB。
 
@@ -274,6 +275,24 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 - 并发安装只产生一个发布态；复制后崩溃保留旧代际；缺失 `current` 可重建；无记录指针只报告不删除。
 - 停用后无需重启即从目录与菜单消失，调用与入口返回 `disabled`，已排队调用继续跑完。
 - 嵌套 object 与 array 逐元素校验，非法默认值在清单期报 `文件:行:列`。
+
+### M10.1 验证补强
+
+目标：补齐 M10 证据门里没有被覆盖的三处，只补证据与最小实现修正，不加新功能，不改 manifest schema，不改 CLI 语义。
+
+工作项：
+
+- `tests/plugin_install_race.rs`：两个真 `hc-tui plugins install` 进程共用一个隔离的 `XDG_STATE_HOME`/`XDG_CONFIG_HOME`，覆盖跨进程串行与 SIGKILL 残留锁接管（同进程用例碰不到 `stale_lock` 的同 PID 例外）。
+- `src/plugin/registry.rs`：`save_record` 与 `set_current` 的真实写失败注入（记录目录/指针目录临时 0555），断言旧记录逐字节不变、新代际被删除或由恢复清理、按记录重建指针后包仍可加载。
+- `src/store.rs`：`rebuild_missing_current` 同时处理「指针停在旧代际」，记录是发布真相的断言在恢复路径上才成立。
+- `src/mods/store.rs`：`install_local`、`install_package`、`update`、`link` 改为记录先行再切指针，与插件安装同一契约；新增指针失败的用例。
+- `scripts/plugin-terminals-smoke.sh`：卸载代际回收后把 `git-tools` 装回来，后续 `target_gone` 与 `offline` 用例才能走到目标解析；断言一条不改。
+
+交付记录：
+
+- `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 全绿（312 个库内用例 + 2 个跨进程用例）。
+- 四个 smoke 全跑通：`plugins-smoke`、`plugin-terminals-smoke`、`events-smoke`、`degraded-smoke` 退出码 0。
+- 失败注入的覆盖面与只靠实现保证的分支列在 [插件文档 §9.1](plugins.md#91-发布事务与恢复)。
 
 ### M9 默认模块迁移
 

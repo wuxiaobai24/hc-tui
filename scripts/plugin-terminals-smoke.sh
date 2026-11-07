@@ -160,6 +160,10 @@ hc kill "$GIT_ADDR" >/dev/null 2>&1 || true
 sleep 1
 [ -d "$GEN_DIR" ] && { echo "FAIL generation kept after the terminal ended"; FAILED=1; } || echo "ok   generation reclaimed after core reported the terminal ended"
 
+# 后面的 target 与离线用例要通过包名解析终端，先装回来（上一步已卸载）。
+step "reinstall git-tools for the target checks"
+"$BIN" plugins install "$ROOT/src/git-tools" --yes --enable >/dev/null || FAILED=1
+
 step "package-relative program runs on the client host"
 "$BIN" do space.new '{"name":"m7-local","folder":"/tmp","machine":""}' >/dev/null
 REVIEW=$(ui plugins pane open dev.hctui.plugins.review.review)

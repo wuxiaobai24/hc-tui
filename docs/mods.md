@@ -367,6 +367,8 @@ hc-tui 的 token 表供给三处：`TerminalCapabilities`（背景与前景色�
 
 信任根写在 `config.toml` 的 `[mods] trust_roots`，撤销列表由 `nsh revoke` 生成并放在配置目录。来源分三类：`linked`（本地开发）、`local`（目录拷贝）、`packaged`（签名包，需验证）。安装前显示 id、版本、nsh 能力、宿主授予与 `min_runtime`；用户确认后才启用。
 
+发布顺序与插件一致（同一个 `Store`）：先写 `records/<id>.json`，再切 `current/<id>`。记录是发布真相，指针切换失败时下一次 `Store::open` 按记录重建指针。
+
 ## 11. 生命周期与热重载
 
 ```mermaid

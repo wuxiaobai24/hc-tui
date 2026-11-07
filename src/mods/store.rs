@@ -265,7 +265,7 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
     (record, preview)
 }
 
-/// 本地目录安装（拷贝到新代际）。
+/// 本地目录安装（拷贝到新代际）。发布顺序与插件安装一致：写记录 → 切指针。
 pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
     let preview = preview_local(dir)?;
     let store = Store::open(config.mods_state_dir());
@@ -273,9 +273,6 @@ pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
         .prepare_generation(&preview.id)
         .map_err(|error| error.to_string())?;
     copy_tree(dir, &target).map_err(|error| format!("{}: {error}", target.display()))?;
-    store
-        .set_current(&preview.id, &target)
-        .map_err(|error| error.to_string())?;
     let record = Record {
         id: preview.id.clone(),
         source: Source::Local,
@@ -296,6 +293,9 @@ pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
     store
         .save_record(&record)
         .map_err(|error| error.to_string())?;
+    store
+        .set_current(&preview.id, &target)
+        .map_err(|error| error.to_string())?;
     Ok(record)
 }
 
@@ -308,9 +308,6 @@ pub fn install_package(config: &Config, path: &Path) -> Result<Record, String> {
         .prepare_generation(&record.id)
         .map_err(|error| error.to_string())?;
     write_package(&target, &package).map_err(|error| error.to_string())?;
-    store
-        .set_current(&record.id, &target)
-        .map_err(|error| error.to_string())?;
     trust
         .accept(&package)
         .map_err(|error| format!("accept package: {error}"))?;
@@ -318,6 +315,9 @@ pub fn install_package(config: &Config, path: &Path) -> Result<Record, String> {
     record.installed_at = now_unix();
     store
         .save_record(&record)
+        .map_err(|error| error.to_string())?;
+    store
+        .set_current(&record.id, &target)
         .map_err(|error| error.to_string())?;
     Ok(record)
 }
@@ -407,9 +407,6 @@ pub fn update(config: &Config, id: Option<&str>, target: &Path) -> Result<Record
             .prepare_generation(&record.id)
             .map_err(|error| error.to_string())?;
         write_package(&dir, &package).map_err(|error| error.to_string())?;
-        store
-            .set_current(&record.id, &dir)
-            .map_err(|error| error.to_string())?;
         trust
             .accept(&package)
             .map_err(|error| format!("accept package: {error}"))?;
@@ -417,6 +414,9 @@ pub fn update(config: &Config, id: Option<&str>, target: &Path) -> Result<Record
         record.installed_at = now_unix();
         store
             .save_record(&record)
+            .map_err(|error| error.to_string())?;
+        store
+            .set_current(&record.id, &dir)
             .map_err(|error| error.to_string())?;
         record
     };
@@ -434,9 +434,6 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
     }
     let store = Store::open(config.mods_state_dir());
     let target = std::path::absolute(dir).map_err(|error| error.to_string())?;
-    store
-        .set_current(&id, &target)
-        .map_err(|error| error.to_string())?;
     let record = Record {
         id: id.clone(),
         source: Source::Linked,
@@ -452,6 +449,9 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
     };
     store
         .save_record(&record)
+        .map_err(|error| error.to_string())?;
+    store
+        .set_current(&id, &target)
         .map_err(|error| error.to_string())?;
     Ok(record)
 }
@@ -716,6 +716,48 @@ mod tests {
             load_grants(&config, "probe"),
             vec!["state".to_string(), "exec".to_string()]
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 指针切换失败时记录已经落盘：下一次打开按记录修好指针，模块仍可加载。
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_pointer_switch_keeps_the_new_record() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = unique_dir("current-fail");
+        let config = config_in(&root);
+        let source = make_module(&root, "probe");
+        let first = install_local(&config, &source).unwrap();
+        let store = Store::open(config.mods_state_dir());
+        let old_dir = store.current_dir("probe").expect("current");
+
+        let current = store.root().join("current");
+        let mode = std::fs::metadata(&current).unwrap().permissions().mode();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            std::fs::write(current.join(".write-probe"), b"x").is_err(),
+            "0o555 still accepts writes"
+        );
+        let failed = install_local(&config, &source).unwrap_err();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(failed.to_lowercase().contains("denied"), "{failed}");
+
+        // 记录先行：新记录已落盘，指针还停在旧代际。
+        assert_eq!(
+            store.record("probe").unwrap().generation,
+            first.generation + 1,
+            "the record must be published before the pointer switches"
+        );
+        assert_eq!(
+            store.current_dir("probe").as_deref(),
+            Some(old_dir.as_path())
+        );
+
+        let reopened = Store::open(config.mods_state_dir());
+        let repaired = reopened.generation_dir("probe", first.generation + 1);
+        assert_eq!(reopened.current_dir("probe"), Some(repaired.clone()));
+        assert!(repaired.join("dist").join("bundle.js").is_file());
+        assert_eq!(module_root(&config, "probe"), Some(repaired));
         std::fs::remove_dir_all(root).ok();
     }
 }

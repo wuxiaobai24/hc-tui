@@ -7,7 +7,8 @@
 //!
 //! 记录是唯一发布真相，`current` 只是可重建索引：记录先原子落盘，指针再
 //! 原子切换；[`Store::open`] 在每次打开时做一次幂等恢复，清理临时目录、按
-//! 记录补回缺失的指针，并把「有指针没记录」的包报成问题而不是悄悄删除。
+//! 记录补回缺失或与记录不一致的指针，并把「有指针没记录」的包报成问题而不是
+//! 悄悄删除。
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -191,12 +192,9 @@ impl Store {
         }
     }
 
-    /// 记录存在而 `current` 缺失或指向不存在的目标时，按记录重建指针。
+    /// 指针缺失、指向不存在的目标或与记录不一致时，按记录重建 `current`。
     fn rebuild_missing_current(&mut self) {
         for record in self.list() {
-            if self.current_dir(&record.id).is_some() {
-                continue;
-            }
             let target = match record.source {
                 Source::Linked => record.origin.as_deref().map(PathBuf::from),
                 _ => Some(self.generation_dir(&record.id, record.generation)),
@@ -212,6 +210,11 @@ impl Store {
                 });
                 continue;
             };
+            // 记录是发布真相：指针停在旧代际（切换中途失败）也算需要重建。
+            let target = std::path::absolute(&target).unwrap_or(target);
+            if self.current_dir(&record.id).as_deref() == Some(target.as_path()) {
+                continue;
+            }
             // 与正在切换代际的安装者抢锁时让路，下次打开再修。
             let Some(_lock) = self.try_lock_package(&record.id) else {
                 continue;
