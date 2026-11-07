@@ -37,6 +37,52 @@ M2 引入 nsh（`nsh-platform-tui` / `nsh-engine`，固定提交 `951556dc1af6f5
 - `oxc`、`quickjs-jit` 的编译开销主要在 dev-dependencies（探针测试），不影响发行构建时间；`nsh-engine` 的 `js`/`net` 特性带来 QuickJS、`ureq`/`rustls` 等运行时依赖。
 - 体积或编译时间出现明显跳变时，先关未用 feature，再考虑裁剪 `nsh-base` 可选组件。
 
+## M8 实测：四目标现状、体积与性能
+
+测量机：本机 16 线程 Linux，`zig 0.16.0`，`cargo-zigbuild 0.24.1`（装在 `/tmp/m8-tools`，未改用户环境），
+`--locked --release`。
+
+| 目标 | 本机结果 | 说明 |
+|---|---|---|
+| x86_64-unknown-linux-musl | ✅ 构建 46,487,512 B（44.33 MiB），`file` 报告 statically linked；解包后 `--version`/`--default-config` 正常 | `cargo zigbuild` |
+| aarch64-unknown-linux-musl | ✅ 构建 41,800,296 B（39.86 MiB），`qemu-aarch64 … --version` 输出 `hc-tui 0.4.3` | `cargo zigbuild` |
+| aarch64-apple-darwin | ❌ | 交叉链接需要 Apple SDK：`cargo build` 在 `ring` 的 C 步骤因 Linux `cc` 不认 `-arch arm64` 失败；`cargo zigbuild` 走到链接阶段报 `unable to find framework 'CoreFoundation'`（无 `SDKROOT`/Xcode）。需 macOS runner。 |
+| x86_64-apple-darwin | ❌ | 本机未安装该 rust target（`rustup target add` 也未做），且同样缺 Apple SDK。需 macOS runner。 |
+
+打包与安装脚本：
+
+- `bash scripts/package-release.sh x86_64-unknown-linux-musl` 生成 `dist/hc-tui-0.4.3-x86_64-unknown-linux-musl.tar.gz`（19,388,210 B）与 `.sha256`；解包后静态二进制可运行。
+- `sh -n install.sh` 通过；`python3 scripts/test-install.py` 6 项全过（含平台/版本校验、截断管道无副作用）。
+
+### 体积与性能对比（M1 → M8）
+
+方法：`git archive 6917533` 到 `/tmp/hc-tui-m1` 构建同一 profile；`scripts/perf-baseline.sh` 在隔离
+XDG/session 下测同一台机器。延迟为按键到该字符出现在 pane 输出中的端到端时间（默认 `render_fps = 30`，
+理论下限约 33 ms）。
+
+| 指标 | M1 | M8 | 结论 |
+|---|---|---|---|
+| 发行体积 musl amd64 | 5,647,592 B（5.39 MiB） | 46,487,512 B（44.33 MiB） | 8.2×；见下分解 |
+| 发行体积 musl arm64 | 未测（M2 记录 5.22 MiB） | 41,800,296 B（39.86 MiB） | 同上 |
+| 本机 GNU 发行体积 | 7,231,376 B | 66,427,456 B | 9.2×（未 strip，符号未剔除） |
+| 常驻内存（空闲 2 s 后 VmRSS） | 8,052 / 8,088 / 8,152 KB | 14,312 / 14,476 / 14,448 KB | +约 6.2 MB：nsh + QuickJS 运行时 |
+| 空闲 CPU（10 s，30 fps 循环） | 1.5 % / 1.7 % | 1.7 % / 1.7 % / 1.8 % | 无可见差异 |
+| 按键延迟 p50（20 次） | 38.1 / 38.3 / 39.5 ms | 38.3 / 38.4 / 38.9 ms | 无可见退化 |
+| 按键延迟 p90 | 39.0 / 39.0 / 39.9 ms | 38.8 / 39.2 / 38.9 ms | 无可见退化 |
+
+体积增长分解（`cargo bloat --crates`，M8）：`nsh_base` 10.1 MiB、`nsh_core` 3.2 MiB、`quickjs_jit_stdlib`
+2.5 MiB、`hc_tui` 2.2 MiB、`nsh_js` 1.7 MiB、`std` 1.6 MiB、`nsh_platform_tui` 1.1 MiB、`rustls` 0.55 MiB，
+其余为依赖碎片；`.text` 合计约 32.8 MiB。也就是说 M8 的体积回归来自 M4 把 nsh 运行时真正接入（M2 只是
+链接未引用代码，被链接器剔除），不是 M8 事件流引入。
+
+已尝试的处理与结论：
+
+- 把 `nsh-engine` 的 feature 从 `js` 降到 `js-core`：`nsh-platform-tui` 无条件启用 `nsh-engine/js`，
+  Cargo 特性合并后无变化（构建 0.2 s，体积不变），本仓无法单方裁剪。
+- `[profile.release] lto = "thin", codegen-units = 1`：musl amd64 46.5 → 42.4 MiB（−8.9%），但构建
+  2 min → 4 min 56 s；未采纳，记录为可选处置。
+- 二进制已由 zigbuild 产成 stripped；再执行 `strip` 体积不变。
+
 ## 四平台构建与打包
 
 `.github/workflows/release.yml` 覆盖：

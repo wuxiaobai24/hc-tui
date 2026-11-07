@@ -1,0 +1,26 @@
+manifest_version = 1
+id = "dev.hctui.plugins.events"
+name = "Events"
+version = "0.1.0"
+host_api = 1
+platforms = ["linux", "macos"]
+description = "消费本客户端的事件流：有界动作与长运行终端各一个"
+
+[[actions]]
+id = "watch"
+title = "Watch events"
+description = "读取若干条 terminal.status / terminal.turn 事件并打印"
+contexts = ["global", "space", "pane"]
+argv = ["sh", "./bin/watch.sh"]
+timeout_ms = 20000
+
+[actions.args]
+type = "object"
+properties = { count = { type = "integer", default = 3 }, kinds = { type = "string", default = "terminal.status,terminal.turn" } }
+additionalProperties = false
+
+[[terminals]]
+id = "feed"
+title = "Events"
+argv = ["sh", "./bin/feed.sh"]
+placement = "down"

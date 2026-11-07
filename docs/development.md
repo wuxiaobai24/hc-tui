@@ -25,6 +25,7 @@ mise exec -- cargo build --release -p hc-tui
 | src/store.rs | 通用代际存储：代际目录、`current` 指针、records、回收与日志轮转 |
 | src/plugin/ | 插件：清单（manifest.rs）、注册表与代际（registry.rs）、受限动作进程（runner.rs）、终端入口规划与目标机器探测（terminal.rs）、代际引用（lease.rs）、日志（logs.rs） |
 | src/app/plugin.rs | App 侧插件集成：菜单、参数校验、上下文冻结、结果提示与控制通道 |
+| src/control.rs | 控制 socket：一问一答请求与 `events` 长连接（过滤、有界队列、`events.dropped`） |
 | src/mods/store.rs | 模块安装分发：本地/链接/签名包、预览、更新、卸载与授予侧车 |
 | examples/mods/ | 示例模块：agents（区域替换）、spaces（左侧状态与折叠）、prs（dialog 覆盖层 + exec） |
 | src/app/actions.rs | 命令面板、CLI、action 共用分发器及生命周期 |
@@ -59,6 +60,8 @@ mise exec -- just parity
 mise exec -- cargo build -p hc-tui
 HC_TUI_BIN=target/debug/hc-tui bash scripts/ui-smoke.sh
 bash scripts/plugin-terminals-smoke.sh
+bash scripts/events-smoke.sh
+bash scripts/degraded-smoke.sh
 python3 scripts/herdr-parity-smoke.py
 ```
 

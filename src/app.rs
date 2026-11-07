@@ -391,6 +391,8 @@ pub struct App {
     pub plugin_runner: crate::plugin::runner::Runner,
     /// 最近一次插件调用的请求 ID，控制通道回包时带上。
     pub plugin_request: Option<String>,
+    /// 事件流发布端：控制 socket 的订阅连接从这里取数据。
+    pub event_publisher: crate::control::Publisher,
     /// 落在 Pane 里的插件终端：Pane → 入口与代际引用。
     pub plugin_terminals: HashMap<u32, plugin::PluginTerminal>,
     /// 终端入口请求的进展，`plugins pane status` 查询。
@@ -568,6 +570,7 @@ impl App {
             plugins: crate::plugin::registry::Registry::default(),
             plugin_runner: crate::plugin::runner::Runner::new(""),
             plugin_request: None,
+            event_publisher: crate::control::Publisher::default(),
             plugin_terminals: HashMap::new(),
             plugin_panes: HashMap::new(),
             plugin_pane_order: Vec::new(),
@@ -5428,6 +5431,7 @@ impl App {
                 }
                 self.sync_terminals();
                 self.label_plugin_terminal(pane, &terminal);
+                self.publish_event("terminal.opened", Some(&terminal), json!({}));
                 if let Some(task) = self.initial_tasks.remove(&pane) {
                     self.call_rpc(
                         &format!("send-task:{pane}"),
@@ -5475,10 +5479,21 @@ impl App {
                 program_exit,
                 ..
             } => {
+                let address = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|state| state.terminal.clone());
                 if let Some(state) = self.panes.get_mut(&pane) {
                     state.state = PaneState::Ended {
                         reason: reason.clone(),
                     };
+                }
+                if program_exit {
+                    self.publish_event(
+                        "terminal.finished",
+                        address.as_deref(),
+                        json!({"reason": reason}),
+                    );
                 }
                 // 插件终端还没拿到地址就断开：请求直接失败，不让状态停在 opening。
                 if let Some(terminal) = self.plugin_terminals.get(&pane) {
@@ -6431,6 +6446,11 @@ impl App {
                     }
                     self.notify_attention(pane, before);
                 }
+                self.publish_event(
+                    "terminal.status",
+                    target.as_deref(),
+                    json!({"status": status}),
+                );
                 self.dirty = true;
             }
             "turn" => {
@@ -6457,6 +6477,7 @@ impl App {
                     }
                     self.notify_attention(pane, before);
                 }
+                self.publish_event("terminal.turn", target.as_deref(), json!({"turn": turn}));
                 self.dirty = true;
             }
             "created" | "restarted" => {
@@ -6476,6 +6497,11 @@ impl App {
                 if let Some(target) = target.as_deref() {
                     self.update_terminal(Some(target), |terminal| terminal.live = false);
                 }
+                self.publish_event(
+                    "terminal.finished",
+                    target.as_deref(),
+                    json!({"reason": event.kind}),
+                );
                 self.dirty = true;
             }
             "doc" => {
@@ -6586,6 +6612,66 @@ impl App {
         {
             change(terminal);
         }
+    }
+
+    /// 事件流：把一次状态变化推给控制 socket 的订阅者。
+    ///
+    /// 负载带 `kind`、`machine`、`terminal`、`turn`、`at_ms` 与 `data`；属于插件
+    /// 终端时另带 `plugin`。
+    pub(crate) fn publish_event(&self, kind: &str, terminal: Option<&str>, data: Value) {
+        let plugin = terminal.and_then(|address| self.terminal_plugin(address));
+        let machine = terminal
+            .and_then(|address| address.split_once('/'))
+            .map(|(machine, _)| machine.to_string())
+            .unwrap_or_else(|| "local".to_string());
+        let turn = terminal
+            .and_then(|address| {
+                self.terminals
+                    .iter()
+                    .find(|summary| summary.address == address)
+            })
+            .map(|summary| summary.turn)
+            .unwrap_or(0);
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        let mut event = json!({
+            "kind": kind,
+            "machine": machine,
+            "turn": turn,
+            "at_ms": at_ms,
+            "data": data,
+        });
+        if let Some(terminal) = terminal {
+            event["terminal"] = json!(terminal);
+        }
+        if let Some(plugin) = plugin {
+            event["plugin"] = json!(plugin);
+        }
+        self.event_publisher.publish(&event);
+    }
+
+    /// 终端地址对应的插件包；本地与带机器前缀的地址按最后一段比对。
+    fn terminal_plugin(&self, address: &str) -> Option<String> {
+        let short = |value: &str| value.rsplit('/').next().unwrap_or(value).to_string();
+        let wanted = short(address);
+        if let Some(terminal) = self
+            .terminals
+            .iter()
+            .find(|summary| short(&summary.address) == wanted)
+        {
+            if let Some(package) = &terminal.plugin {
+                return Some(package.clone());
+            }
+        }
+        self.plugin_terminals.iter().find_map(|(pane, terminal)| {
+            let candidate = self
+                .panes
+                .get(pane)
+                .and_then(|state| state.terminal.as_deref())?;
+            (short(candidate) == wanted).then(|| terminal.package.clone())
+        })
     }
 
     /// 侧栏用的 Agent 视图：按配置排序，只保留有明确状态的 Pane。
@@ -7097,8 +7183,9 @@ pub fn run(config: Config) -> Result<()> {
     let _guard = tui::Guard;
     let mut app = App::new(config)?;
     let _control_server = match crate::control::Server::start(&app.config) {
-        Ok((server, receiver)) => {
+        Ok((server, receiver, publisher)) => {
             app.control = Some(receiver);
+            app.event_publisher = publisher;
             Some(server)
         }
         Err(error) => {

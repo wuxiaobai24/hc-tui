@@ -175,6 +175,16 @@ hc-tui plugins pane close <terminal|id.terminal|pane>
 内置动作不可被覆盖；禁用或卸载后动作立即从命令目录、命令面板与右键菜单消失。动作在客户端主机运行，
 stdin 收到上下文 JSON，超时、取消、进程组回收与并发队列由宿主约束。
 
+事件流读同一个控制 socket：
+
+```sh
+hc-tui events [--plugin <id>] [--kinds terminal.status,terminal.turn] [--count N]
+```
+
+先收到一条 `{"subscribed":true,"queue":256}` 确认，之后按行输出事件 JSON；断开或 Ctrl-C 即停止。
+`--plugin` 只看该插件终端的事件，`--kinds` 只看列出的 kind（逗号分隔）。每个订阅者 256 条队列，
+溢出时补发 `{"kind":"events.dropped","count":N}`。插件进程可直接使用注入的 `HCTUI_SOCKET`。
+
 `plugins pane` 要求运行中的 TUI。`open` 在 Space 的机器上创建真实终端：`--machine` 缺省用 Space
 的机器，`--cwd` 缺省用 Space 目录，`--placement` 覆盖清单里的 placement。`tab` / `right` / `down` /
 `float` / `popup` / `zoomed` 分别对应新 Tab、右分屏、下分屏、浮动、覆盖层与放大。包内相对程序

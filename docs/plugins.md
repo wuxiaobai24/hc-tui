@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [命令](commands.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
 版本：v0.2（2026-11-07）
-状态：实施中。M6（清单与动作、CLI、代际注册）与 M7（终端入口、多机、`plugins pane`、代际引用）已实现；事件流（§8）随 M8。清单错误格式为 `文件:行:列: 原因`。
+状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）与 M8（事件流）已实现。清单错误格式为 `文件:行:列: 原因`。
 定位：可分发的工作流包，提供一次性动作与真实终端入口。界面由 [界面模块](mods.md) 负责。
 
 ---
@@ -167,6 +167,7 @@ hc-tui plugins pane open <id>.<terminal> [--cwd DIR] [--machine M] [--placement 
 hc-tui plugins pane status <request>
 hc-tui plugins pane focus <terminal|id.terminal|pane>
 hc-tui plugins pane close <terminal|id.terminal|pane>
+hc-tui events [--plugin <id>] [--kinds terminal.status,terminal.turn] [--count N]
 ```
 
 结果语义：
@@ -184,10 +185,12 @@ hc-tui plugins pane close <terminal|id.terminal|pane>
 hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finished
 ```
 
-- 控制 socket 的长连接，按行输出 NDJSON，客户端断开即停止；插件在动作进程或终端程序中读取。
-- 作用域是本客户端：另一台机器或另一个 hc-tui 实例各收到一次。
-- 投递不保证恰好一次；队列上限 256 条，溢出时丢弃并补发 `{"kind":"events.dropped","count":N}`，随后应由消费者重新读取状态。
-- 事件负载带 `machine`、限定终端地址、`turn`、事件产生时间与相关性 id。
+- 控制 socket 的长连接（`method = "events"`），先回 `{"subscribed":true,"queue":256}`，随后按行输出 NDJSON；客户端断开或界面退出即停止推送。
+- 过滤：`--plugin <id>` 只看该包的终端事件（事件带 `plugin` 字段），`--kinds a,b` 只看列出的 kind；都缺省时收到全部。
+- 作用域是本客户端：同一个 TUI 的多个订阅者各收到一次；另一台机器或另一个 hc-tui 实例不共享。
+- 投递不保证恰好一次；每个订阅者 256 条队列，溢出时丢弃并补发 `{"kind":"events.dropped","count":N}`，随后应由消费者重新读取状态。
+- kind：`terminal.status`（`data.status`）、`terminal.turn`（`data.turn`）、`terminal.finished`（`data.reason`）、`terminal.opened`、`terminal.closed`（`data.reason = "pane_closed"`）。负载带 `machine`、`terminal`、`turn`、`at_ms` 与 `data`；属于插件终端时带 `plugin`。
+- 注入的 `HCTUI_SOCKET` 被 `hc-tui events` 优先采用，插件动作与终端无需自行推导会话。
 - 邮件、部署、通知外部服务等副作用不绑定到多客户端事件流；需要单次执行时用独立 runner（systemd 单元、远端分离进程）读取同一 `hc-tui events` 或直接调用 core。
 
 ## 9. 安装、更新与卸载

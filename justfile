@@ -28,6 +28,18 @@ probe:
 plugins-smoke: build-smoke
     bash scripts/plugins-smoke.sh
 
+# 事件流的端到端冒烟（两个客户端、过滤、断开、溢出、插件消费；需要 tmux、hc、jq）
+events-smoke: build-smoke
+    bash scripts/events-smoke.sh
+
+# --no-mods / 全部模块禁用 / 全部插件禁用三种状态（需要 tmux、hc、jq）
+degraded-smoke: build-smoke
+    bash scripts/degraded-smoke.sh
+
+# 体积/内存/空闲 CPU/按键延迟基线（需要 tmux、hc、jq）
+perf-baseline: build-smoke
+    bash scripts/perf-baseline.sh current target/release/hc-tui
+
 # 插件终端的端到端冒烟（远端 placement/cwd/环境/标签、代际保留、离线与缺失程序；需要 tmux、hc、jq、ssh localhost）
 plugin-terminals-smoke: build-smoke
     bash scripts/plugin-terminals-smoke.sh

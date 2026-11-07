@@ -392,6 +392,64 @@ mod tests {
         );
     }
     #[test]
+    fn module_nodes_keep_unknown_fields_props_and_look() {
+        let raw = json!({
+            "spaces":[{
+                "id":"sp1","name":"A","folder":"/repo","look":{"density":"cozy"},"extra_space":{"n":7},
+                "tabs":[{
+                    "id":"tb1","look":{"tab":"top"},
+                    "root":{"type":"row","look":{"row":1},"children":[
+                        {"id":"p1","type":"block","content":{"terminal":"t3"},"look":{"border":"rounded"},"size":{"weight":0.6},"unknown_node":{"deep":[1,2]}},
+                        {"id":"p2","type":"block","content":{"mod":"files","props":{"root":"/repo","unknown":{"deep":[true,null,3]}},"custom":"keep"},"look":{"surface":"docked"},"meta":{"n":1},"size":{"weight":0.4}}
+                    ]}
+                }]
+            }],
+            "extra":{"top":true}
+        });
+        let state = decode(&raw, "").unwrap();
+        let back = encode(&state, "", &raw);
+        let nodes = &back["spaces"][0]["tabs"][0]["root"]["children"];
+        assert_eq!(nodes[0], raw["spaces"][0]["tabs"][0]["root"]["children"][0]);
+        assert_eq!(nodes[1], raw["spaces"][0]["tabs"][0]["root"]["children"][1]);
+        assert_eq!(
+            nodes[1]["content"]["props"]["unknown"]["deep"][1],
+            Value::Null
+        );
+        assert_eq!(back["spaces"][0]["look"], raw["spaces"][0]["look"]);
+        assert_eq!(back["extra"], raw["extra"]);
+        assert_eq!(back["spaces"][0]["extra_space"], json!({"n":7}));
+    }
+
+    #[test]
+    fn props_merge_per_module_and_conflicts_name_the_path() {
+        let base = json!({"spaces":[{"id":"a","tabs":[{"id":"t","root":{"type":"row","children":[
+            {"id":"p1","type":"block","content":{"mod":"files","props":{"root":"/a"}}},
+            {"id":"p2","type":"block","content":{"mod":"prs","props":{"repo":"x"}}}
+        ]}}]}]});
+        let mut ours = base.clone();
+        ours["spaces"][0]["tabs"][0]["root"]["children"][0]["content"]["props"]["root"] =
+            json!("/ours");
+        let mut theirs = base.clone();
+        theirs["spaces"][0]["tabs"][0]["root"]["children"][1]["content"]["props"]["repo"] =
+            json!("theirs");
+        let merged = merge(&base, &ours, &theirs).unwrap();
+        assert_eq!(
+            merged["spaces"][0]["tabs"][0]["root"]["children"][0]["content"]["props"]["root"],
+            json!("/ours")
+        );
+        assert_eq!(
+            merged["spaces"][0]["tabs"][0]["root"]["children"][1]["content"]["props"]["repo"],
+            json!("theirs")
+        );
+        let mut clash = base.clone();
+        clash["spaces"][0]["tabs"][0]["root"]["children"][0]["content"]["props"]["root"] =
+            json!("/clash");
+        let error = merge(&base, &ours, &clash).unwrap_err();
+        assert!(error.contains("props"), "{error}");
+        assert!(error.contains("root"), "{error}");
+    }
+
+    #[test]
     fn screen_only_state_never_changes_the_shared_document() {
         let raw = json!({"spaces":[{"id":"space","name":"A","folder":"/repo","tabs":[{"id":"tab","name":"one","root":{"type":"row","children":[{"id":"pane","type":"block","content":{"terminal":"t1"}}]}}]}],"custom":{"desktop":"preserve"}});
         let mut state = decode(&raw, "").unwrap();

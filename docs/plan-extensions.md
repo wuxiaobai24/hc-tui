@@ -2,8 +2,8 @@
 
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
-版本：v0.3（2026-11-07）
-状态：实施中。M1–M7 已交付（提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472` 与本次提交），M8 及之后未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+版本：v0.4（2026-11-07）
+状态：实施中。M1–M8 已交付（提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -70,7 +70,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M5 安装与分发 | ✅ 已交付（本次提交） | `src/store.rs` 代际存储（`store/<id>/<generation>`、`current` 指针、records、引用回收、日志轮转）；`src/mods/store.rs` 来源（linked/local/packaged）、预览、安装、更新、卸载、链接、授予侧车、`module_root`；签名包经 `nsh-package` 的 `TrustStore` 校验信任根、撤销列表、构建号与最低运行时；`config.toml` 的 `[mods] trust_roots` / `revocations`；App 从存储当前代际加载 bundle 与清单，表面记录安装代际并在关闭后回收；`hc-tui mods list/check/test/build/install/update/uninstall/link/unlink/log/grant/enable/disable` 与控制 socket 的 `open/close/reload/grant/enable/disable` |
 | M6 插件清单与动作 | ✅ 已交付（本次提交） | `src/plugin/manifest.rs` 标准 TOML 严格解析（未知键/表、id、版本、host_api、平台、contexts、argv、timeout、placement、args schema 子集），错误带 `文件:行:列`；`src/plugin/registry.rs` 扫描配置目录与 `<state>/plugins` 当前代际，启用/禁用、重复 id、平台跳过与安装/链接/卸载；`src/plugin/runner.rs` 独立进程（cwd 插件目录、stdin 上下文 JSON、注入环境、`./` 相对程序）、30 s 默认/600 s 上限、SIGTERM→2 s→SIGKILL 进程组回收、取消、stdout/stderr 各 64 KiB 尾部、全局 8/单包 4/队列 64；`src/plugin/logs.rs` 每次调用双流日志与 1 MiB 轮转；App 接入命令目录、命令面板、终端右键菜单、参数校验、目标冻结、结果提示、控制通道状态/取消/日志；CLI `plugins action list|invoke|status|cancel|log` 与 `plugins list/install/update/link/uninstall/enable/disable`；示例 `examples/plugins/hello` |
 | M7 插件终端与多机 | ✅ 已交付（本次提交） | `src/plugin/terminal.rs` 入口规划（`terminal.run` 参数、placement 映射、`./` 相对程序规则、目标机器程序探测与错误码映射）；`src/plugin/lease.rs` 终端对代际的引用（`<state>/plugins/leases/<package>.<pid>.json`、进程存活判断、关闭后回收）；`src/plugin/registry.rs` 入口信息带根目录/代际/来源，卸载只删记录与指针并保留在用代际；`Launch` 增加 `env` 并贯通 `Command::Spawn` 与 `terminal.run`；`src/app/plugin.rs` 的 `plugins.pane.open|status|focus|close`（Space/machine/cwd/placement 解析、probe 等待、标签写入、按标签定位、关闭只断视图）；App 在 attach 后写 `hctui.plugin` / `hctui.terminal` / `where`，Pane 关闭释放代际；CLI `plugins pane open|status|focus|close` 与安装预览列出入口；示例 `examples/plugins/git-tools`（远端 lazygit）与 `examples/plugins/review`（包内相对程序长运行终端）；`scripts/plugin-terminals-smoke.sh` 与 `tests/plugin_terminals.rs` |
-| M8 事件与发行收尾 | ⏳ 未开始 | |
+| M8 事件与发行收尾 | ✅ 已交付（本次提交） | `src/control.rs` 事件长连接（`method = events`、按 `plugin`/`kinds` 过滤、每订阅者 256 条有界队列、溢出补发 `events.dropped`、断开即停止）；`src/main.rs` 的 `hc-tui events [--plugin/--kinds/--count]`，`HCTUI_SOCKET` 覆盖便于插件进程连接；App 发布 `terminal.status`/`terminal.turn`/`terminal.finished`/`terminal.opened`/`terminal.closed`（带 machine、terminal、turn、at_ms、data、plugin）；示例 `examples/plugins/events`（动作 `watch` 与终端 `feed`）；`scripts/events-smoke.sh` 覆盖两客户端各一次、过滤、断开、溢出与插件消费，`tests/events_stream.rs` 在控制层回归；共享契约补模块节点/未知字段/props/CAS 冲突断言；`--no-mods`、全部模块禁用、全部插件禁用三态由 `scripts/degraded-smoke.sh` 验证；`scripts/perf-baseline.sh` 与 docs/release.md 记录四目标现状、体积与性能 |
 | M9 默认模块迁移 | ⏳ 未开始 | |
 
 验证基线（M2 起，docs/release.md 同步记录）：musl amd64 冷构建约 106 s / 5.78 MiB，arm64 约 182 s / 5.22 MiB；nsh 未接线阶段发行体积增量 +136 KiB。

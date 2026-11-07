@@ -28,6 +28,7 @@ fn main() -> Result<()> {
         Some("update") => hc_tui::update::run(&args[1..]),
         Some("mods") => mods_command(&args[1..]),
         Some("plugins") => plugins_command(&args[1..]),
+        Some("events") => events_command(&args[1..]),
         Some("probe") => probe(&args[1..]),
         Some("commands") => {
             let config = parse_options(&args[1..])?;
@@ -107,6 +108,10 @@ fn usage() {
     );
     println!(
         "{}",
+        t("       hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>]")
+    );
+    println!(
+        "{}",
         t("       hc-tui do <command> [JSON arguments] [options]")
     );
     println!();
@@ -130,6 +135,114 @@ fn usage() {
         "{}",
         t("  --no-mods          builtin chrome, no module runtime")
     );
+}
+
+/// `hc-tui events`：连到运行中的 TUI，按行输出事件 NDJSON，断开即停。
+fn events_command(args: &[String]) -> Result<()> {
+    let mut config_path = None;
+    let mut plugin = None;
+    let mut kinds: Vec<String> = Vec::new();
+    let mut count = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                config_path = Some(std::path::PathBuf::from(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--config needs a value")))?,
+                ));
+            }
+            "--plugin" => {
+                index += 1;
+                plugin = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--plugin needs a value")))?,
+                );
+            }
+            "--kinds" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(t("--kinds needs a value")))?;
+                kinds.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|kind| !kind.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            "--count" => {
+                index += 1;
+                count = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--count needs a value")))?
+                        .parse::<u64>()
+                        .map_err(|_| anyhow::anyhow!(t("--count needs a number")))?,
+                );
+            }
+            other => anyhow::bail!(t1("unknown option: {}", other)),
+        }
+        index += 1;
+    }
+    let config = hc_tui::config::Config::load(config_path);
+    let mut request = serde_json::json!({"method": "events"});
+    if let Some(plugin) = plugin {
+        request["plugin"] = serde_json::json!(plugin);
+    }
+    if !kinds.is_empty() {
+        request["kinds"] = serde_json::json!(kinds);
+    }
+    subscribe_events(&config, request, count)
+}
+
+/// 长连接：先读一条确认，再按行输出，直到断开或达到 `count`。
+#[cfg(unix)]
+fn subscribe_events(
+    config: &hc_tui::config::Config,
+    request: serde_json::Value,
+    count: Option<u64>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(hc_tui::control::socket_path(config))?;
+    writeln!(stream, "{request}")?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let ack: serde_json::Value = serde_json::from_str(line.trim())?;
+    if let Some(error) = ack.get("error").and_then(serde_json::Value::as_str) {
+        anyhow::bail!("{error}");
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut seen = 0u64;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim())?;
+        writeln!(out, "{}", serde_json::to_string(&value)?)?;
+        out.flush()?;
+        seen += 1;
+        if count.is_some_and(|count| seen >= count) {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn subscribe_events(
+    _config: &hc_tui::config::Config,
+    _request: serde_json::Value,
+    _count: Option<u64>,
+) -> Result<()> {
+    anyhow::bail!(t("local command sockets require Unix"))
 }
 
 /// `hc-tui plugins action` 子命令：列目录在无窗口时可用；调用、状态、

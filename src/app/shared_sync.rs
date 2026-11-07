@@ -520,9 +520,16 @@ mod tests {
         theirs["spaces"][0]["name"] = json!("theirs");
         app.shared_reply("shared.get:", Ok(json!({"version":2,"value":theirs})));
         assert!(app.shared_docs[""].blocked);
+        // 冲突提示指出冲突路径并给出恢复动作。
+        assert!(app.note.contains("Shared layout:"), "{}", app.note);
+        assert!(app.note.contains("layout.reload"), "{}", app.note);
         app.mark_layout();
         app.flush_shared();
         assert!(!app.inflight.contains_key("shared.set:"));
+        // layout.reload 解除阻塞并重新取共享版本。
+        app.execute_action("layout.reload", json!({})).unwrap();
+        assert!(!app.shared_docs[""].blocked);
+        assert!(app.inflight.contains_key("shared.get:"));
     }
     #[test]
     fn same_named_spaces_have_distinct_stable_identities_and_remote_addresses() {

@@ -846,6 +846,17 @@ impl App {
         let Some(terminal) = self.plugin_terminals.remove(&pane) else {
             return;
         };
+        let address = self
+            .panes
+            .get(&pane)
+            .and_then(|state| state.terminal.clone());
+        if let Some(address) = address.as_deref() {
+            self.publish_event(
+                "terminal.closed",
+                Some(address),
+                json!({"reason": "pane_closed"}),
+            );
+        }
         if terminal.lease.is_empty() {
             return;
         }
