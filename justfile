@@ -24,6 +24,10 @@ e2e:
 probe:
     cargo run -p hc-tui -- probe
 
+# 插件动作的端到端冒烟（隔离 XDG 与 hc session；需要 tmux、hc、jq）
+plugins-smoke: build-smoke
+    bash scripts/plugins-smoke.sh
+
 # 真实 core + tmux 的 UI 冒烟测试（隔离 session；需要 hc、tmux）
 smoke: build-smoke
     HC_TUI_BIN=target/debug/hc-tui scripts/ui-smoke.sh

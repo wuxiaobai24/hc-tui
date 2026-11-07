@@ -149,6 +149,28 @@ files.open 与 mod.open files 是不同入口：前者一次性只读浮层，�
 外框树决定侧栏、Tab 栏、内容区、模式行与模块区域的排列，保存在本地 state 的 `mods_chrome`，
 `--no-mods` 回到内置外框；详细结构见 [界面模块](mods.md#4-外框与表面)。
 
+插件动作与管理走 `hc-tui plugins`：
+
+```sh
+hc-tui plugins action list [--json]
+hc-tui plugins action invoke <id>.<action> '{"short":true}' [--pane t7]
+hc-tui plugins action status <request> [--json]
+hc-tui plugins action cancel <request>
+hc-tui plugins action log <request> [-n 100]
+hc-tui plugins list [--json]
+hc-tui plugins install <目录> [--yes]
+hc-tui plugins update <目录> [--yes]
+hc-tui plugins link <目录>
+hc-tui plugins unlink <id>
+hc-tui plugins uninstall <id>
+hc-tui plugins enable|disable <id>
+```
+
+`action list`、`list`、`install`、`link`、`unlink`、`uninstall`、`enable`、`disable` 不要求窗口；
+`action invoke/status/cancel/log` 经本地控制 socket 转给运行中的 TUI（运行状态与进程都在客户端进程内）。插件动作名 `<package-id>.<action-id>`，
+内置动作不可被覆盖；禁用或卸载后动作立即从命令目录、命令面板与右键菜单消失。动作在客户端主机运行，
+stdin 收到上下文 JSON，超时、取消、进程组回收与并发队列由宿主约束。
+
 安装与分发走 `hc-tui mods`：
 
 ```sh

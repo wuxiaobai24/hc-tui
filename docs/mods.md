@@ -458,6 +458,8 @@ hc-tui mods enable|disable <id>
 
 三者共用同一动作分发器、同一状态快照与控制 socket；mod 通过 `host.call("run")` 触发插件动作，插件通过 `hc-tui do`、`hc-tui read`、`hc-tui ls` 访问同一状态。模块引用插件面板时使用稳定 ID，不按名字猜测。
 
+M6 起插件动作带 `<package-id>.<action-id>` 完整名进入同一分发器：命令目录与 `hc-tui commands` 带 `source = "plugin:<id>"`、上下文与参数 schema，命令面板与 Pane 右键菜单按 `contexts` 显示；参数 schema 与目标冻结由宿主校验，动作进程的超时、取消、进程组回收与并发队列由宿主约束。插件动作在禁用或卸载后即时从目录与菜单消失，内置动作不可覆盖。
+
 ## 15. 概念对照
 
 | herdr-app mod | 本规格 |

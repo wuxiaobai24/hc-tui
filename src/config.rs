@@ -765,6 +765,22 @@ impl Config {
             .unwrap_or_else(|| std::path::PathBuf::from("mods"))
     }
 
+    /// 开发中的插件目录：`<config>/plugins/`。
+    pub fn plugins_dir(&self) -> std::path::PathBuf {
+        self.config_path
+            .parent()
+            .map(|parent| parent.join("plugins"))
+            .unwrap_or_else(|| std::path::PathBuf::from("plugins"))
+    }
+
+    /// 插件代际存储与日志根：`<state>/plugins/`。
+    pub fn plugins_state_dir(&self) -> std::path::PathBuf {
+        self.state_path
+            .parent()
+            .map(|parent| parent.join("plugins"))
+            .unwrap_or_else(|| std::path::PathBuf::from("plugins"))
+    }
+
     /// 撤销列表路径。
     pub fn mods_revocations_path(&self) -> std::path::PathBuf {
         self.mods_revocations

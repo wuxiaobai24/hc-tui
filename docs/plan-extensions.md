@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
 版本：v0.2（2026-11-06）
-状态：实施中。M1–M5 已交付（提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d` 与本次提交），M6 及之后未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+状态：实施中。M1–M6 已交付（提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d` 与本次提交），M7 及之后未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -68,7 +68,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M3 外框与表面 | ✅ 已交付（`e97a9df`） | `src/mods/chrome.rs` 外框树（row/column/block、serde 往返、未知字段拒绝、折叠规则）；`ui::draw` 改外框驱动，默认帧与 M1 逐格一致；state.json schema 4（`mods_chrome`、`mods_windows`）；`mods.dock` / `mods.undock` / `mods.chrome` 动作；`--no-mods`；Kitty 图片按模块区域遮挡、关闭恢复；`pane.go` 焦点循环泛化为组合目标，无表面的模块区域不参与 |
 | M4 宿主通道与实例 | ✅ 已交付（本次提交） | `src/mods/mod.rs` 表面注册表（代际/授予/请求/位置记忆，`grants_for`、pending 与 `WindowPos` state 形态）；`src/mods/host.rs`（params、15 个方法、`exec` 子进程 30 s/8 MiB/单表面并发 4、远端路由）；`src/mods/input.rs`（crossterm→Input，含测试）；`src/mods/render.rs`（region/pane/dialog/popup/window 的 z 序、8 ms/32 ms 预算、失败表面错误行）；`src/mods/check.rs`（清单校验、`host_api`/`min_hc_tui_version`、80×24 试渲染、`nsh check` 包装）；`src/app/mods.rs`（调用分发、快照与领域过滤、事件、staging 重载、授予确认、键鼠粘贴路由、覆盖层 Esc、停靠表面同步、窗口位置记忆）；App 接线（`mods`/`mod_revision`/`mod_wake`/`mods_dirty`/`pending_mod_rpc`/`mod_agent_order`/`mod_chrome_sync`）、`ui::draw` 表面绘制、`pane.go` 焦点循环、`mods.*` 动作、`app.ready`/`state.changed`/`terminal.*`/`focus.changed`/`theme.changed`/`grant.changed` 触发点、`state.json` 的 `mods_grants`；三个示例 `examples/mods/{agents,spaces,prs}` 通过 `hc-tui mods check` |
 | M5 安装与分发 | ✅ 已交付（本次提交） | `src/store.rs` 代际存储（`store/<id>/<generation>`、`current` 指针、records、引用回收、日志轮转）；`src/mods/store.rs` 来源（linked/local/packaged）、预览、安装、更新、卸载、链接、授予侧车、`module_root`；签名包经 `nsh-package` 的 `TrustStore` 校验信任根、撤销列表、构建号与最低运行时；`config.toml` 的 `[mods] trust_roots` / `revocations`；App 从存储当前代际加载 bundle 与清单，表面记录安装代际并在关闭后回收；`hc-tui mods list/check/test/build/install/update/uninstall/link/unlink/log/grant/enable/disable` 与控制 socket 的 `open/close/reload/grant/enable/disable` |
-| M6 插件清单与动作 | ⏳ 未开始 | 可与 M4–M5 并行，只依赖现有动作分发器 |
+| M6 插件清单与动作 | ✅ 已交付（本次提交） | `src/plugin/manifest.rs` 标准 TOML 严格解析（未知键/表、id、版本、host_api、平台、contexts、argv、timeout、placement、args schema 子集），错误带 `文件:行:列`；`src/plugin/registry.rs` 扫描配置目录与 `<state>/plugins` 当前代际，启用/禁用、重复 id、平台跳过与安装/链接/卸载；`src/plugin/runner.rs` 独立进程（cwd 插件目录、stdin 上下文 JSON、注入环境、`./` 相对程序）、30 s 默认/600 s 上限、SIGTERM→2 s→SIGKILL 进程组回收、取消、stdout/stderr 各 64 KiB 尾部、全局 8/单包 4/队列 64；`src/plugin/logs.rs` 每次调用双流日志与 1 MiB 轮转；App 接入命令目录、命令面板、终端右键菜单、参数校验、目标冻结、结果提示、控制通道状态/取消/日志；CLI `plugins action list|invoke|status|cancel|log` 与 `plugins list/install/update/link/uninstall/enable/disable`；示例 `examples/plugins/hello` |
 | M7 插件终端与多机 | ⏳ 未开始 | |
 | M8 事件与发行收尾 | ⏳ 未开始 | |
 | M9 默认模块迁移 | ⏳ 未开始 | |

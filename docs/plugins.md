@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [命令](commands.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
 版本：v0.1（2026-11-06）
-状态：设计基线，代码未实现。插件轨道（M6–M7）未开始；实现完成后本文改为行为文档。
+状态：实施中。M6（清单与动作、CLI、代际注册）已实现；终端入口（§5–§6）随 M7，事件流（§8）随 M8。清单错误格式为 `文件:行:列: 原因`。
 定位：可分发的工作流包，提供一次性动作与真实终端入口。界面由 [界面模块](mods.md) 负责。
 
 ---
@@ -149,6 +149,9 @@ requires_programs = ["lazygit"]
 ## 7. 命令与结果
 
 `commands` 目录包含内置动作与插件动作；插件动作带 `source = "plugin:<id>"`、参数 schema 与上下文。
+M6 起 `hc-tui commands` 输出同样带 `source`、`contexts` 与 `args`；`plugins action list --json` 每项包含
+`name/package/action/title/description/contexts/args/source`。`plugins action status` 返回
+`status`、`exit_code`、`detail`（失败或超时原因）、`stdout`/`stderr` 尾部与 `queued_ms`/`runtime_ms`。
 
 ```sh
 hc-tui plugins action list [--json]

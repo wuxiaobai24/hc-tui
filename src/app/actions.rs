@@ -109,6 +109,11 @@ impl App {
     }
     pub fn execute_action(&mut self, name: &str, args: Value) -> Result<()> {
         anyhow::ensure!(args.is_object(), t("command arguments must be an object"));
+        // 插件动作与内置动作共用分发器；内置名不可被覆盖。
+        if !COMMANDS.iter().any(|(builtin, _)| *builtin == name) && self.plugins.owns(name) {
+            self.invoke_plugin(name, args)?;
+            return Ok(());
+        }
         let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
         let direction = || match text("direction").as_deref().unwrap_or("right") {
             "left" => Direction::Left,
@@ -1098,7 +1103,14 @@ impl App {
             label: label.into(),
             value: format!("{name} {args}"),
         })
-        .collect();
+        .collect::<Vec<_>>();
+        let mut items = items;
+        let pane = self
+            .panes
+            .iter()
+            .find(|(_, state)| state.terminal.as_deref() == Some(address))
+            .map(|(pane, _)| *pane);
+        items.extend(self.plugin_menu_items("pane", json!({"pane": pane, "terminal": address})));
         self.open_chooser(Chooser {
             title: format!("{} · {address}", t("Terminal")),
             items,

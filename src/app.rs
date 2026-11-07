@@ -45,6 +45,7 @@ mod layouts;
 mod mods;
 mod mouse_resize;
 mod panels;
+mod plugin;
 mod renaming;
 mod shared_sync;
 
@@ -64,6 +65,25 @@ pub fn command_catalog() -> serde_json::Value {
         .iter()
         .map(|(name, about)| json!({"name":name,"about":about}))
         .collect::<Vec<_>>())
+}
+
+/// 内置动作加插件动作；插件动作带来源、上下文与参数 schema。
+pub fn command_catalog_for(config: &crate::config::Config) -> serde_json::Value {
+    let registry = crate::plugin::registry::Registry::load(config);
+    let mut entries: Vec<serde_json::Value> = actions::COMMANDS
+        .iter()
+        .map(|(name, about)| json!({"name":name,"about":about}))
+        .collect();
+    for action in registry.actions() {
+        entries.push(json!({
+            "name": action.name,
+            "about": action.title,
+            "source": format!("plugin:{}", action.package),
+            "contexts": action.contexts,
+            "args": action.args,
+        }));
+    }
+    json!(entries)
 }
 
 /// 一个 Pane 能正常使用的最小内容区。
@@ -365,6 +385,12 @@ pub struct App {
     pub mod_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 外框与表面已同步的树快照，避免每轮重建。
     pub mod_chrome_sync: Option<String>,
+    /// 插件注册表：配置目录与安装存储的当前代际。
+    pub plugins: crate::plugin::registry::Registry,
+    /// 插件动作运行器。
+    pub plugin_runner: crate::plugin::runner::Runner,
+    /// 最近一次插件调用的请求 ID，控制通道回包时带上。
+    pub plugin_request: Option<String>,
     /// 有待发的 `state.changed`。
     pub mods_dirty: bool,
     /// 模块通过 `setAgentOrder` 设定的 agent 顺序（按终端地址）。
@@ -529,6 +555,9 @@ impl App {
             mod_regions: Vec::new(),
             mods_windows: std::collections::BTreeMap::new(),
             mods: crate::mods::ModRuntime::default(),
+            plugins: crate::plugin::registry::Registry::default(),
+            plugin_runner: crate::plugin::runner::Runner::new(""),
+            plugin_request: None,
             mod_revision: 0,
             mod_wake: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mod_chrome_sync: None,
@@ -630,6 +659,8 @@ impl App {
             config,
         };
         app.load_local_state();
+        app.plugins = crate::plugin::registry::Registry::load(&app.config);
+        app.plugin_runner = crate::plugin::runner::Runner::new(app.config.plugins_state_dir());
         crate::mods::store::apply_enabled(&app.config, &mut app.mods);
         for record in crate::store::Store::open(app.config.mods_state_dir()).list() {
             let grants = crate::mods::store::load_grants(&app.config, &record.id);
@@ -777,13 +808,21 @@ impl App {
                 Some("do") => {
                     let command = request.body["command"].as_str().unwrap_or("");
                     let args = request.body.get("args").cloned().unwrap_or(json!({}));
+                    self.plugin_request = None;
                     match self.execute_action(command, args) {
                         Ok(()) => {
-                            json!({"accepted":true,"confirmation_pending":self.prompt.is_some()})
+                            let mut response = json!({"accepted":true,"confirmation_pending":self.prompt.is_some()});
+                            if let Some(request) = self.plugin_request.take() {
+                                response["request"] = json!(request);
+                            }
+                            response
                         }
                         Err(error) => json!({"error":error.to_string()}),
                     }
                 }
+                Some("plugins.status") => self.plugin_status(&request.body),
+                Some("plugins.cancel") => self.plugin_cancel(&request.body),
+                Some("plugins.log") => self.plugin_log(&request.body),
                 _ => json!({"error":"unknown request method"}),
             };
             let _ = request.reply.send(response);
@@ -912,6 +951,7 @@ impl App {
         if self.shared_dirty && !self.layout_dirty {
             self.flush_shared();
         }
+        self.poll_plugins();
     }
 
     /// 轮询 `tab_bar_right` 里 `cmd:` 条目的输出，最多每 5 秒跑一次。
@@ -3159,12 +3199,13 @@ impl App {
 
     fn goto_rows_for(&self, query: &str) -> Vec<GotoRow> {
         if self.palette {
-            return actions::COMMANDS
+            let query = query.to_lowercase();
+            let mut rows: Vec<GotoRow> = actions::COMMANDS
                 .iter()
                 .filter(|(name, description)| {
                     format!("{name} {description}")
                         .to_lowercase()
-                        .contains(&query.to_lowercase())
+                        .contains(&query)
                 })
                 .map(|(name, description)| GotoRow {
                     pane: None,
@@ -3176,6 +3217,26 @@ impl App {
                     cwd: String::new(),
                 })
                 .collect();
+            for action in self.plugins.actions() {
+                if !action.contexts.iter().any(|context| context == "global") {
+                    continue;
+                }
+                if format!("{} {} {}", action.name, action.title, action.description)
+                    .to_lowercase()
+                    .contains(&query)
+                {
+                    rows.push(GotoRow {
+                        pane: None,
+                        terminal: None,
+                        text: action.name,
+                        right: String::new(),
+                        section: false,
+                        context: action.title,
+                        cwd: String::new(),
+                    });
+                }
+            }
+            return rows;
         }
         let query = query.to_ascii_lowercase();
         let matches = |text: &str, extra: &str| -> bool {
@@ -6675,6 +6736,11 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        // 宿主退出时给运行中的插件调用最多 3 秒完成或超时。
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while self.plugin_runner.running() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         if let Some(net) = self.net.take() {
             drop(net);
         }

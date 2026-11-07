@@ -1,0 +1,36 @@
+manifest_version = 1
+id = "dev.hctui.plugins.hello"
+name = "Hello"
+version = "0.1.0"
+host_api = 1
+platforms = ["linux", "macos"]
+description = "Smoke-test actions: print context, fail, or sleep for cancellation"
+
+[[actions]]
+id = "slow"
+title = "Hello slow"
+description = "Sleep 30 seconds; used to verify cancel and queue handling"
+contexts = ["global"]
+argv = ["sh", "-c", "sleep 30"]
+timeout_ms = 60000
+
+[[actions]]
+id = "fail"
+title = "Hello failure"
+description = "Exit 7 with a stderr line"
+contexts = ["global"]
+argv = ["sh", "-c", "echo oops >&2; exit 7"]
+timeout_ms = 5000
+
+[[actions]]
+id = "summary"
+title = "Hello summary"
+description = "Print the invocation context to stdout"
+contexts = ["global", "space", "pane"]
+argv = ["sh", "./bin/summary.sh"]
+timeout_ms = 5000
+
+[actions.args]
+type = "object"
+properties = { loud = { type = "boolean", default = false } }
+additionalProperties = false
