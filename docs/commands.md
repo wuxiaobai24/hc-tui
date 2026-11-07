@@ -122,16 +122,23 @@ Agent 和对应 Pane 共用终端别名，写入 core 的 `hctui` 标签；Tab �
 | file.open | path 必填，当前工作区机器上的文件，只读浮层 |
 | mod.open | name 必填，可选 props 对象；新 Tab 中打开脚本模块 |
 | mod.clone | name 必填，可选 as（默认 name-copy）；写入个人 panels JSON |
+| mods.dock | name 必填；place 为 left/right/top/bottom（默认 left），size 为 {cols}/{rows}/{ratio}，可选 index 与 props；把模块区域绑入外框树并写入本地 state |
+| mods.undock | name 必填；从外框树移除该模块区域 |
+| mods.chrome | tree 必填；替换整棵外框树，拒绝非法结构（必须恰好一个 panes 叶子） |
 
 ```sh
 hc-tui do mod.open '{"name":"changes"}'
 hc-tui do file.open '{"path":"README.md"}'
 hc-tui do mod.open '{"name":"status","props":{"scope":"all"}}'
 hc-tui do mod.clone '{"name":"files","as":"my-files"}'
+hc-tui do mods.dock '{"name":"agents","place":"right","size":{"cols":20}}'
+hc-tui do mods.undock '{"name":"agents"}'
 ```
 
 files.open 与 mod.open files 是不同入口：前者一次性只读浮层，后者定期刷新的 Tab 模块。
 脚本面板的注册与执行环境见 [配置](configuration.md#脚本面板与个人克隆)。
+外框树决定侧栏、Tab 栏、内容区、模式行与模块区域的排列，保存在本地 state 的 `mods_chrome`，
+`--no-mods` 回到内置外框；详细结构见 [界面模块](mods.md#4-外框与表面)。
 
 ## Layout、外观与应用
 

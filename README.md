@@ -131,6 +131,7 @@ Spaces 与 Agents 分区独立滚动，Tab/Pane 数量保留在详细切换视�
 | 能力 | 当前支持 |
 |---|---|
 | 工作区和布局 | 多机、稳定 ID、GUI 双向同步、CAS 冲突保护、布局恢复 |
+| 外框与模块区域 | 外框树决定侧栏/Tab 栏/内容区/模式行排列，可 `mods.dock` 绑定模块区域；`--no-mods` 回到内置外框 |
 | 分屏 | BSP、七种预设、Stack、zoom、浮动、pin、移动、拖动改大小 |
 | Agents | 状态与未读、置顶、父子树、按机器/工作区或优先级分组、双向导航 |
 | 终端 | 独立 attach、历史与搜索、复制、按键/消息发送、剪贴板图片上传 |
@@ -170,6 +171,9 @@ hc-tui do pane.split '{"direction":"right"}' --session work
 | [使用指南](docs/usage.md) | 完整键位、鼠标、状态、生命周期、Chat 和常见问题 |
 | [配置说明](docs/configuration.md) | 配置项、颜色、绑定、通知、脚本面板和路径 |
 | [命令参考](docs/commands.md) | 全部工作台命令、参数、目标选择和返回值 |
+| [界面模块](docs/mods.md) | TSX 模块的嵌入、表面、权限、打包与 CLI |
+| [插件](docs/plugins.md) | 动作与终端入口、清单、多机、安装与生命周期 |
+| [扩展开发计划](docs/plan-extensions.md) | 两个轨道的里程碑、验收、风险与回退 |
 | [开发与部署](docs/development.md) | 模块结构、构建、验证、原子安装和回滚 |
 | [herdr-app 对齐契约](docs/herdr-app-alignment.md) | 共享数据、冲突、生命周期和验证边界 |
 | [发布检查清单](docs/release.md) | 版本、构建、标签和发行包验收 |

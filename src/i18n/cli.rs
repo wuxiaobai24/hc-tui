@@ -27,6 +27,9 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "  --no-restore       ignore the layout saved in the core doc" => {
             "  --no-restore       忽略 core 文档里保存的布局"
         }
+        "  --no-mods          builtin chrome, no module runtime" => {
+            "  --no-mods          使用内置外框，不加载模块运行时"
+        }
         // 参数解析的报错。
         "unknown command: {}" => "未知命令：{}",
         "do requires a command" => "do 需要命令参数",

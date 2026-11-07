@@ -24,7 +24,7 @@ use crate::app::{
     App, Chooser, Connection, GotoOverlay, HelpOverlay, MobileAction, MobileTarget, NavigationRow,
     Prompt, Reader, SettingsOverlay, Toast,
 };
-use crate::config::{CollapsedSidebar, HostCursor, TabBarPosition};
+use crate::config::HostCursor;
 use crate::i18n::{t, t1, t2, tv};
 use crate::model::{Badge, PaneState, Slot};
 use crate::term::view::PlacementImage;
@@ -61,101 +61,50 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         area,
     );
 
-    // 侧栏占满整列高度；Tab 栏和内容都在它右侧。
-    let rail_width = if app.sidebar {
-        if area.width > app.sidebar_width + 40 {
-            app.sidebar_width
-        } else {
-            0
-        }
-    } else if app.config.collapsed_sidebar == CollapsedSidebar::Compact && area.width > 40 {
-        4
-    } else {
-        0
-    };
-    let (sidebar, main) = if rail_width > 0 {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(rail_width), Constraint::Min(20)])
-            .split(area);
-        (Some(cols[0]), cols[1])
-    } else {
-        app.workspace_hits.clear();
-        app.agent_hits.clear();
-        (None, area)
-    };
-    match sidebar {
-        Some(rail) if app.sidebar => render_sidebar(frame, app, rail, &theme),
-        Some(rail) => render_rail(frame, app, rail, &theme),
-        None => {}
-    }
-
+    // 外框树算出本轮区域：侧栏、Tab 栏、内容区、模式行与模块区域。
     let tabs = app
         .workspace()
         .map(|workspace| workspace.tabs.len())
         .unwrap_or(0);
-    let show_tab_bar = !(app.config.hide_tab_bar_when_single_tab && tabs <= 1);
-    let bottom_bar = app.config.tab_bar_position == TabBarPosition::Bottom;
     let mode_line = app.mode_line();
-    let mut constraints = Vec::new();
-    if show_tab_bar && !bottom_bar {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Min(3));
-    if show_tab_bar && bottom_bar {
-        constraints.push(Constraint::Length(1));
-    }
-    if mode_line.is_some() {
-        constraints.push(Constraint::Length(1));
-    }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(main);
-    let mut index = 0;
-    let tab_bar = if show_tab_bar && !bottom_bar {
-        index += 1;
-        Some(rows[0])
-    } else {
-        None
+    let params = crate::mods::chrome::LayoutParams {
+        config: &app.config,
+        sidebar_visible: app.sidebar,
+        tab_count: tabs,
+        mode_line: mode_line.is_some(),
+        area,
     };
-    let body = rows[index];
-    index += 1;
-    let bottom_tab_bar = if show_tab_bar && bottom_bar {
-        let rect = rows[index];
-        index += 1;
-        Some(rect)
-    } else {
-        None
-    };
-    if !show_tab_bar {
-        app.tab_bar = Rect::new(main.x, main.y, 0, 0);
-        app.tab_hits.clear();
-        app.tab_add = Rect::new(main.x, main.y, 0, 0);
+    let layout = app.chrome.layout(params);
+    app.mod_regions = layout.mods.clone();
+
+    match (layout.sidebar, layout.rail) {
+        (Some(rail), _) => render_sidebar(frame, app, rail, &theme),
+        (None, Some(rail)) => render_rail(frame, app, rail, &theme),
+        (None, None) => {
+            app.workspace_hits.clear();
+            app.agent_hits.clear();
+        }
     }
-    let status = if mode_line.is_some() {
-        Some(rows[index])
-    } else {
-        None
-    };
-    if let Some(rect) = bottom_tab_bar {
+
+    if let Some(rect) = layout.tab_bar {
         render_tab_bar(frame, app, rect, &theme);
+    } else {
+        let corner = Rect::new(layout.column.x, layout.column.y, 0, 0);
+        app.tab_bar = corner;
+        app.tab_hits.clear();
+        app.tab_add = corner;
     }
 
-    if let Some(tab_bar) = tab_bar {
-        render_tab_bar(frame, app, tab_bar, &theme);
-    }
-
-    app.reflow(body);
+    app.reflow(layout.body);
     let slots = app.slots.clone();
     for slot in &slots {
         render_pane(frame, app, *slot, &theme);
     }
     render_overlays(frame, app, &theme);
     if app.chat.is_some() {
-        chat::render(frame, app, body, &theme);
+        chat::render(frame, app, layout.body, &theme);
     }
-    if let (Some(status), Some(line)) = (status, mode_line) {
+    if let (Some(status), Some(line)) = (layout.status, mode_line) {
         render_mode_line(frame, app, status, &line, &theme);
     }
     render_modals(frame, app, area, &theme);

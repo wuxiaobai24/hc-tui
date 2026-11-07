@@ -712,6 +712,8 @@ pub struct Config {
     pub sound_request_path: Option<String>,
     /// 启动时从 core 的 doc 恢复布局。
     pub restore: bool,
+    /// 关闭界面模块运行时：使用内置外框，不加载任何模块（`--no-mods`）。
+    pub no_mods: bool,
     /// 新建 Tab 时先问名字。
     pub prompt_new_tab: bool,
     /// 新建工作区时先问名字。
@@ -781,6 +783,7 @@ impl Default for Config {
             sound_done_path: None,
             sound_request_path: None,
             restore: true,
+            no_mods: false,
             prompt_new_tab: true,
             prompt_new_workspace: false,
             tab_bar_right: Vec::new(),

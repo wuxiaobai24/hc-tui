@@ -351,11 +351,20 @@ impl SplitNode {
 ///
 /// 只按几何位置判断，不看树结构：跨层分屏也能正确跳转。
 pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, direction: Direction) -> Option<PaneId> {
+    neighbor_by(rects, from, direction)
+}
+
+/// 同 [`neighbor`]，目标类型由调用方决定（Pane 或模块区域）。
+pub fn neighbor_by<T: PartialEq + Copy>(
+    rects: &[(T, Rect)],
+    from: T,
+    direction: Direction,
+) -> Option<T> {
     let current = rects
         .iter()
         .find(|(pane, _)| *pane == from)
         .map(|(_, rect)| *rect)?;
-    let mut best: Option<(PaneId, u16, u32)> = None;
+    let mut best: Option<(T, u16, u32)> = None;
     for (pane, rect) in rects {
         if *pane == from {
             continue;

@@ -15,7 +15,7 @@ session 可通过 `--session`、`[session] session` 或 HC_SESSION 指定；CLI 
 | 配置目录中的 config.toml | 外观、键位、通知和终端策略 |
 | 配置目录中的 panels/*.json | 克隆的脚本面板，下次加载配置时读取 |
 | 配置目录中的 layouts/*.json | 个人 Pane 布局，通过 layout.switch 选择 |
-| `$XDG_STATE_HOME/hc-tui/state.json`（默认 ~/.local/state/...） | 本地已读与分组折叠 |
+| `$XDG_STATE_HOME/hc-tui/state.json`（默认 ~/.local/state/...） | 本地已读与分组折叠；schema 4 起含外框树 `mods_chrome` 与窗口覆盖层位置 `mods_windows` |
 | 同一 state 目录的 control-*.sock | session 对应的本地命令 socket，Unix 用户权限 0600 |
 | core 中的 herdr-app / hctui-layout-v1 文档 | 共享结构 / TUI 屏幕布局，不在 config.toml 中 |
 
@@ -170,6 +170,7 @@ paste_image = "prefix+shift+v"
 | terminal.scrollback_bytes | 每个本地 VT 的历史容量预算 |
 | terminal.default_shell | 空串使用 core 默认 shell |
 | session.restore | 恢复 core 中布局；--no-restore 可对单次启动关闭 |
+| no_mods | 使用内置外框，不加载模块运行时；--no-mods 可对单次启动开启，mods.* 动作在此模式下报错 |
 | ui.window_title | 可用 {hostname}、{workspace} |
 | ui.tab_bar_right | 支持 zoom、hostname、datetime 和 cmd:命令；cmd 取第一行输出，约每 5 秒刷新 |
 

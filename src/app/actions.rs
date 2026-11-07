@@ -1,6 +1,7 @@
 //! Shared command dispatch for the palette, key commands and integrations.
 use super::*;
 use crate::i18n::{t, t1};
+use crate::mods::chrome::{ChromeSize, DockPlace};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("space.new", "Create a space; name, folder, machine, argv"),
@@ -65,6 +66,12 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("layout.select", "Select a child of a pane stack"),
     ("layout.reset", "Reset to balanced pane layout"),
     ("mod.clone", "Clone a script panel"),
+    (
+        "mods.dock",
+        "Dock a mod region; name, place, size, index, props",
+    ),
+    ("mods.undock", "Undock a mod region; name"),
+    ("mods.chrome", "Replace the chrome tree; tree"),
     ("layout.reload", "Reload shared layout after a conflict"),
     ("layout.switch", "Cycle pane layout preset"),
     ("layout.show", "Show sidebar"),
@@ -640,6 +647,51 @@ impl App {
                 self.config.theme.name = name;
             }
             "app.quit" => self.quit = true,
+            "mods.dock" | "mods.undock" | "mods.chrome" if self.config.no_mods => {
+                anyhow::bail!(t("mods are disabled (--no-mods)"))
+            }
+            "mods.dock" => {
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                let place = match text("place").as_deref() {
+                    Some("right") => DockPlace::Right,
+                    Some("top") => DockPlace::Top,
+                    Some("bottom") => DockPlace::Bottom,
+                    _ => DockPlace::Left,
+                };
+                let size = args
+                    .get("size")
+                    .and_then(|value| serde_json::from_value::<ChromeSize>(value.clone()).ok());
+                let index = args
+                    .get("index")
+                    .and_then(|value| value.as_u64())
+                    .map(|v| v as usize);
+                let props = args.get("props").cloned().unwrap_or_else(|| json!({}));
+                self.chrome.dock(&name, place, size, index, props);
+                self.dirty = true;
+                self.save_local_state();
+            }
+            "mods.undock" => {
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                if self.chrome.undock(&name) {
+                    self.dirty = true;
+                    self.save_local_state();
+                }
+            }
+            "mods.chrome" => {
+                let tree = args
+                    .get("tree")
+                    .ok_or_else(|| anyhow::anyhow!(t("tree required")))?;
+                let packaged = if tree.get("root").is_some() {
+                    tree.clone()
+                } else {
+                    json!({"schema_version": 1, "root": tree})
+                };
+                let chrome = crate::mods::chrome::Chrome::from_state(Some(&packaged))
+                    .ok_or_else(|| anyhow::anyhow!(t("invalid chrome tree")))?;
+                self.chrome = chrome;
+                self.dirty = true;
+                self.save_local_state();
+            }
             "overlay.close" => {
                 self.prompt = None;
                 self.goto = None;

@@ -16,6 +16,7 @@ pub mod hc;
 pub mod i18n;
 pub mod layout;
 pub mod model;
+pub mod mods;
 pub mod term;
 pub mod theme;
 pub mod tui;

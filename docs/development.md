@@ -20,6 +20,7 @@ mise exec -- cargo build --release -p hc-tui
 | 位置 | 职责 |
 |---|---|
 | src/app.rs / src/ui/ | 事件循环、状态和 Ratatui 绘制、手机与 Chat |
+| src/mods/ | 界面模块运行时：外框树（chrome.rs），实例与宿主通道在后续里程碑接入 |
 | src/app/actions.rs | 命令面板、CLI、action 共用分发器及生命周期 |
 | src/app/shared_sync.rs / src/shared.rs | 多机共享文档、稳定 ID、CAS 三方合并 |
 | src/app/agent_tree.rs | Agent 父子树、优先级、折叠与环保护 |

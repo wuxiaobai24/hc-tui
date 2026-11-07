@@ -48,6 +48,15 @@ impl Graphics {
             || app.copy.is_some()
             || app.drag.is_some();
         let mut images = Vec::new();
+        // 模块区域与覆盖层窗口压在终端图片之上：相交的部分不输出，
+        // 关闭后矩形消失，图片随下一帧重新上传。
+        let blockers: Vec<Rect> = app
+            .mod_regions
+            .iter()
+            .filter(|region| !region.folded)
+            .map(|region| region.rect)
+            .chain(app.mods_windows_blockers())
+            .collect();
         if !obscured {
             for (index, slot) in app.slots.iter().enumerate() {
                 if slot.collapsed {
@@ -58,6 +67,19 @@ impl Graphics {
                     tiles = tiles
                         .into_iter()
                         .flat_map(|area| subtract(area, blocker.outer))
+                        .collect();
+                }
+                if !blockers.is_empty() {
+                    tiles = tiles
+                        .into_iter()
+                        .flat_map(|area| {
+                            blockers.iter().fold(vec![area], |tiles, blocker| {
+                                tiles
+                                    .into_iter()
+                                    .flat_map(|tile| subtract(tile, *blocker))
+                                    .collect()
+                            })
+                        })
                         .collect();
                 }
                 if let Some(pane) = app.panes.get_mut(&slot.pane) {

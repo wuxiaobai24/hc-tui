@@ -111,6 +111,10 @@ fn usage() {
         "{}",
         t("  --no-restore       ignore the layout saved in the core doc")
     );
+    println!(
+        "{}",
+        t("  --no-mods          builtin chrome, no module runtime")
+    );
 }
 
 /// 先读 `--config`，再让文件里的值成为基线，最后应用命令行覆盖。
@@ -120,6 +124,7 @@ fn parse_options(args: &[String]) -> Result<hc_tui::config::Config> {
     let mut session = None;
     let mut attach = None;
     let mut restore = None;
+    let mut no_mods = None;
     while index < args.len() {
         match args[index].as_str() {
             "--session" => {
@@ -147,6 +152,7 @@ fn parse_options(args: &[String]) -> Result<hc_tui::config::Config> {
                 ));
             }
             "--no-restore" => restore = Some(false),
+            "--no-mods" => no_mods = Some(true),
             other => anyhow::bail!(t1("unknown option: {}", other)),
         }
         index += 1;
@@ -161,6 +167,9 @@ fn parse_options(args: &[String]) -> Result<hc_tui::config::Config> {
     }
     if let Some(restore) = restore {
         config.restore = restore;
+    }
+    if let Some(no_mods) = no_mods {
+        config.no_mods = no_mods;
     }
     Ok(config)
 }

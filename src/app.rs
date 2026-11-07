@@ -26,7 +26,7 @@ use crate::copy::CopyMode;
 use crate::hc::net::{Command, NetConfig, NetEvent, NetHandle};
 use crate::hc::proto::{Event as TerminalEvent, TerminalSummary};
 use crate::i18n::{t, t1, t2, tv};
-use crate::layout::split::{neighbor, Axis, Direction, PaneId, Placement, SplitNode};
+use crate::layout::split::{neighbor, neighbor_by, Axis, Direction, PaneId, Placement, SplitNode};
 use crate::model::{
     renumber_node, Badge, FloatingPane, Launch, Pane, PaneState, SavedNode, SavedPane, SavedState,
     SavedTab, SavedWorkspace, Slot, Tab, Workspace,
@@ -274,6 +274,7 @@ struct PendingCall {
 }
 
 /// 本地状态文件：`seen_turn` 按终端地址保存，重启后不把旧完成当新完成。
+/// schema 4 起带外框树与窗口覆盖层位置；缺失字段按空处理。
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct LocalState {
     #[serde(default)]
@@ -282,6 +283,10 @@ struct LocalState {
     seen: BTreeMap<String, u64>,
     #[serde(default)]
     folded_agent_groups: std::collections::HashSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mods_chrome: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    mods_windows: BTreeMap<String, serde_json::Value>,
 }
 
 /// 普通模式下鼠标拖选。
@@ -344,6 +349,14 @@ pub struct App {
     pub slots: Vec<Slot>,
     /// 上一次绘制算出的 Pane 区域（不含 Tab 栏、侧栏、状态栏）。
     pub content: Rect,
+    /// 外框树：本机区域布局，模块区域与内置界面的排列。
+    pub chrome: crate::mods::chrome::Chrome,
+    /// `window` 覆盖层位置与 `key`；schema 4 起随本地状态保存。
+    pub mods_windows: std::collections::BTreeMap<String, serde_json::Value>,
+    /// 当前持有键盘焦点的模块区域 ID；`None` 时焦点在 Pane。
+    pub focused_mod: Option<String>,
+    /// 本轮绘制记录的模块区域；图形遮挡与焦点循环使用。
+    pub mod_regions: Vec<crate::mods::chrome::ModRegion>,
     pub tab_bar: Rect,
     /// Tab 栏右侧 `+` 按钮的区域。
     pub tab_add: Rect,
@@ -494,6 +507,10 @@ impl App {
             note,
             slots: Vec::new(),
             content: Rect::new(0, 0, 80, 24),
+            chrome: crate::mods::chrome::Chrome::default_tree(&config),
+            mod_regions: Vec::new(),
+            mods_windows: std::collections::BTreeMap::new(),
+            focused_mod: None,
             tab_bar: Rect::new(0, 0, 0, 0),
             tab_add: Rect::new(0, 0, 0, 0),
             sidebar_new: Rect::new(0, 0, 0, 0),
@@ -3779,18 +3796,62 @@ impl App {
     }
 
     fn move_focus(&mut self, direction: Direction) {
-        let rects: Vec<(PaneId, Rect)> = self
+        #[derive(Clone, Copy, PartialEq)]
+        enum Target {
+            Pane(PaneId),
+            Mod(usize),
+        }
+        let mut rects: Vec<(Target, Rect)> = self
             .workspace()
             .and_then(Workspace::tab)
             .map(|tab| tab.tree.layout(self.content_rect()))
             .unwrap_or_default()
             .into_iter()
-            .map(|placement| (placement.pane, placement.rect))
+            .map(|placement| (Target::Pane(placement.pane), placement.rect))
             .collect();
-        let from = PaneId(self.focused());
-        if let Some(next) = neighbor(&rects, from, direction) {
-            self.set_focus(next.0);
+        // `focusable` 的模块区域按外框顺序并入循环；没有表面的区域不参与。
+        for (index, region) in self.mod_focusables().iter().enumerate() {
+            rects.push((Target::Mod(index), region.1));
         }
+        let in_mod = self
+            .focused_mod
+            .as_ref()
+            .and_then(|id| self.mod_focusables().iter().position(|(mid, _)| mid == id));
+        let from = match in_mod {
+            Some(index) => Target::Mod(index),
+            None => Target::Pane(PaneId(self.focused())),
+        };
+        if let Some(next) = neighbor_by(&rects, from, direction) {
+            match next {
+                Target::Pane(pane) => {
+                    self.focused_mod = None;
+                    self.set_focus(pane.0);
+                }
+                Target::Mod(index) => {
+                    if let Some((id, _)) = self.mod_focusables().get(index) {
+                        self.focused_mod = Some(id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// 参与 `pane.go` 焦点循环的模块区域：未折叠且有运行中的表面。
+    /// 表面注册表接入后按实例存在与否过滤。
+    fn mod_focusables(&self) -> Vec<(String, Rect)> {
+        if self.config.no_mods {
+            return Vec::new();
+        }
+        self.mod_regions
+            .iter()
+            .filter(|region| !region.folded && self.mod_surface_ready(&region.id))
+            .map(|region| (region.id.clone(), region.rect))
+            .collect()
+    }
+
+    /// 该模块区域是否有一个可接收输入的表面实例。
+    fn mod_surface_ready(&self, _id: &str) -> bool {
+        false
     }
 
     /// 鼠标按在浮动 Pane 上时判断这一下是移动还是改尺寸。
@@ -4697,9 +4758,19 @@ impl App {
         let Ok(state) = serde_json::from_str::<LocalState>(&text) else {
             return;
         };
-        if state.schema_version <= 1 {
+        if state.schema_version <= 4 {
             self.seen = state.seen;
             self.folded_agent_groups = state.folded_agent_groups;
+            // 外框树缺失、非法或 --no-mods 时保持默认树。
+            let state_chrome = if self.config.no_mods {
+                None
+            } else {
+                crate::mods::chrome::Chrome::from_state(state.mods_chrome.as_ref())
+            };
+            if let Some(chrome) = state_chrome {
+                self.chrome = chrome;
+            }
+            self.mods_windows = state.mods_windows;
         }
     }
 
@@ -4707,9 +4778,11 @@ impl App {
         self.seen_dirty = false;
         self.seen_since = None;
         let state = LocalState {
-            schema_version: 1,
+            schema_version: 4,
             seen: self.seen.clone(),
             folded_agent_groups: self.folded_agent_groups.clone(),
+            mods_chrome: Some(self.chrome.to_state()),
+            mods_windows: self.mods_windows.clone(),
         };
         let path = self.config.state_path.clone();
         if let Some(parent) = path.parent() {
@@ -4718,6 +4791,11 @@ impl App {
         if let Ok(text) = serde_json::to_string(&state) {
             let _ = std::fs::write(path, text);
         }
+    }
+
+    /// `window` 覆盖层的遮挡矩形；表面实例接入后按 mods_windows 记录的位置返回。
+    pub fn mods_windows_blockers(&self) -> Vec<ratatui_core::layout::Rect> {
+        Vec::new()
     }
 
     /// 记下请求参数，答复丢了还能重放。
@@ -7557,5 +7635,172 @@ mod tests {
         app.run_mobile_target(MobileTarget::Agent(shell_pane));
         assert_eq!(app.focused(), shell_pane);
         assert!(!app.switcher);
+    }
+
+    fn count_mod_blocks(chrome: &crate::mods::chrome::Chrome) -> usize {
+        fn walk(node: &crate::mods::chrome::ChromeNode) -> usize {
+            use crate::mods::chrome::ChromeNode;
+            match node {
+                ChromeNode::Row { children } | ChromeNode::Column { children } => {
+                    children.iter().map(walk).sum()
+                }
+                ChromeNode::Block { .. } => usize::from(node.mod_id().is_some()),
+            }
+        }
+        walk(&chrome.root)
+    }
+
+    #[test]
+    fn mods_dock_and_undock_persist_the_chrome_tree() {
+        use ratatui_core::{backend::TestBackend, terminal::Terminal};
+        let mut app = offline_app();
+        app.config.state_path =
+            std::env::temp_dir().join(format!("hctui-m3-dock-{}.json", std::process::id()));
+        app.execute_action(
+            "mods.dock",
+            json!({"name": "agents", "place": "right", "size": {"cols": 20}, "props": {"sort": "priority"}}),
+        )
+        .unwrap();
+        assert_eq!(count_mod_blocks(&app.chrome), 1);
+        // 保存的状态带外框树，重载后结构保持。
+        app.save_local_state();
+        let text = std::fs::read_to_string(&app.config.state_path).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(state["schema_version"], 4);
+        let restored = crate::mods::chrome::Chrome::from_state(Some(&state["mods_chrome"]))
+            .expect("mods_chrome must roundtrip");
+        assert_eq!(count_mod_blocks(&restored), 1);
+
+        // 渲染后模块区域有矩形；没有表面的区域不参与焦点循环。
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        assert_eq!(app.mod_regions.len(), 1);
+        assert_eq!(app.mod_regions[0].id, "agents");
+        assert!(!app.mod_regions[0].folded);
+        assert!(app.mod_focusables().is_empty(), "no surface, not focusable");
+
+        app.execute_action("mods.undock", json!({"name": "agents"}))
+            .unwrap();
+        assert_eq!(count_mod_blocks(&app.chrome), 0);
+        let text = std::fs::read_to_string(&app.config.state_path).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let restored =
+            crate::mods::chrome::Chrome::from_state(Some(&state["mods_chrome"])).unwrap();
+        assert_eq!(count_mod_blocks(&restored), 0);
+    }
+
+    #[test]
+    fn mods_chrome_action_replaces_the_tree_and_rejects_broken_trees() {
+        use ratatui_core::{backend::TestBackend, terminal::Terminal};
+        let mut app = offline_app();
+        let tree = json!({
+            "schema_version": 1,
+            "root": {"type": "row", "children": [
+                {"type": "column", "children": [
+                    {"type": "block", "content": {"content": "panes"}},
+                    {"type": "block", "size": {"rows": 1}, "content": {"builtin": "status"}}
+                ]},
+                {"type": "block", "id": "left", "size": {"cols": 26}, "content": {"builtin": "spaces"}}
+            ]}
+        });
+        app.execute_action("mods.chrome", json!({"tree": tree}))
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        // 侧栏在右：body 从最左开始。
+        assert_eq!(app.content.x, 0);
+        assert_eq!(app.content.width, 74);
+        assert!(app.spaces_area.x >= 74);
+
+        let broken = json!({
+            "schema_version": 1,
+            "root": {"type": "row", "children": [
+                {"type": "block", "content": {"content": "panes"}},
+                {"type": "block", "content": {"content": "panes"}}
+            ]}
+        });
+        assert!(
+            app.execute_action("mods.chrome", json!({"tree": broken}))
+                .is_err(),
+            "two panes blocks must be rejected"
+        );
+    }
+
+    #[test]
+    fn no_mods_rejects_dock_actions_and_ignores_saved_chrome() {
+        let mut app = offline_app();
+        app.config.no_mods = true;
+        assert!(app
+            .execute_action("mods.dock", json!({"name": "agents", "place": "right"}))
+            .is_err());
+        assert_eq!(count_mod_blocks(&app.chrome), 0);
+        assert!(app.mod_focusables().is_empty());
+    }
+
+    #[test]
+    fn mod_regions_block_kitty_images_until_undocked() {
+        use base64::Engine;
+        let mut app = offline_app();
+        let pane = app.input_pane();
+        app.panes.get_mut(&pane).unwrap().attached(1, 80, 24);
+        // 虚拟放置：宽 2 列，锚定在 1;1H 的占位字符上（U=1 的锚定规则）。
+        let pixels = [255, 0, 0, 255].repeat(8);
+        let payload = base64::engine::general_purpose::STANDARD.encode(pixels);
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .view
+            .write(format!("\x1b_Ga=T,f=32,s=4,v=2,U=1,i=7,q=2;{payload}\x1b\\").as_bytes());
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .view
+            .write("\x1b[H\x1b[38;2;0;0;7m\u{10eeee}\u{0305}\x1b[0m".as_bytes());
+        app.reflow(Rect::new(0, 0, 80, 24));
+        // 遮挡矩形覆盖图片所在的整个内容区：图片完全被盖住，不输出。
+        app.mod_regions.push(crate::mods::chrome::ModRegion {
+            id: "agents".into(),
+            rect: Rect::new(0, 0, 40, 24),
+            folded: false,
+        });
+
+        let mut graphics = crate::term::graphics::Graphics::default();
+        let mut output = Vec::new();
+        graphics.draw(&mut app, &mut output).unwrap();
+        assert!(
+            !output.windows(3).any(|w| w == b"\x1b_G"),
+            "a fully covered image must not upload"
+        );
+
+        // 模块区域消失（undock）后，下一帧重新上传。
+        app.mod_regions.clear();
+        let mut output = Vec::new();
+        graphics.draw(&mut app, &mut output).unwrap();
+        assert!(
+            output.windows(3).any(|w| w == b"\x1b_G"),
+            "image must re-upload after the region closes"
+        );
+        let mut host = crate::term::view::TerminalView::new(80, 24, 1 << 20).unwrap();
+        host.write(&output);
+        assert!(
+            !host.placement_images().is_empty(),
+            "host VT sees the restored placement"
+        );
+    }
+
+    #[test]
+    fn pane_go_cycle_skips_mod_regions_without_surfaces() {
+        let mut app = offline_app();
+        app.reflow(Rect::new(0, 0, 80, 24));
+        let focused = app.focused();
+        // 存在一个模块区域，但没有任何表面：焦点循环只在 Pane 之间。
+        app.mod_regions.push(crate::mods::chrome::ModRegion {
+            id: "agents".into(),
+            rect: Rect::new(60, 0, 20, 24),
+            folded: false,
+        });
+        app.move_focus(crate::layout::split::Direction::Right);
+        assert_eq!(app.focused(), focused);
+        assert!(app.focused_mod.is_none());
     }
 }
