@@ -586,6 +586,12 @@ impl App {
                     replica.version = u64::MAX;
                 }
                 self.request_shared(&machine);
+                // 布局文档合并失败时同样走这里：接受共享版本，丢弃本地意图。
+                self.layout.blocked = false;
+                self.layout.pending = None;
+                self.layout_dirty = false;
+                self.layout_since = None;
+                self.request_layout("doc.get");
             }
             "layout.switch" => {
                 if let Some(name) = text("name") {

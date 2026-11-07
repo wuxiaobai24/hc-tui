@@ -210,7 +210,8 @@ flowchart TD
 ### 5.4 布局持久化
 
 - `doc.get` 在连接建立后立即读取 `hctui-layout-v1`；`doc.set` 带版本号，400 ms 防抖，
-  `conflict` 时先 `doc.get` 取最新版本再重放本地意图。
+  `conflict` 时重读远端值与本地意图做三方合并后重放，同一字段两边都改时暂停自动覆盖并提示 `layout.reload`。
+  退出前与收到 SIGTERM / SIGHUP 时都 flush 最后一次变更。
 - 恢复时 Pane 重新编号、按 `terminal` 地址重新 attach；终端不存在时沿用网络层的换新 shell。
 - 证据：新建 2 个 Tab + 分屏后退出，重新启动得到 3 个 Tab 与同一棵分屏树，
   两个 Pane 分别重新 attach 到 `t1` / `t4`；工作区名 `api`、Tab 名 `work` 一并恢复。

@@ -593,11 +593,21 @@ fn execute(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setpgid only affects the child before exec.
+        let parent = std::process::id();
+        // SAFETY: these calls only affect the child between fork and exec.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                // 父进程消失（含 SIGKILL）时由内核回收直接子进程，不依赖宿主还活着。
+                #[cfg(target_os = "linux")]
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // fork 与 prctl 之间父进程已经死掉的话，PDEATHSIG 不会再触发。
+                if libc::getppid() != parent as libc::pid_t {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
                 }
                 Ok(())
             });

@@ -41,6 +41,7 @@ mod bindings;
 mod branches;
 pub(crate) mod interaction;
 mod keyboard;
+mod layout_sync;
 mod layouts;
 mod mods;
 mod mouse_resize;
@@ -97,6 +98,8 @@ const LAYOUT_DEBOUNCE: Duration = Duration::from_millis(400);
 const RESTORE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// 共享的布局文档名。
 const DOC_NAME: &str = "hctui-layout-v1";
+/// 事件循环检查一次退出信号的间隔；SIGTERM/SIGHUP 只置标志。
+const TERMINATION_POLL: Duration = Duration::from_millis(50);
 const TOAST_LIFETIME: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,8 +494,8 @@ pub struct App {
     pub mobile_max_scroll: usize,
     pub switcher: bool,
     pub events_seen: u64,
-    /// core doc 的版本；`0` 表示从未写过。
-    pub doc_version: u64,
+    /// core 布局文档的副本：`base`/`version` 是最近一次读到的远端值。
+    layout: shared_sync::Replica,
     pub doc_loaded: bool,
     shared_docs: HashMap<String, shared_sync::Replica>,
     shared_dirty: bool,
@@ -649,7 +652,13 @@ impl App {
             mobile_max_scroll: 0,
             switcher: false,
             events_seen: 0,
-            doc_version: 0,
+            layout: shared_sync::Replica {
+                base: Value::Null,
+                version: 0,
+                pending: None,
+                blocked: false,
+                needs_refresh: false,
+            },
             doc_loaded: false,
             shared_docs: HashMap::new(),
             shared_dirty: false,
@@ -709,6 +718,11 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// 收到 SIGTERM / SIGHUP：走与 `app.quit` 相同的收尾路径。
+    pub fn request_quit(&mut self) {
+        self.quit = true;
     }
 
     pub fn prefix_active(&self) -> bool {
@@ -996,7 +1010,7 @@ impl App {
                 .layout_since
                 .is_some_and(|since| now.duration_since(since) >= LAYOUT_DEBOUNCE)
         {
-            self.push_layout();
+            self.flush_layout();
             self.flush_shared();
         }
         if self.shared_dirty && !self.layout_dirty {
@@ -5404,7 +5418,7 @@ impl App {
                 self.bump_mod_revision();
                 self.notify_mods_ready();
                 if self.restore_pending {
-                    self.request_doc("doc.get");
+                    self.request_layout("doc.get");
                 } else {
                     self.note = "subscribing".to_string();
                     if self.config.restore {
@@ -5674,72 +5688,9 @@ impl App {
             return;
         }
         match tag {
-            "doc.get" => match result {
-                Ok(value) => {
-                    self.doc_version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
-                    self.doc_loaded = true;
-                    let restored = value
-                        .get("value")
-                        .filter(|value| !value.is_null())
-                        .and_then(|value| match value {
-                            Value::String(text) => SavedState::parse(text),
-                            other => SavedState::parse(&other.to_string()),
-                        })
-                        .filter(SavedState::is_usable);
-                    if let Some(state) = restored {
-                        self.restore(state);
-                        self.note = String::new();
-                    }
-                    self.restore_pending = false;
-                    self.ensure_layout();
-                    if self.config.restore {
-                        self.request_shared("");
-                        self.call_rpc("machines.sync", "machine.list", json!({}));
-                    }
-                    self.dirty = true;
-                }
-                Err(error) => {
-                    self.doc_loaded = false;
-                    self.restore_pending = false;
-                    self.ensure_layout();
-                    self.note = t1("cannot read layout: {}", error.message);
-                    self.dirty = true;
-                }
-            },
-            "doc.sync" => match result {
-                Ok(value) => {
-                    self.doc_version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
-                    self.doc_loaded = true;
-                    self.layout_dirty = true;
-                    self.layout_since = Some(Instant::now());
-                }
-                Err(error) => self.note = t1("layout sync failed: {}", error.message),
-            },
-            "doc.remote" => match result {
-                Ok(value) => {
-                    if let Some(version) = value.get("version").and_then(Value::as_u64) {
-                        if version != self.doc_version {
-                            self.doc_version = version;
-                            self.note =
-                                "布局被另一个客户端修改，下一次操作将以本地为准".to_string();
-                            self.dirty = true;
-                        }
-                    }
-                }
-                Err(error) => self.note = format!("cannot read layout: {}", error.message),
-            },
-            "doc.set" => match result {
-                Ok(value) => {
-                    if let Some(version) = value.get("version").and_then(Value::as_u64) {
-                        self.doc_version = version;
-                    }
-                }
-                Err(error) if error.kind == "conflict" => {
-                    // 另一个客户端先写了：拿最新版本后再提交本地的意图。
-                    self.request_doc("doc.sync");
-                }
-                Err(error) => self.note = t1("layout not saved: {}", error.message),
-            },
+            "doc.get" | "doc.sync" | "doc.set" => {
+                self.layout_reply(tag, result);
+            }
             "read" => match result {
                 Ok(value) => {
                     let text = value
@@ -5999,24 +5950,6 @@ impl App {
                 }
             }
         }
-    }
-
-    fn request_doc(&mut self, tag: &str) {
-        self.call_rpc(tag, "doc.get", json!({ "name": DOC_NAME }));
-    }
-
-    fn push_layout(&mut self) {
-        let state = self.snapshot();
-        let Ok(value) = serde_json::to_value(&state) else {
-            return;
-        };
-        self.layout_dirty = false;
-        self.layout_since = None;
-        self.call_rpc(
-            "doc.set",
-            "doc.set",
-            json!({ "name": DOC_NAME, "value": value, "version": self.doc_version }),
-        );
     }
 
     fn mark_layout(&mut self) {
@@ -6572,7 +6505,7 @@ impl App {
                     }
                 }
                 if name == DOC_NAME && self.doc_loaded {
-                    self.request_doc("doc.remote");
+                    self.request_layout("doc.sync");
                 }
             }
             "missed" => {
@@ -7220,6 +7153,36 @@ fn contains(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+/// SIGTERM / SIGHUP 只置标志；收尾（flush 布局与共享文档、回收动作进程组）
+/// 在事件循环里走与 `app.quit` 相同的那条路。
+static TERMINATION_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_termination(_signal: libc::c_int) {
+    // 处理器里只写一个原子量：async-signal-safe。
+    TERMINATION_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_termination_handlers() {
+    // SAFETY: 处理器只写原子量；SA_RESTART 让阻塞的终端读取不被信号打断。
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_termination as *const () as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn install_termination_handlers() {}
+
+fn termination_requested() -> bool {
+    TERMINATION_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn run(config: Config) -> Result<()> {
     crate::i18n::set_zh(config.zh());
     let mouse = config.mouse_capture;
@@ -7227,6 +7190,7 @@ pub fn run(config: Config) -> Result<()> {
     let mut terminal = tui::init_with(mouse)?;
     let _guard = tui::Guard;
     let mut app = App::new(config)?;
+    install_termination_handlers();
     let _control_server = match crate::control::Server::start(&app.config) {
         Ok((server, receiver, publisher)) => {
             app.control = Some(receiver);
@@ -7250,6 +7214,7 @@ pub fn run(config: Config) -> Result<()> {
         if let Some(deadline) = app.wake_at() {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
+        wait = wait.min(TERMINATION_POLL);
         if event::poll(wait)? {
             match event::read()? {
                 Event::Key(key) => app.on_key(key),
@@ -7259,6 +7224,9 @@ pub fn run(config: Config) -> Result<()> {
                 Event::FocusLost => app.route_focus_to_mods(false),
                 Event::Resize(_, _) => app.mark_dirty(),
             }
+        }
+        if termination_requested() && !app.should_quit() {
+            app.request_quit();
         }
         app.pump();
         app.tick();
@@ -7283,18 +7251,12 @@ pub fn run(config: Config) -> Result<()> {
         app.reconcile();
 
         if app.should_quit() {
-            if app.doc_loaded && app.layout_dirty {
-                app.push_layout();
-            }
+            app.flush_layout();
             app.flush_shared();
             let deadline = Instant::now() + Duration::from_secs(3);
-            while Instant::now() < deadline
-                && app
-                    .inflight
-                    .keys()
-                    .any(|tag| tag.starts_with("doc.") || tag.starts_with("shared."))
-            {
+            while Instant::now() < deadline && app.writes_pending() {
                 app.pump();
+                app.flush_layout();
                 app.flush_shared();
                 std::thread::sleep(Duration::from_millis(10));
             }

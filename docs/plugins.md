@@ -285,7 +285,8 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 - 不提供插件市场、远程安装、自动更新与跨客户端单次执行保证。
 - 包内相对程序只在安装主机有效；远端入口只接受目标机器 PATH 中的程序。
 - 动作 stdout 不作为结构化协议；需要交互界面时使用终端入口或界面模块。
-- 生命周期跟随 hc-tui 客户端；detach 后动作进程结束，终端继续由 core 保留。
+- 生命周期跟随 hc-tui 客户端；客户端退出（`app.quit`、SIGTERM、SIGHUP）时动作的整个进程组被回收，
+  客户端被 SIGKILL 时直接子进程由 `PR_SET_PDEATHSIG` 回收（后台孙进程不在这个兜底里）；终端继续由 core 保留。
 - 不兼容旧 Herdr plugin 的 manifest、CLI 与 socket 语义。
 
 ## 14. 验收
