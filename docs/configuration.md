@@ -15,7 +15,7 @@ session 可通过 `--session`、`[session] session` 或 HC_SESSION 指定；CLI 
 | 配置目录中的 config.toml | 外观、键位、通知和终端策略 |
 | 配置目录中的 panels/*.json | 克隆的脚本面板，下次加载配置时读取 |
 | 配置目录中的 layouts/*.json | 个人 Pane 布局，通过 layout.switch 选择 |
-| `$XDG_STATE_HOME/hc-tui/state.json`（默认 ~/.local/state/...） | 本地已读与分组折叠；schema 4 起含外框树 `mods_chrome` 与窗口覆盖层位置 `mods_windows` |
+| `$XDG_STATE_HOME/hc-tui/state.json`（默认 ~/.local/state/...） | 本地已读与分组折叠；schema 4 起含外框树 `mods_chrome`、窗口覆盖层位置 `mods_windows` 与已批准的模块授予 `mods_grants` |
 | 同一 state 目录的 control-*.sock | session 对应的本地命令 socket，Unix 用户权限 0600 |
 | core 中的 herdr-app / hctui-layout-v1 文档 | 共享结构 / TUI 屏幕布局，不在 config.toml 中 |
 

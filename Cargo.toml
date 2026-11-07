@@ -28,6 +28,7 @@ anyhow = "1"
 base64 = "0.22"
 crossterm = "0.29"
 ghostty-vt = { path = "crates/ghostty-vt" }
+crossbeam-channel = "0.5"
 nsh-engine = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false, features = ["js"] }
 nsh-platform-tui = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false, features = ["js"] }
 png = "0.17"
@@ -44,6 +45,5 @@ tracing-subscriber = "0.3"
 unicode-width = "0.2"
 
 [dev-dependencies]
-crossbeam-channel = "0.5"
 nsh-bundler = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false }
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false }

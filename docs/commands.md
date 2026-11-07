@@ -125,6 +125,11 @@ Agent 和对应 Pane 共用终端别名，写入 core 的 `hctui` 标签；Tab �
 | mods.dock | name 必填；place 为 left/right/top/bottom（默认 left），size 为 {cols}/{rows}/{ratio}，可选 index 与 props；把模块区域绑入外框树并写入本地 state |
 | mods.undock | name 必填；从外框树移除该模块区域 |
 | mods.chrome | tree 必填；替换整棵外框树，拒绝非法结构（必须恰好一个 panes 叶子） |
+| mods.open | name 必填；place 为 region/pane/dialog/popup/window（默认 region），可选 props、size（`[cols, rows]` 或 `{cols, rows}`）、at、key；打开模块表面 |
+| mods.close | name 或 surface 必填；关闭该模块的全部表面或指定表面 |
+| mods.reload | 可选 name；重载一个或全部模块表面，失败保留旧实例与旧帧 |
+| mods.grant | name 必填，host/events 至少一项；追加宿主授予，revoke 为 true 时撤销 |
+| mods.enable / mods.disable | name 必填；启用或禁用模块，禁用时关闭其表面 |
 
 ```sh
 hc-tui do mod.open '{"name":"changes"}'
@@ -133,6 +138,10 @@ hc-tui do mod.open '{"name":"status","props":{"scope":"all"}}'
 hc-tui do mod.clone '{"name":"files","as":"my-files"}'
 hc-tui do mods.dock '{"name":"agents","place":"right","size":{"cols":20}}'
 hc-tui do mods.undock '{"name":"agents"}'
+hc-tui do mods.open '{"name":"agents","place":"dialog","size":[60,16]}'
+hc-tui do mods.reload '{"name":"agents"}'
+hc-tui do mods.grant '{"name":"agents","host":["exec"],"events":["state.changed"]}'
+hc-tui mods check examples/mods/agents
 ```
 
 files.open 与 mod.open files 是不同入口：前者一次性只读浮层，后者定期刷新的 Tab 模块。

@@ -1,0 +1,9 @@
+{
+  "name": "Agents",
+  "id": "dev.hctui.mods.agents",
+  "version": "1.0.0",
+  "build": 1,
+  "capabilities": {
+    "host": ["state", "run", "focus", "notify"]
+  }
+}

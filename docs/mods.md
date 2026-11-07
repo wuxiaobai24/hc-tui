@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [配置](configuration.md) · [命令](commands.md) · [插件](plugins.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
 版本：v0.4（2026-11-06）
-状态：实施中。外框与表面（§4 外框结构、§5 绘制顺序的宿主侧、§6 路由顺序的结构、§12 持久化 schema 4）已随 M3 落地；宿主通道、实例生命周期与覆盖层（§5 预算调度、§6 焦点路由的表面分支、§7–§11）随 M4 接入中；安装分发（§10、§13 CLI）随 M5。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
+状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地，示例见 `examples/mods/`；安装分发（§10、§13 其余 CLI）随 M5。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
 取代：本文 v0.3。
 运行时基线：nsh 提交 `951556dc1af6f5acf593cfd28640a0fd467b71e3`（`crates/nsh-platform-tui`、`crates/nsh-tui-host`）；发行版 0.4.0 尚无 TUI 后端。宿主侧 ratatui 0.30.2、crossterm 0.29。
 

@@ -100,6 +100,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     for slot in &slots {
         render_pane(frame, app, *slot, &theme);
     }
+    // 模块表面按 z 序绘制：region/pane 在下，dialog、popup、window 在上。
+    crate::mods::render::draw_surfaces(app, frame);
     render_overlays(frame, app, &theme);
     if app.chat.is_some() {
         chat::render(frame, app, layout.body, &theme);
@@ -1376,7 +1378,7 @@ fn render_mode_line(
     frame.render_widget(Paragraph::new(Line::from(spans)).style(background), area);
 }
 
-fn clear_area(frame: &mut Frame, area: Rect, theme: &Theme) {
+pub(crate) fn clear_area(frame: &mut Frame, area: Rect, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }

@@ -6,6 +6,7 @@
 
 - M1 渲染基线：升级 ratatui 0.30.2 与 crossterm 0.29，导入全部迁到 ratatui-core / ratatui-widgets / ratatui-crossterm 子 crate；80×24 与 120×40 帧快照升级前后逐格一致，单元、nvim 字节回放、图片遮挡、E2E 与 ui-smoke 全部通过。
 - M2 nsh 探针：以 git 依赖固定 longbridge/nsh `951556dc`，引入 `nsh-platform-tui` 与 `nsh-engine`（js）；探针测试在 TestBackend 的 Pane 矩形内加载最小 TSX bundle，验证按键、鼠标、粘贴、resize、唤醒、退出与干净停止；musl 双目标冷构建基线与 nsh/QuickJS 第三方声明写入 docs/release.md。
+- M4 宿主通道与实例：模块表面注册表按代际、授予与请求管理，宿主通道接通 `state`/`run`/`request`/`exec`/`readFile`/`writeFile`/`notify`/`theme`/`overlay`/`closeOverlay`/`focus`/`surface`/`setAgentOrder`/`requestGrants`；键鼠、粘贴与覆盖层 Esc 按 z 序路由到焦点表面，模块未处理的键不回落后台 PTY；`state.changed` 按 revision 合并发送，`app.ready`、`terminal.*`、`focus.changed`、`theme.changed`、`grant.changed` 与 `action.finished` 在对应触发点投递；staging 重载失败保留旧实例与旧代际；`state.json` schema 4 增加 `mods_grants`；新增 `mods.open/close/reload/grant/enable/disable`、`hc-tui mods check` 与 `examples/mods/{agents,spaces,prs}`。
 - M3 外框与表面：新增 `src/mods/chrome.rs` 外框树，界面布局改由树驱动，默认帧与升级前逐格一致；侧栏可换到右侧、Tab 栏换到下方；本地 state 升到 schema 4（`mods_chrome` / `mods_windows`）；新增 `mods.dock` / `mods.undock` / `mods.chrome` 动作与 `--no-mods`；Kitty 图片按模块区域遮挡、关闭后重传；`pane.go` 焦点循环为模块区域预留扩展点。
 
 ## 0.4.3 — 2026-11-06

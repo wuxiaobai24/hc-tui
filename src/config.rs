@@ -744,6 +744,16 @@ fn xdg_dir(variable: &str, fallback: &str) -> PathBuf {
         })
 }
 
+impl Config {
+    /// 界面模块目录：linked / local 来源都放在配置目录的 mods/ 下。
+    pub fn mods_dir(&self) -> std::path::PathBuf {
+        self.config_path
+            .parent()
+            .map(|parent| parent.join("mods"))
+            .unwrap_or_else(|| std::path::PathBuf::from("mods"))
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {

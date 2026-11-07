@@ -72,6 +72,18 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("mods.undock", "Undock a mod region; name"),
     ("mods.chrome", "Replace the chrome tree; tree"),
+    (
+        "mods.open",
+        "Open a mod surface; name, props, place, size, at, key",
+    ),
+    ("mods.close", "Close a mod surface; name or surface"),
+    ("mods.reload", "Reload a mod surface; name"),
+    (
+        "mods.grant",
+        "Grant or revoke host methods; name, host, events, revoke",
+    ),
+    ("mods.enable", "Enable a mod; name"),
+    ("mods.disable", "Disable a mod; name"),
     ("layout.reload", "Reload shared layout after a conflict"),
     ("layout.switch", "Cycle pane layout preset"),
     ("layout.show", "Show sidebar"),
@@ -638,6 +650,8 @@ impl App {
                 let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
                 self.config.theme = crate::theme::builtin(&name)
                     .ok_or_else(|| anyhow::anyhow!(t("unknown theme")))?;
+                self.notify_mods_theme();
+                self.bump_mod_revision();
                 crate::config::write_setting(
                     &self.config.config_path,
                     "theme.name",
@@ -647,7 +661,10 @@ impl App {
                 self.config.theme.name = name;
             }
             "app.quit" => self.quit = true,
-            "mods.dock" | "mods.undock" | "mods.chrome" if self.config.no_mods => {
+            "mods.dock" | "mods.undock" | "mods.chrome" | "mods.open" | "mods.close"
+            | "mods.reload" | "mods.grant" | "mods.enable" | "mods.disable"
+                if self.config.no_mods =>
+            {
                 anyhow::bail!(t("mods are disabled (--no-mods)"))
             }
             "mods.dock" => {
@@ -691,6 +708,90 @@ impl App {
                 self.chrome = chrome;
                 self.dirty = true;
                 self.save_local_state();
+            }
+            "mods.open" => {
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                let place = match text("place").as_deref() {
+                    Some(value) => crate::mods::SurfacePlace::parse(value)
+                        .ok_or_else(|| anyhow::anyhow!(t("unknown place")))?,
+                    None => crate::mods::SurfacePlace::Region,
+                };
+                let size = match args.get("size") {
+                    Some(Value::Array(list)) if list.len() == 2 => Some((
+                        list[0].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16,
+                        list[1].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16,
+                    )),
+                    Some(value) => {
+                        let cols = value.get("cols").and_then(Value::as_u64);
+                        let rows = value.get("rows").and_then(Value::as_u64);
+                        match (cols, rows) {
+                            (Some(cols), Some(rows)) => Some((cols as u16, rows as u16)),
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+                let at = args.get("at").and_then(Value::as_array).and_then(|list| {
+                    Some((
+                        list.first()?.as_u64().min(Some(u16::MAX as u64))? as u16,
+                        list.get(1)?.as_u64().min(Some(u16::MAX as u64))? as u16,
+                    ))
+                });
+                let props = args.get("props").cloned().unwrap_or_else(|| json!({}));
+                let key = text("key");
+                self.mods_open(&name, place, props, size, at, key)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            "mods.close" => {
+                let target = text("surface")
+                    .or_else(|| text("name"))
+                    .ok_or_else(|| anyhow::anyhow!(t("name or surface required")))?;
+                if !self.mods_close(&target) {
+                    anyhow::bail!(t1("no such mod surface: {}", target));
+                }
+            }
+            "mods.reload" => {
+                let target = text("name");
+                self.mods_reload_target(target.as_deref())
+                    .map_err(anyhow::Error::msg)?;
+            }
+            "mods.grant" => {
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                let list = |key: &str| {
+                    args.get(key)
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
+                let names: Vec<String> = list("host").into_iter().chain(list("events")).collect();
+                if names.is_empty() {
+                    anyhow::bail!(t("host or events required"));
+                }
+                let revoke = args.get("revoke").and_then(Value::as_bool).unwrap_or(false);
+                if revoke {
+                    self.mods.revoke_grants(&name, &names);
+                } else {
+                    self.mods.approve_grants(&name, &names);
+                }
+                let grants = self.mods.grants_for(&name);
+                self.send_mod_event(&name, "grant.changed", &json!({ "grants": grants }));
+                self.seen_dirty = true;
+                self.bump_mod_revision();
+            }
+            "mods.enable" | "mods.disable" => {
+                let enable = name == "mods.enable";
+                let mod_id = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                self.mods.enabled.insert(mod_id.clone(), enable);
+                if !enable {
+                    self.mods_close(&mod_id);
+                }
+                self.bump_mod_revision();
             }
             "overlay.close" => {
                 self.prompt = None;
@@ -778,11 +879,21 @@ impl App {
         Ok(())
     }
     pub(super) fn cycle_agent(&mut self, delta: isize) {
-        let rows: Vec<_> = self
+        let mut rows: Vec<_> = self
             .navigation_rows()
             .into_iter()
             .filter(|r| r.badge != Badge::None)
             .collect();
+        // 模块通过 `setAgentOrder` 指定的顺序优先；未列出的保持相对顺序。
+        if let Some(order) = &self.mod_agent_order {
+            let position = |row: &NavigationRow| {
+                row.terminal
+                    .as_ref()
+                    .and_then(|address| order.iter().position(|item| item == address))
+                    .unwrap_or(usize::MAX)
+            };
+            rows.sort_by_key(position);
+        }
         if rows.is_empty() {
             return;
         }

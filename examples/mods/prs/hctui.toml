@@ -1,0 +1,14 @@
+[mod]
+id = "prs"
+title = "Pull Requests"
+place = "none"
+host_api = 1
+
+[overlay]
+kind = "dialog"
+width = 80
+height = 18
+
+[grants]
+host = ["state", "exec", "overlay", "closeOverlay"]
+events = ["app.ready", "theme.changed"]

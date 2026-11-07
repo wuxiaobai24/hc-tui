@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
 版本：v0.2（2026-11-06）
-状态：实施中。M1–M3 已交付（提交 `6917533`、`faf940f`、`e97a9df`），M4 进行中，其余未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+状态：实施中。M1–M4 已交付（提交 `6917533`、`faf940f`、`e97a9df` 与本次提交），M5 及之后未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -66,7 +66,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M1 渲染基线 | ✅ 已交付（`6917533`） | ratatui 0.30.2 + crossterm 0.29；导入全部迁到 ratatui-core / ratatui-widgets / ratatui-crossterm，facade 零残留；80×24 / 120×40 帧快照升级前后逐格 0 差异；单元、回放、遮挡、E2E、smoke 全过 |
 | M2 nsh 探针 | ✅ 已交付（`faf940f`） | 固定 nsh `951556dc`；`nsh-platform-tui` + `nsh-engine`（default-features off、js on）；`tests/mods_probe.rs` 在 TestBackend 的 Pane 矩形内加载最小 TSX bundle，验证按键/鼠标/粘贴/resize/唤醒/退出/干净停止；musl 双目标冷构建基线与第三方声明写入 docs/release.md |
 | M3 外框与表面 | ✅ 已交付（`e97a9df`） | `src/mods/chrome.rs` 外框树（row/column/block、serde 往返、未知字段拒绝、折叠规则）；`ui::draw` 改外框驱动，默认帧与 M1 逐格一致；state.json schema 4（`mods_chrome`、`mods_windows`）；`mods.dock` / `mods.undock` / `mods.chrome` 动作；`--no-mods`；Kitty 图片按模块区域遮挡、关闭恢复；`pane.go` 焦点循环泛化为组合目标，无表面的模块区域不参与 |
-| M4 宿主通道与实例 | 🚧 进行中（未提交） | 已写：`src/mods/mod.rs` 表面注册表（代际/授予/请求/位置记忆）、`src/mods/host.rs`（params 构建、方法清单、exec 子进程 30 s/8 MiB/并发 4）、`src/mods/input.rs`（crossterm→Input 翻译，含测试）、`src/mods/render.rs`（z 序与帧预算 8 ms/32 ms、dialog/popup 矩形）、`src/app/mods.rs`（调用分发/状态快照/事件/staging 重载，未接完）。待办：App 字段接线（`mods`/`mod_revision`/`mods_dirty`/`pending_mod_rpc`/`mod_agent_order`）、`config.mods_dir()`、ui::draw 表面绘制接入、on_key/on_mouse 路由与焦点切换、actions.rs `mods.*` 全量分发、主题/焦点/app.ready 事件触发点、`mods_grants` 持久化、三个示例与 `mods check` |
+| M4 宿主通道与实例 | ✅ 已交付（本次提交） | `src/mods/mod.rs` 表面注册表（代际/授予/请求/位置记忆，`grants_for`、pending 与 `WindowPos` state 形态）；`src/mods/host.rs`（params、15 个方法、`exec` 子进程 30 s/8 MiB/单表面并发 4、远端路由）；`src/mods/input.rs`（crossterm→Input，含测试）；`src/mods/render.rs`（region/pane/dialog/popup/window 的 z 序、8 ms/32 ms 预算、失败表面错误行）；`src/mods/check.rs`（清单校验、`host_api`/`min_hc_tui_version`、80×24 试渲染、`nsh check` 包装）；`src/app/mods.rs`（调用分发、快照与领域过滤、事件、staging 重载、授予确认、键鼠粘贴路由、覆盖层 Esc、停靠表面同步、窗口位置记忆）；App 接线（`mods`/`mod_revision`/`mod_wake`/`mods_dirty`/`pending_mod_rpc`/`mod_agent_order`/`mod_chrome_sync`）、`ui::draw` 表面绘制、`pane.go` 焦点循环、`mods.*` 动作、`app.ready`/`state.changed`/`terminal.*`/`focus.changed`/`theme.changed`/`grant.changed` 触发点、`state.json` 的 `mods_grants`；三个示例 `examples/mods/{agents,spaces,prs}` 通过 `hc-tui mods check` |
 | M5 安装与分发 | ⏳ 未开始 | |
 | M6 插件清单与动作 | ⏳ 未开始 | 可与 M4–M5 并行，只依赖现有动作分发器 |
 | M7 插件终端与多机 | ⏳ 未开始 | |

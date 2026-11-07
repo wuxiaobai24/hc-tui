@@ -1,0 +1,11 @@
+[mod]
+id = "spaces"
+title = "Spaces"
+place = "left"
+size = 24
+focusable = true
+host_api = 1
+
+[grants]
+host = ["state", "run", "focus"]
+events = ["state.changed", "focus.changed", "app.ready"]

@@ -1,6 +1,8 @@
 /target
 /dist
 **/target
+**/dist
+**/.nsh/
 /dist
 **/zig-out
 **/zig-cache

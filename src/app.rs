@@ -42,6 +42,7 @@ mod branches;
 pub(crate) mod interaction;
 mod keyboard;
 mod layouts;
+mod mods;
 mod mouse_resize;
 mod panels;
 mod renaming;
@@ -241,6 +242,7 @@ pub enum ChooserKind {
     Machines,
     Commands,
     Actions,
+    Grants,
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +289,8 @@ struct LocalState {
     mods_chrome: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     mods_windows: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mods_grants: Option<serde_json::Value>,
 }
 
 /// 普通模式下鼠标拖选。
@@ -353,6 +357,20 @@ pub struct App {
     pub chrome: crate::mods::chrome::Chrome,
     /// `window` 覆盖层位置与 `key`；schema 4 起随本地状态保存。
     pub mods_windows: std::collections::BTreeMap<String, serde_json::Value>,
+    /// 模块运行时：表面、代际、授予、请求。
+    pub mods: crate::mods::ModRuntime,
+    /// 模块可见的数据版本；变化时递增并发 `state.changed`。
+    pub mod_revision: u64,
+    /// 引擎线程置位的唤醒标记；只置位，不触碰 App 状态。
+    pub mod_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 外框与表面已同步的树快照，避免每轮重建。
+    pub mod_chrome_sync: Option<String>,
+    /// 有待发的 `state.changed`。
+    pub mods_dirty: bool,
+    /// 模块通过 `setAgentOrder` 设定的 agent 顺序（按终端地址）。
+    pub mod_agent_order: Option<Vec<String>>,
+    /// 等待 core RPC 应答的宿主调用：tag → (方法, 应答通道)。
+    pub pending_mod_rpc: std::collections::HashMap<String, (String, Option<nsh_engine::HostReply>)>,
     /// 当前持有键盘焦点的模块区域 ID；`None` 时焦点在 Pane。
     pub focused_mod: Option<String>,
     /// 本轮绘制记录的模块区域；图形遮挡与焦点循环使用。
@@ -510,6 +528,13 @@ impl App {
             chrome: crate::mods::chrome::Chrome::default_tree(&config),
             mod_regions: Vec::new(),
             mods_windows: std::collections::BTreeMap::new(),
+            mods: crate::mods::ModRuntime::default(),
+            mod_revision: 0,
+            mod_wake: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mod_chrome_sync: None,
+            mods_dirty: false,
+            mod_agent_order: None,
+            pending_mod_rpc: std::collections::HashMap::new(),
             focused_mod: None,
             tab_bar: Rect::new(0, 0, 0, 0),
             tab_add: Rect::new(0, 0, 0, 0),
@@ -670,7 +695,10 @@ impl App {
     }
 
     pub fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+        let awake = self
+            .mod_wake
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        std::mem::take(&mut self.dirty) || awake
     }
 
     pub fn focused(&self) -> u32 {
@@ -786,6 +814,8 @@ impl App {
     /// 防抖持久化、toast 过期、恢复超时。
     pub fn tick(&mut self) {
         let now = Instant::now();
+        self.sync_mod_surfaces();
+        self.pump_mods();
         if self.restore_pending && now.duration_since(self.restore_since) >= RESTORE_TIMEOUT {
             self.restore_pending = false;
             self.ensure_layout();
@@ -983,6 +1013,11 @@ impl App {
         if self.seen_dirty {
             if let Some(since) = self.seen_since {
                 deadlines.push(since + Duration::from_millis(500));
+            }
+        }
+        for surface in &self.mods.surfaces {
+            if let Some(deadline) = surface.view.next_frame_deadline() {
+                deadlines.push(deadline);
             }
         }
         deadlines.into_iter().min()
@@ -1189,7 +1224,11 @@ impl App {
                 || self.workspace_mode
                 || self.keyboard_mode != interaction::KeyboardMode::Normal;
             if !local {
-                self.forward_key(key);
+                if self.focused_mod.is_some() {
+                    self.route_key_to_mod(key);
+                } else {
+                    self.forward_key(key);
+                }
             }
             return;
         }
@@ -1263,6 +1302,14 @@ impl App {
             }
             return;
         }
+        // `Esc` 关闭顶层覆盖层，覆盖层内的其它 `Esc` 交给模块。
+        if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Esc
+            && self.focused_mod.is_some()
+            && self.close_top_mod_overlay()
+        {
+            return;
+        }
         let keys = &self.config.keys;
         if key.kind == KeyEventKind::Press && keys.prefix.matches_direct(&key) {
             self.prefix = true;
@@ -1284,6 +1331,20 @@ impl App {
                 self.run_custom(index);
                 return;
             }
+        }
+        if self.focused_mod.is_some() {
+            if key.kind == KeyEventKind::Press
+                && matches!(key.code, KeyCode::Char('v' | 'V'))
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                if let Ok(bytes) = clipboard::image() {
+                    self.upload_image(bytes);
+                    return;
+                }
+            }
+            self.route_key_to_mod(key);
+            return;
         }
         // Host text paste remains Event::Paste. Ctrl+V can request image data
         // directly when the host cannot represent it as a paste event.
@@ -1374,6 +1435,10 @@ impl App {
         if let Some(chat) = self.chat.as_mut() {
             chat.insert(&text);
             self.dirty = true;
+            return;
+        }
+        if self.focused_mod.is_some() {
+            self.route_paste_to_mod(text);
             return;
         }
         let pane_id = self.input_pane();
@@ -1470,6 +1535,10 @@ impl App {
         }
 
         if self.on_layout_mouse(mouse) {
+            return;
+        }
+
+        if self.route_mouse_to_mod(mouse) {
             return;
         }
 
@@ -2158,9 +2227,13 @@ impl App {
     fn dispatch_binding(&mut self, key: KeyEvent, prefix: bool) {
         let keys = self.config.keys.clone();
 
-        // 前缀键再按一次：把这次按键原样交给程序（发送字面 ctrl+b）。
+        // 前缀键再按一次：把这次按键原样交给当前输入目标（字面 ctrl+b）。
         if prefix && keys.prefix.matches_direct(&key) {
-            self.forward_key(key);
+            if self.focused_mod.is_some() {
+                self.route_key_to_mod(key);
+            } else {
+                self.forward_key(key);
+            }
             return;
         }
         if let Some(index) = self.custom_command(&key, prefix) {
@@ -3824,12 +3897,12 @@ impl App {
         if let Some(next) = neighbor_by(&rects, from, direction) {
             match next {
                 Target::Pane(pane) => {
-                    self.focused_mod = None;
+                    self.focus_mod_surface(None);
                     self.set_focus(pane.0);
                 }
                 Target::Mod(index) => {
                     if let Some((id, _)) = self.mod_focusables().get(index) {
-                        self.focused_mod = Some(id.clone());
+                        self.focus_mod_surface(Some(id.clone()));
                     }
                 }
             }
@@ -3837,21 +3910,28 @@ impl App {
     }
 
     /// 参与 `pane.go` 焦点循环的模块区域：未折叠且有运行中的表面。
-    /// 表面注册表接入后按实例存在与否过滤。
     fn mod_focusables(&self) -> Vec<(String, Rect)> {
         if self.config.no_mods {
             return Vec::new();
         }
         self.mod_regions
             .iter()
-            .filter(|region| !region.folded && self.mod_surface_ready(&region.id))
-            .map(|region| (region.id.clone(), region.rect))
+            .filter(|region| !region.folded)
+            .filter_map(|region| {
+                let surface = self.mods.surfaces.iter().find(|surface| {
+                    surface.mod_id == region.id
+                        && matches!(
+                            surface.place,
+                            crate::mods::SurfacePlace::Region | crate::mods::SurfacePlace::Pane
+                        )
+                })?;
+                matches!(
+                    surface.state,
+                    crate::mods::SurfaceState::Running | crate::mods::SurfaceState::Loading
+                )
+                .then(|| (surface.id.clone(), region.rect))
+            })
             .collect()
-    }
-
-    /// 该模块区域是否有一个可接收输入的表面实例。
-    fn mod_surface_ready(&self, _id: &str) -> bool {
-        false
     }
 
     /// 鼠标按在浮动 Pane 上时判断这一下是移动还是改尺寸。
@@ -4182,6 +4262,9 @@ impl App {
             self.mark_seen(pane);
             return;
         }
+        if self.focused_mod.is_some() {
+            self.focus_mod_surface(None);
+        }
         let previous = self.focused();
         self.send(Command::Focus {
             pane: previous,
@@ -4199,6 +4282,8 @@ impl App {
         self.last_pane = Some(previous);
         self.mark_seen(pane);
         self.mark_layout();
+        self.bump_mod_revision();
+        self.send_focus_changed();
     }
 
     /// 跨 Tab、跨工作区把焦点落到某个 Pane 上。
@@ -4771,6 +4856,8 @@ impl App {
                 self.chrome = chrome;
             }
             self.mods_windows = state.mods_windows;
+            self.mods.grants_from_state(state.mods_grants.as_ref());
+            self.load_mod_windows();
         }
     }
 
@@ -4783,6 +4870,7 @@ impl App {
             folded_agent_groups: self.folded_agent_groups.clone(),
             mods_chrome: Some(self.chrome.to_state()),
             mods_windows: self.mods_windows.clone(),
+            mods_grants: Some(self.mods.grants_to_state()),
         };
         let path = self.config.state_path.clone();
         if let Some(parent) = path.parent() {
@@ -4793,9 +4881,18 @@ impl App {
         }
     }
 
-    /// `window` 覆盖层的遮挡矩形；表面实例接入后按 mods_windows 记录的位置返回。
+    /// 覆盖层与 Pane 内表面的遮挡矩形；region 已由 `mod_regions` 覆盖。
     pub fn mods_windows_blockers(&self) -> Vec<ratatui_core::layout::Rect> {
-        Vec::new()
+        self.mods
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                !matches!(surface.place, crate::mods::SurfacePlace::Region)
+                    && surface.area.width > 0
+                    && surface.area.height > 0
+            })
+            .map(|surface| surface.area)
+            .collect()
     }
 
     /// 记下请求参数，答复丢了还能重放。
@@ -5052,6 +5149,7 @@ impl App {
         self.chooser = None;
         match chooser.kind {
             ChooserKind::Actions => self.activate_pointer_action(&item.value),
+            ChooserKind::Grants => self.approve_mod_grant(&item.value),
             ChooserKind::Templates => self.spawn_program_in_new_tab(vec![item.value], None),
             ChooserKind::Machines => self.open_remote_pane(item.value),
             ChooserKind::Commands => {
@@ -5168,6 +5266,8 @@ impl App {
             NetEvent::Hello { version, core } => {
                 self.connection = Connection::Ready { version, core };
                 self.retry_pending_calls();
+                self.bump_mod_revision();
+                self.notify_mods_ready();
                 if self.restore_pending {
                     self.request_doc("doc.get");
                 } else {
@@ -5329,6 +5429,11 @@ impl App {
                 self.dirty |=
                     chat.remote_reply(tag, &params, result.map_err(|error| error.message));
             }
+            return;
+        }
+        if tag.starts_with("mod-rpc-") {
+            let outcome = result.map_err(|error| error.message);
+            self.settle_mod_rpc(tag, &outcome);
             return;
         }
         if let Some(id) = tag
@@ -6289,6 +6394,7 @@ impl App {
             }
             _ => {}
         }
+        self.on_mod_terminal_event(&event.kind, target.as_deref(), &event.data);
     }
 
     /// Agent 进入 blocked / done 且当前不可见时提示一次。
@@ -6893,8 +6999,9 @@ pub fn run(config: Config) -> Result<()> {
                 Event::Key(key) => app.on_key(key),
                 Event::Paste(text) => app.on_paste(text),
                 Event::Mouse(mouse) => app.on_mouse(mouse),
+                Event::FocusGained => app.route_focus_to_mods(true),
+                Event::FocusLost => app.route_focus_to_mods(false),
                 Event::Resize(_, _) => app.mark_dirty(),
-                _ => {}
             }
         }
         app.pump();

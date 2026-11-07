@@ -26,6 +26,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("update") => hc_tui::update::run(&args[1..]),
+        Some("mods") => mods_command(&args[1..]),
         Some("probe") => probe(&args[1..]),
         Some("commands") => {
             println!(
@@ -92,6 +93,10 @@ fn usage() {
     println!("{}", t("       hc-tui commands | ls [options]"));
     println!(
         "{}",
+        t("       hc-tui mods check <path|id>... [--config <path>]")
+    );
+    println!(
+        "{}",
         t("       hc-tui do <command> [JSON arguments] [options]")
     );
     println!();
@@ -115,6 +120,55 @@ fn usage() {
         "{}",
         t("  --no-mods          builtin chrome, no module runtime")
     );
+}
+
+/// `hc-tui mods` 子命令；只读检查不依赖运行中的窗口。
+fn mods_command(args: &[String]) -> Result<()> {
+    let Some(sub) = args.first().map(String::as_str) else {
+        anyhow::bail!(t("usage: hc-tui mods check <path|id> [--config <path>]"))
+    };
+    match sub {
+        "check" => {
+            let mut targets: Vec<String> = Vec::new();
+            let mut path = None;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--config" => {
+                        index += 1;
+                        path = Some(std::path::PathBuf::from(
+                            args.get(index)
+                                .cloned()
+                                .ok_or_else(|| anyhow::anyhow!(t("--config needs a value")))?,
+                        ));
+                    }
+                    other if other.starts_with('-') => {
+                        anyhow::bail!(t1("unknown option: {}", other))
+                    }
+                    other => targets.push(other.to_string()),
+                }
+                index += 1;
+            }
+            if targets.is_empty() {
+                anyhow::bail!(t("usage: hc-tui mods check <path|id>..."));
+            }
+            let config = hc_tui::config::Config::load(path);
+            for target in &targets {
+                let report =
+                    hc_tui::mods::check::check(&config, target).map_err(anyhow::Error::msg)?;
+                println!("{} {}", report.id, t("ok"));
+                println!("{}", t1("  path {}", report.path.display()));
+                if !report.grants.is_empty() {
+                    println!("{}", t1("  grants {}", report.grants.join(", ")));
+                }
+                for warning in report.warnings {
+                    println!("{}", t1("  warning: {}", warning));
+                }
+            }
+            Ok(())
+        }
+        other => anyhow::bail!(t1("unknown mods command: {}", other)),
+    }
 }
 
 /// 先读 `--config`，再让文件里的值成为基线，最后应用命令行覆盖。

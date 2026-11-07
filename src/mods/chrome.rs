@@ -276,6 +276,27 @@ impl Chrome {
         }
     }
 
+    /// 外框里声明的模块区域，按树的顺序返回 `(id, props)`。
+    pub fn mods(&self) -> Vec<(String, Value)> {
+        fn walk(node: &ChromeNode, out: &mut Vec<(String, Value)>) {
+            match node {
+                ChromeNode::Row { children } | ChromeNode::Column { children } => {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+                ChromeNode::Block {
+                    content: ChromeContent::Mod { r#mod, props },
+                    ..
+                } => out.push((r#mod.clone(), props.clone())),
+                ChromeNode::Block { .. } => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.root, &mut out);
+        out
+    }
+
     /// 按外框树与运行时状态计算区域矩形。
     pub fn layout(&self, params: LayoutParams<'_>) -> ChromeLayout {
         let mut out = ChromeLayout::default();

@@ -1,0 +1,11 @@
+[mod]
+id = "agents"
+title = "Agents"
+place = "right"
+size = 32
+focusable = true
+host_api = 1
+
+[grants]
+host = ["state", "run", "focus", "notify"]
+events = ["state.changed", "focus.changed", "app.ready", "terminal.status", "terminal.turn"]
