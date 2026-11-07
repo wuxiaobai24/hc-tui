@@ -3,10 +3,11 @@
 //! 入口只接受两种程序：目标机器 PATH 中的程序，以及 `./` 开头、相对代际目录
 //! 的程序。后者只能在安装所在的客户端主机启动；目标机器不同时返回
 //! `unsupported`，不换成本机执行。`requires_programs` 与 PATH 中的 `argv[0]`
-//! 都在目标机器上检查，缺失时报 `missing_program` 并列出缺失项。
+//! 一律交给实际执行位置（core）检查，缺失时报 `missing_program` 并列出缺失项；
+//! TUI 的环境变量不参与最终判决。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
@@ -30,6 +31,76 @@ pub struct Request {
     pub cwd: Option<String>,
     pub machine: Option<String>,
     pub placement: Option<String>,
+}
+
+/// 目标选择器：调用方给出的 Pane、终端地址或 Space。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetSelector {
+    /// Pane 编号或终端地址；解析失败不回退当前焦点。
+    pub pane_or_terminal: Option<String>,
+    /// 稳定的 Space 身份（`sp<id>` 或共享文档里的 origin）。
+    pub space: Option<String>,
+    /// 目标机器；`local` 与空值都表示本机。
+    pub machine: Option<String>,
+    /// 工作目录。
+    pub cwd: Option<String>,
+}
+
+impl TargetSelector {
+    /// 是否指定了任何目标。
+    pub fn is_empty(&self) -> bool {
+        self.pane_or_terminal.is_none()
+            && self.space.is_none()
+            && self.machine.is_none()
+            && self.cwd.is_none()
+    }
+}
+
+/// 解析后的不可变执行目标；上下文、环境与放置都由它生成。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionTarget {
+    /// 稳定的 Space 身份。
+    pub space: String,
+    /// Space 名称。
+    pub space_name: String,
+    /// 目标 Space 在本次运行里的下标，只用于布局；本实例看不见该 Space 时为 `None`。
+    pub index: Option<usize>,
+    /// 稳定的 Tab 身份。
+    pub tab: String,
+    /// 机器；`None` 表示本机。
+    pub machine: Option<String>,
+    /// 工作目录。
+    pub cwd: Option<String>,
+    /// 目标 Pane（本实例的视图句柄）。
+    pub pane: Option<u32>,
+    /// 目标终端地址。
+    pub terminal: Option<String>,
+}
+
+/// 规划完成、等待放置的终端入口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTerminal {
+    /// `terminal.run` 与布局参数。
+    pub plan: Plan,
+    /// 冻结下来的执行目标。
+    pub target: ExecutionTarget,
+}
+
+/// 按冻结的目标规划一次入口。
+pub fn prepare(
+    info: &TerminalInfo,
+    target: ExecutionTarget,
+    placement: Option<String>,
+) -> Result<PreparedTerminal, PlanError> {
+    let plan = plan(
+        info,
+        &Request {
+            cwd: target.cwd.clone(),
+            machine: target.machine.clone(),
+            placement,
+        },
+    )?;
+    Ok(PreparedTerminal { plan, target })
 }
 
 /// 规划结果：直接映射到 `terminal.run` 与实际布局操作。
@@ -140,36 +211,6 @@ pub fn plan(info: &TerminalInfo, request: &Request) -> Result<Plan, PlanError> {
     })
 }
 
-/// 本机 PATH 里缺少的程序。
-pub fn local_missing(programs: &[String]) -> Vec<String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    programs
-        .iter()
-        .filter(|program| find_in(&dirs, program).is_none())
-        .cloned()
-        .collect()
-}
-
-fn find_in(dirs: &[PathBuf], program: &str) -> Option<PathBuf> {
-    dirs.iter()
-        .map(|dir| dir.join(program))
-        .find(|path| is_executable(path))
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    path.metadata()
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
 /// 目标机器上的探测脚本：逐行打印缺失的程序，全部存在时不输出。
 pub fn probe_line(programs: &[String]) -> String {
     let mut line = String::from("for p in");
@@ -186,8 +227,8 @@ fn shell_word(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-/// 目标机器探测的 `machine.exec` 参数。
-pub fn probe_params(programs: &[String], machine: &str, timeout: u64) -> Value {
+/// 目标机器探测的 `machine.exec` 参数；`machine` 为 `None` 时由 core 在本机执行。
+pub fn probe_params(programs: &[String], machine: Option<&str>, timeout: u64) -> Value {
     json!({
         "argv": ["sh", "-c", probe_line(programs)],
         "on": machine,
@@ -251,6 +292,7 @@ pub fn env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn entry(root: PathBuf, argv: Vec<&str>, requires: Vec<&str>) -> TerminalInfo {
         TerminalInfo {
@@ -308,13 +350,12 @@ mod tests {
             vec!["lazygit", "definitely-missing-hctui-prog"],
         );
         let plan = plan(&info, &Request::default()).unwrap();
+        // argv[0] 与 requires_programs 一起交给执行位置探测，TUI 不作判决。
         assert_eq!(
             plan.programs,
             vec!["lazygit", "definitely-missing-hctui-prog"]
         );
-        let missing = local_missing(&plan.programs);
-        assert_eq!(missing, vec!["definitely-missing-hctui-prog"]);
-        let error = missing_error(None, &missing);
+        let error = missing_error(None, &["definitely-missing-hctui-prog".to_string()]);
         assert_eq!(error.kind, MISSING_PROGRAM);
         assert!(error.message.contains("definitely-missing-hctui-prog"));
         std::fs::remove_dir_all(&dir).ok();
@@ -351,8 +392,10 @@ mod tests {
         assert!(line.contains("'lazygit'"));
         assert!(line.contains("'we'\\''ird prog'"), "{line}");
         assert!(line.contains("command -v \"$p\""));
-        let params = probe_params(&programs, "peer", 20);
+        let params = probe_params(&programs, Some("peer"), 20);
         assert_eq!(params["on"], json!("peer"));
+        // 本机入口同样交给 core 探测，`on` 为 null。
+        assert_eq!(probe_params(&programs, None, 20)["on"], Value::Null);
         assert_eq!(params["argv"][0], json!("sh"));
         let missing = parse_missing("we'ird prog\njq\n", &programs);
         assert_eq!(missing, vec!["we'ird prog".to_string(), "jq".to_string()]);

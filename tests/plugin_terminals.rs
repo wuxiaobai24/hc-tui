@@ -334,7 +334,7 @@ fn remote_terminal_keeps_argv_cwd_env_and_survives_view_close() -> Result<()> {
         let probe = conn
             .call(
                 "machine.exec",
-                terminal::probe_params(&programs, "peer", 20),
+                terminal::probe_params(&programs, Some("peer"), 20),
             )
             .await?;
         let stdout = STANDARD

@@ -15,8 +15,8 @@ use crate::model::{Launch, Tab};
 use crate::plugin::lease::{self, GenerationPin, ResourceOwner, RetentionEvidence, TerminalAddress};
 use crate::plugin::manifest;
 use crate::plugin::registry::{ActionInfo, Registry};
-use crate::plugin::runner::{InvokeError, Spec};
-use crate::plugin::terminal::{self, Plan, PlanError};
+use crate::plugin::runner::{InvocationSpec, InvokeError};
+use crate::plugin::terminal::{self, ExecutionTarget, Plan, PlanError, PreparedTerminal, TargetSelector};
 
 /// 一个落在 Pane 里的插件终端入口。
 #[derive(Debug, Clone)]
@@ -105,11 +105,13 @@ impl App {
             }),
         )
         .map_err(|error| anyhow::anyhow!(t1("cannot pin plugin generation: {}", error)))?;
-        let (target, pane) = self.plugin_target(&action, target_arg);
-        let context = self.plugin_context(&action, &request, args, target, pane);
+        let (target, _pane) = self
+            .plugin_target(&action, target_arg)
+            .map_err(anyhow::Error::msg)?;
+        let context = self.plugin_context(&action, &request, args, target);
         self.prepare_plugin_dirs(&action);
         let env = self.plugin_env(&action, &request);
-        let spec = Spec {
+        let spec = InvocationSpec {
             package: action.package.clone(),
             action: action.action.clone(),
             root: action.root.clone(),
@@ -119,6 +121,7 @@ impl App {
             env,
             request: Some(request.clone()),
             pin: Some(pin),
+            stdin_limit: crate::plugin::runner::MAX_STDIN,
         };
         match self.plugin_runner.invoke(spec) {
             Ok(request) => {
@@ -206,71 +209,192 @@ impl App {
         }
     }
 
-    fn plugin_target(&self, action: &ActionInfo, requested: Option<Value>) -> (Value, Option<u32>) {
-        let mut pane = None;
-        if let Some(requested) = requested {
-            let pick = requested
-                .get("pane")
-                .and_then(Value::as_u64)
-                .map(|id| id as u32)
+    /// 目标解析：请求里给了目标就只看目标，绝不回退到当前焦点。
+    pub fn resolve_plugin_target(
+        &self,
+        selector: &TargetSelector,
+    ) -> std::result::Result<ExecutionTarget, PlanError> {
+        if let Some(raw) = selector.pane_or_terminal.as_deref() {
+            let raw = raw.trim();
+            let pane = raw
+                .parse::<u32>()
+                .ok()
+                .filter(|pane| self.panes.contains_key(pane))
                 .or_else(|| {
-                    requested
-                        .get("pane_or_terminal")
-                        .and_then(Value::as_str)
-                        .and_then(|value| {
-                            value.parse::<u32>().ok().or_else(|| {
-                                self.panes
-                                    .iter()
-                                    .find(|(_, state)| state.terminal.as_deref() == Some(value))
-                                    .map(|(id, _)| *id)
-                            })
-                        })
+                    self.panes
+                        .iter()
+                        .find(|(_, state)| state.terminal.as_deref() == Some(raw))
+                        .map(|(pane, _)| *pane)
                 });
-            pane = pick;
-        }
-        if pane.is_none() && action.contexts.iter().any(|context| context == "pane") {
-            let focused = self.focused();
-            if self.panes.contains_key(&focused) {
-                pane = Some(focused);
+            if let Some(pane) = pane {
+                return self.target_of_pane(pane, selector);
             }
+            // 本实例没有视图：退回到 core 的终端列表，仍然只认这条终端。
+            if let Some(summary) = self.terminals.iter().find(|item| item.address == raw) {
+                let machine = raw
+                    .split_once('/')
+                    .map(|(machine, _)| machine.to_string())
+                    .filter(|machine| machine != "local");
+                // 本实例没有这条终端的视图：Space 只能取自 core 的归属，
+                // 拿不到就不编造（动作上下文仍可用机器与 cwd，放置则会失败）。
+                let mapped = summary
+                    .space_id
+                    .as_deref()
+                    .and_then(|id| self.plugin_workspace_index(id));
+                let (index, space, space_name) = match mapped {
+                    Some(index) => (
+                        Some(index),
+                        format!("sp{}", self.workspaces[index].id),
+                        self.workspaces[index].label.clone(),
+                    ),
+                    None => (
+                        None,
+                        summary.space_id.clone().unwrap_or_default(),
+                        String::new(),
+                    ),
+                };
+                return Ok(ExecutionTarget {
+                    space,
+                    space_name,
+                    index,
+                    tab: summary
+                        .tab_id
+                        .as_deref()
+                        .map(|id| format!("tb{id}"))
+                        .unwrap_or_default(),
+                    machine: selector.machine.clone().or(machine),
+                    cwd: selector.cwd.clone().or_else(|| summary.cwd.clone()),
+                    pane: None,
+                    terminal: Some(summary.address.clone()),
+                });
+            }
+            return Err(PlanError::new(
+                terminal::TARGET_GONE,
+                t1("terminal or pane {} is gone", raw),
+            ));
         }
-        let space = self
-            .workspace()
-            .map(|workspace| {
-                json!({
-                    "id": format!("sp{}", workspace.id),
-                    "name": workspace.label,
-                    "machine": workspace.machine,
-                    "folder": workspace.folder,
-                })
-            })
-            .unwrap_or(Value::Null);
-        let tab = self
-            .workspace()
-            .and_then(|workspace| workspace.tab())
-            .map(|tab| json!({"id": format!("tb{}", tab.id)}))
-            .unwrap_or(Value::Null);
-        let Some(pane) = pane else {
-            return (
-                json!({
-                    "space": space,
-                    "tab": tab,
-                    "pane": Value::Null,
-                    "terminal": Value::Null,
-                    "kind": "space",
-                }),
-                None,
-            );
+        if let Some(space) = selector.space.as_deref() {
+            let index = self.plugin_workspace_index(space).ok_or_else(|| {
+                PlanError::new(terminal::TARGET_GONE, t1("space {} is gone", space))
+            })?;
+            return self.target_of_space(index, selector);
+        }
+        if selector.is_empty() {
+            return Err(PlanError::new(
+                terminal::TARGET_GONE,
+                t("no target was given"),
+            ));
+        }
+        let index = self.active_ws.min(self.workspaces.len().saturating_sub(1));
+        self.target_of_space(index, selector)
+    }
+
+    fn target_of_pane(
+        &self,
+        pane: u32,
+        selector: &TargetSelector,
+    ) -> std::result::Result<ExecutionTarget, PlanError> {
+        let (index, tab_index) = self.locate(pane).ok_or_else(|| {
+            PlanError::new(
+                terminal::TARGET_GONE,
+                t1("pane {} is not in any space", pane),
+            )
+        })?;
+        let workspace = &self.workspaces[index];
+        let mut target = ExecutionTarget {
+            space: format!("sp{}", workspace.id),
+            space_name: workspace.label.clone(),
+            index: Some(index),
+            tab: workspace
+                .tabs
+                .get(tab_index)
+                .map(|tab| format!("tb{}", tab.id))
+                .unwrap_or_default(),
+            machine: None,
+            cwd: None,
+            pane: Some(pane),
+            terminal: self.panes.get(&pane).and_then(|state| state.terminal.clone()),
         };
-        let state = self.panes.get(&pane);
-        let target = json!({
+        target.machine = machine_of(selector.machine.as_deref(), workspace.machine.clone());
+        target.cwd = selector.cwd.clone().or_else(|| workspace.folder.clone());
+        Ok(target)
+    }
+
+    fn target_of_space(
+        &self,
+        index: usize,
+        selector: &TargetSelector,
+    ) -> std::result::Result<ExecutionTarget, PlanError> {
+        let workspace = self.workspaces.get(index).ok_or_else(|| {
+            PlanError::new(terminal::TARGET_GONE, t("the target space is gone"))
+        })?;
+        let mut target = ExecutionTarget {
+            space: format!("sp{}", workspace.id),
+            space_name: workspace.label.clone(),
+            index: Some(index),
+            tab: workspace
+                .tab()
+                .map(|tab| format!("tb{}", tab.id))
+                .unwrap_or_default(),
+            machine: None,
+            cwd: None,
+            pane: None,
+            terminal: None,
+        };
+        target.machine = machine_of(selector.machine.as_deref(), workspace.machine.clone());
+        target.cwd = selector.cwd.clone().or_else(|| workspace.folder.clone());
+        Ok(target)
+    }
+
+    fn plugin_target(
+        &self,
+        action: &ActionInfo,
+        requested: Option<Value>,
+    ) -> std::result::Result<(Value, Option<u32>), PlanError> {
+        let selector = requested
+            .as_ref()
+            .map(target_selector)
+            .unwrap_or_default();
+        let target = if selector.is_empty() {
+            let pane_context = action.contexts.iter().any(|context| context == "pane");
+            if pane_context {
+                let focused = self.focused();
+                if !self.panes.contains_key(&focused) {
+                    return Err(PlanError::new(
+                        terminal::TARGET_GONE,
+                        t("there is no focused pane to target"),
+                    ));
+                }
+                self.target_of_pane(focused, &selector)?
+            } else {
+                let index = self.active_ws.min(self.workspaces.len().saturating_sub(1));
+                self.target_of_space(index, &selector)?
+            }
+        } else {
+            self.resolve_plugin_target(&selector)?
+        };
+        let space = json!({
+            "id": target.space,
+            "name": target.space_name,
+            "machine": target.machine,
+            "folder": target.cwd,
+        });
+        let tab = json!({"id": target.tab});
+        let kind = if target.pane.is_some() {
+            "pane"
+        } else if target.terminal.is_some() {
+            "terminal"
+        } else {
+            "space"
+        };
+        let value = json!({
             "space": space,
             "tab": tab,
-            "pane": json!(pane),
-            "terminal": state.and_then(|state| state.terminal.clone()),
-            "kind": "pane",
+            "pane": target.pane,
+            "terminal": target.terminal,
+            "kind": kind,
         });
-        (target, Some(pane))
+        Ok((value, target.pane))
     }
 
     fn plugin_context(
@@ -279,7 +403,6 @@ impl App {
         request: &str,
         args: Value,
         target: Value,
-        _pane: Option<u32>,
     ) -> Value {
         json!({
             "api_version": 1,
@@ -297,7 +420,10 @@ impl App {
             "machine": {
                 "client": client_host(),
                 "core": client_host(),
-                "workspace": self.workspace_machine(self.active_ws),
+                "workspace": target
+                    .pointer("/space/machine")
+                    .and_then(Value::as_str)
+                    .unwrap_or("local"),
             },
             "locale": if crate::i18n::zh() { "zh" } else { "en" },
         })
@@ -501,47 +627,31 @@ impl App {
                 })?
             }
         };
-        if let Some(space) = body
-            .get("space")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|space| !space.is_empty())
-        {
-            let index = self.plugin_workspace_index(space).ok_or_else(|| {
-                PlanError::new(terminal::TARGET_GONE, t1("space {} is gone", space))
-            })?;
-            self.select_workspace(index);
-        }
-        let machine = body
-            .get("machine")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                let machine = self.workspace_machine(self.active_ws);
-                (machine != "local").then_some(machine)
-            });
-        let cwd = body
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                self.workspace()
-                    .and_then(|workspace| workspace.folder.clone())
-            });
-        let placement = body
-            .get("placement")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let plan = terminal::plan(
-            &info,
-            &terminal::Request {
-                cwd,
-                machine,
-                placement,
-            },
-        )?;
+        let text = |key: &str| {
+            body.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let selector = TargetSelector {
+            pane_or_terminal: text("pane").or_else(|| text("terminal")),
+            space: text("space"),
+            machine: text("machine"),
+            cwd: text("cwd"),
+        };
+        // 没给目标就用当前 Space；给了目标就只认目标，不回退。
+        let target = if selector.is_empty() {
+            let index = self.active_ws.min(self.workspaces.len().saturating_sub(1));
+            self.target_of_space(index, &selector)?
+        } else {
+            self.resolve_plugin_target(&selector)?
+        };
+        let placement = text("placement");
+        let prepared = terminal::prepare(&info, target, placement)?;
         self.next_plugin_pane += 1;
         let request = format!("tp{}", self.next_plugin_pane);
+        let plan = prepared.plan.clone();
         self.plugin_panes.insert(
             request.clone(),
             PaneRequest {
@@ -561,23 +671,15 @@ impl App {
                 self.plugin_panes.remove(&expired);
             }
         }
-        if let Some(machine) = &plan.machine {
-            if !plan.programs.is_empty() {
-                self.plugin_pending.insert(request.clone(), plan.clone());
-                let tag = format!("plugin-probe:{request}");
-                let params = terminal::probe_params(&plan.programs, machine, 20);
-                self.call_rpc(&tag, "machine.exec", params);
-                return Ok(json!({"request": request, "status": "probing"}));
-            }
-        } else {
-            let missing = terminal::local_missing(&plan.programs);
-            if !missing.is_empty() {
-                let error = terminal::missing_error(None, &missing);
-                self.plugin_fail(&request, &error);
-                return Err(error);
-            }
+        // 程序是否存在由实际执行位置（core）回答，TUI 环境不参与判决。
+        if !plan.programs.is_empty() {
+            self.plugin_pending.insert(request.clone(), prepared);
+            let tag = format!("plugin-probe:{request}");
+            let params = terminal::probe_params(&plan.programs, plan.machine.as_deref(), 20);
+            self.call_rpc(&tag, "machine.exec", params);
+            return Ok(json!({"request": request, "status": "probing"}));
         }
-        self.plugin_open_planned(&request, &plan)
+        self.open_plugin_terminal(&request, prepared)
     }
 
     /// 目标机器的探测结果。
@@ -586,11 +688,11 @@ impl App {
         request: &str,
         result: std::result::Result<Value, crate::hc::net::RpcFailure>,
     ) {
-        let Some(plan) = self.plugin_pending.remove(request) else {
+        let Some(prepared) = self.plugin_pending.remove(request) else {
             return;
         };
-        let machine = plan.machine.clone();
-        let programs = plan.programs.clone();
+        let machine = prepared.plan.machine.clone();
+        let programs = prepared.plan.programs.clone();
         let missing = match result {
             Ok(value) => {
                 let stdout = value
@@ -620,7 +722,7 @@ impl App {
             self.dirty = true;
             return;
         }
-        match self.plugin_open_planned(request, &plan) {
+        match self.open_plugin_terminal(request, prepared) {
             Ok(value) => {
                 self.note = t1(
                     "plugin terminal {} opened",
@@ -711,11 +813,33 @@ impl App {
         }
     }
 
-    fn plugin_open_planned(
+    /// 放置冻结的目标：只验证它仍然存在，不重新解析。
+    fn open_plugin_terminal(
         &mut self,
         request: &str,
-        plan: &Plan,
+        prepared: PreparedTerminal,
     ) -> std::result::Result<Value, PlanError> {
+        let target = prepared.target.clone();
+        let wanted = target.space.clone();
+        let matches = |workspace: &crate::model::Workspace| format!("sp{}", workspace.id) == wanted;
+        // 只验证冻结的 Space 还在：先看原下标，再看稳定 ID。
+        let index = target
+            .index
+            .filter(|index| self.workspaces.get(*index).is_some_and(matches))
+            .or_else(|| self.workspaces.iter().position(matches))
+            .ok_or_else(|| {
+                PlanError::new(terminal::TARGET_GONE, t1("space {} is gone", wanted))
+            })?;
+        self.active_ws = index;
+        self.zoom = false;
+        if let Some(tab) = self.workspaces[index]
+            .tabs
+            .iter()
+            .position(|tab| format!("tb{}", tab.id) == target.tab)
+        {
+            self.workspaces[index].active = tab;
+        }
+        let plan = prepared.plan;
         let terminal = PluginTerminal {
             request: request.to_string(),
             name: plan.name.clone(),
@@ -728,7 +852,7 @@ impl App {
             placement: plan.placement.clone(),
             pin: None,
         };
-        let pane = self.spawn_plugin_terminal(&terminal, plan)?;
+        let pane = self.spawn_plugin_terminal(&terminal, &plan, &target)?;
         let mut terminal = terminal;
         // 地址要等 attach 才知道；先按请求登记，拿到 core 地址后 repin。
         if let Ok(pin) = lease::pin(
@@ -760,6 +884,7 @@ impl App {
         &mut self,
         terminal: &PluginTerminal,
         plan: &Plan,
+        target: &ExecutionTarget,
     ) -> std::result::Result<u32, PlanError> {
         let title = plan.title.clone();
         let pane = match plan.placement.as_str() {
@@ -834,10 +959,16 @@ impl App {
                 ))
             }
         };
-        // 上下文里的 Tab 必须是刚建好的这一个。
+        // 上下文里的 Tab 必须是 Pane 实际所在的那一个：`tab`/`zoomed` 放置会建新 Tab。
+        let placed_tab = self
+            .locate(pane)
+            .map(|(index, tab)| {
+                format!("tb{}", self.workspaces[index].tabs[tab].id)
+            })
+            .unwrap_or_else(|| target.tab.clone());
         let env = terminal::env(
             self.plugin_env_base(&plan.package, &plan.root),
-            self.plugin_terminal_context(terminal, plan),
+            self.plugin_terminal_context(terminal, plan, target, &placed_tab),
             &plan.placement,
         );
         let launch = Launch {
@@ -859,23 +990,21 @@ impl App {
         self.dirty = true;
     }
 
-    /// 终端程序的上下文文档：Space 为目标，附带机器身份。
-    fn plugin_terminal_context(&self, terminal: &PluginTerminal, plan: &Plan) -> Value {
-        let workspace = self.workspace();
-        let space = workspace
-            .map(|workspace| {
-                json!({
-                    "id": format!("sp{}", workspace.id),
-                    "name": workspace.label,
-                    "machine": plan.machine,
-                    "folder": plan.cwd,
-                })
-            })
-            .unwrap_or(Value::Null);
-        let tab = workspace
-            .and_then(|workspace| workspace.tab())
-            .map(|tab| json!({"id": format!("tb{}", tab.id)}))
-            .unwrap_or(Value::Null);
+    /// 终端程序的上下文文档：每个字段都来自冻结的目标。
+    fn plugin_terminal_context(
+        &self,
+        terminal: &PluginTerminal,
+        plan: &Plan,
+        target: &ExecutionTarget,
+        placed_tab: &str,
+    ) -> Value {
+        let space = json!({
+            "id": target.space,
+            "name": target.space_name,
+            "machine": target.machine,
+            "folder": target.cwd,
+        });
+        let tab = json!({"id": placed_tab});
         json!({
             "api_version": 1,
             "package": plan.package,
@@ -889,7 +1018,7 @@ impl App {
             "machine": {
                 "client": client_host(),
                 "core": client_host(),
-                "workspace": plan.machine.clone().unwrap_or_else(|| "local".to_string()),
+                "workspace": target.machine.clone().unwrap_or_else(|| "local".to_string()),
             },
             "locale": if crate::i18n::zh() { "zh" } else { "en" },
         })
@@ -1085,6 +1214,37 @@ impl App {
     }
 }
 
+/// `_target` 参数 → 目标选择器。
+fn target_selector(value: &Value) -> TargetSelector {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    TargetSelector {
+        pane_or_terminal: text("pane_or_terminal").or_else(|| {
+            value
+                .get("pane")
+                .and_then(Value::as_u64)
+                .map(|pane| pane.to_string())
+        }),
+        space: text("space"),
+        machine: text("machine"),
+        cwd: text("cwd"),
+    }
+}
+
+/// 显式机器参数优先；`local` 与空值都表示本机。
+fn machine_of(explicit: Option<&str>, fallback: Option<String>) -> Option<String> {
+    explicit
+        .map(|machine| machine.trim().to_string())
+        .or(fallback)
+        .filter(|machine| !machine.is_empty() && machine != "local")
+}
+
 /// `focus` / `close` 参数：终端地址、插件名或 Pane 编号。
 fn plugin_target_argument(body: &Value) -> String {
     ["terminal", "name", "pane"]
@@ -1230,8 +1390,17 @@ mod tests {
             app.new_workspace(None);
             let name = install_terminal(&mut app, "dev.example.term", placement);
             let reply = app.plugin_pane_open(&json!({"name": name}));
-            assert_eq!(reply["status"], "opening", "{placement}: {reply}");
-            let pane = reply["pane"].as_u64().unwrap() as u32;
+            let request = reply["request"].as_str().unwrap().to_string();
+            // 程序检查交给 core：本机入口同样先进入探测。
+            if reply["status"] == "probing" {
+                app.plugin_probe_reply(&request, Ok(json!({"stdout": ""})));
+            }
+            assert_eq!(
+                app.plugin_panes[&request].status.as_str(),
+                "opening",
+                "{placement}: {reply}"
+            );
+            let pane = app.plugin_panes[&request].pane.expect("pane created");
             let state = app.panes.get(&pane).expect("pane created");
             let launch = state.launch.as_ref().expect("launch set");
             assert_eq!(launch.env["HCTUI_PLACEMENT"], placement);
@@ -1245,10 +1414,7 @@ mod tests {
                     "{placement}: context tab mismatch"
                 );
             }
-            assert_eq!(
-                app.plugin_panes[&format!("tp{}", app.next_plugin_pane)].placement,
-                placement
-            );
+            assert_eq!(app.plugin_panes[&request].placement, placement);
             let pins = crate::plugin::lease::pins(&app.config, "dev.example.term");
             assert!(
                 pins.iter().any(|pin| matches!(
@@ -1273,7 +1439,11 @@ mod tests {
         app.new_workspace(None);
         let name = install_terminal(&mut app, "dev.example.lease", "right");
         let reply = app.plugin_pane_open(&json!({"name": name}));
-        let pane = reply["pane"].as_u64().unwrap() as u32;
+        let request = reply["request"].as_str().unwrap().to_string();
+        if reply["status"] == "probing" {
+            app.plugin_probe_reply(&request, Ok(json!({"stdout": ""})));
+        }
+        let pane = app.plugin_panes[&request].pane.expect("pane opened");
         assert_eq!(
             crate::plugin::lease::live_generations(&app.config, "dev.example.lease"),
             vec![1]
@@ -1436,6 +1606,36 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// 宿主退出要取消运行中的动作并清理进程组，而不是等三秒就走。
+    #[test]
+    fn shutdown_cancels_running_plugins_and_cleans_the_group() {
+        let mut app = app();
+        let root = scratch(&app);
+        let source = write_source(
+            &root,
+            "dev.example.stop",
+            "[\"true\"]",
+            "[\"sh\", \"-c\", \"sleep 60 & echo $! > ./child.pid; sleep 60\"]",
+        );
+        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        app.plugins = Registry::load(&app.config);
+        let dir = installed_generation(&app, "dev.example.stop", record.generation);
+        app.invoke_plugin("dev.example.stop.run", json!({})).unwrap();
+        let request = app.plugin_request.clone().unwrap();
+        let pidfile = dir.join("child.pid");
+        let pid: u32 = wait_for_file(&pidfile).trim().parse().unwrap();
+        app.shutdown();
+        let view = app.plugin_runner.status(&request).expect("request exists");
+        assert!(view.status.finished(), "{view:?}");
+        assert!(!process_alive(pid), "descendant {pid} survived shutdown");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
     #[test]
     fn invoking_an_action_queues_and_reports_through_the_runner() {
         let mut app = app();
@@ -1467,6 +1667,119 @@ mod tests {
         std::fs::remove_dir_all(app.config.plugins_dir().join("dev.example.probe")).unwrap();
         app.plugins = crate::plugin::registry::Registry::load(&app.config);
         assert!(app.plugin_menu_items("pane", json!({})).is_empty());
+    }
+
+    /// 造出两个 Space：A 本机，B 在 peer 上有 folder，并在 B 里放一个终端。
+    fn two_spaces(app: &mut App) -> (u32, u32) {
+        app.new_workspace(None);
+        app.new_workspace(None);
+        let local = 0;
+        let remote = 1;
+        app.workspaces[local].machine = None;
+        app.workspaces[local].folder = Some("/home/local".into());
+        app.workspaces[remote].machine = Some("peer".into());
+        app.workspaces[remote].folder = Some("/srv/remote".into());
+        let pane = app.workspaces[remote].tabs[0].panes()[0].0;
+        if let Some(state) = app.panes.get_mut(&pane) {
+            state.terminal = Some("peer/t7".into());
+        }
+        app.select_workspace(local);
+        (pane, app.workspaces[remote].id)
+    }
+
+    #[test]
+    fn an_action_targeted_at_another_space_uses_that_space() {
+        let mut app = app();
+        let (pane, _space) = two_spaces(&mut app);
+        let root = scratch(&app);
+        let source = write_source(
+            &root,
+            "dev.example.target",
+            "[\"true\"]",
+            "[\"sh\", \"-c\", \"cat\"]",
+        );
+        crate::plugin::registry::install(&app.config, &source).unwrap();
+        app.plugins = Registry::load(&app.config);
+        app.invoke_plugin(
+            "dev.example.target.run",
+            json!({"_target": {"pane_or_terminal": "peer/t7"}}),
+        )
+        .unwrap();
+        let request = app.plugin_request.clone().unwrap();
+        let view = wait_for_status(&app, &request);
+        assert_eq!(view.status, crate::plugin::runner::Status::Done, "{view:?}");
+        let context: serde_json::Value =
+            serde_json::from_str(view.stdout.trim()).expect("context json");
+        assert_eq!(context["machine"]["workspace"], "peer", "{context}");
+        assert_eq!(context["context"]["space"]["folder"], "/srv/remote");
+        assert_eq!(context["context"]["space"]["machine"], "peer");
+        assert_eq!(context["context"]["pane"], pane);
+        assert_eq!(context["context"]["terminal"], "peer/t7");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn action_for_a_target(app: &mut App) -> String {
+        let root = scratch(app);
+        let source = write_source(
+            &root,
+            "dev.example.miss",
+            "[\"true\"]",
+            "[\"sh\", \"-c\", \"cat\"]",
+        );
+        crate::plugin::registry::install(&app.config, &source).unwrap();
+        app.plugins = Registry::load(&app.config);
+        "dev.example.miss.run".to_string()
+    }
+
+    #[test]
+    fn a_missing_terminal_target_is_reported_as_target_gone() {
+        let mut app = app();
+        two_spaces(&mut app);
+        let name = action_for_a_target(&mut app);
+        let missing = app.invoke_plugin(
+            &name,
+            json!({"_target": {"pane_or_terminal": "peer/t404"}}),
+        );
+        let error = format!("{}", missing.expect_err("unknown target must fail"));
+        assert!(error.contains("target_gone"), "{error}");
+        std::fs::remove_dir_all(scratch(&app)).ok();
+    }
+
+    #[test]
+    fn a_missing_numeric_pane_is_rejected_instead_of_using_the_focus() {
+        let mut app = app();
+        two_spaces(&mut app);
+        let name = action_for_a_target(&mut app);
+        let missing = app.invoke_plugin(&name, json!({"_target": {"pane": 9999}}));
+        let error = format!("{}", missing.expect_err("missing pane must fail"));
+        assert!(error.contains("target_gone"), "{error}");
+        std::fs::remove_dir_all(scratch(&app)).ok();
+    }
+
+    #[test]
+    fn a_probe_keeps_the_target_space_even_if_the_user_switches() {
+        let mut app = app();
+        let (_pane, space) = two_spaces(&mut app);
+        let name = install_terminal(&mut app, "dev.example.space", "right");
+        let reply = app.plugin_pane_open(&json!({
+            "name": name,
+            "space": format!("sp{space}"),
+            "machine": "peer",
+        }));
+        assert_eq!(reply["status"], "probing", "{reply}");
+        let request = reply["request"].as_str().unwrap().to_string();
+        // 探测期间切回本地 Space A。
+        app.select_workspace(0);
+        app.plugin_probe_reply(&request, Ok(json!({"stdout": ""})));
+        let record = app.plugin_panes.get(&request).expect("record exists");
+        let pane = record.pane.expect("pane opened");
+        let (workspace, _) = app.locate(pane).expect("pane placed");
+        assert_eq!(
+            workspace, 1,
+            "pane landed in Space {} instead of the target",
+            workspace
+        );
+        std::fs::remove_dir_all(scratch(&app)).ok();
     }
 
     #[test]

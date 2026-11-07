@@ -71,7 +71,7 @@ requires_programs = ["lazygit"]
 | `[[actions]].argv` | 工作目录为插件目录；`./` 开头的程序相对插件目录解析 |
 | `[[actions]].args` | JSON Schema 子集：`type`、`properties`、`required`、`enum`、`default`、`additionalProperties` |
 | `[[terminals]].placement` | 终端在 Tab 中的打开方式，映射到现有 `terminal.open`、`pane.split`、浮动与 popup |
-| `[[terminals]].requires_programs` | 启动前在目标机器检查 PATH，缺失时报 `missing_program` 并列出缺失项 |
+| `[[terminals]].requires_programs` | 启动前由实际执行位置（core）在目标机器检查 PATH，缺失时报 `missing_program` 并列出缺失项 |
 
 动作名 `<package-id>.<action-id>`，终端名 `<package-id>.<terminal-id>`。包 id 允许点号做命名空间，元素 id 限 `[a-z0-9_-]{1,32}`。内置命令与动作名不可被覆盖。
 
@@ -121,8 +121,8 @@ requires_programs = ["lazygit"]
 ```
 
 - `target` 是触发动作的对象：右键菜单为被点击的 Pane 与终端，Space 菜单为 Space，命令面板为当前焦点。
-- 目标在调用时冻结；动作执行期间焦点变化不影响 `target`。
-- 对象已删除时返回 `target_gone`；断线或机器不可达返回 `unavailable`，不换机器执行。
+- 目标在调用时冻结：Space、Tab、机器与 cwd 一次解析成不可变的 `ExecutionTarget`，上下文与环境都由它生成；动作执行期间焦点变化不影响 `target`。
+- 对象已删除时返回 `target_gone`：显式给出的 Pane 或终端不存在、数字 Pane 不存在、Space 已移除都直接失败，**不回退到当前焦点**；断线或机器不可达返回 `unavailable`，不换机器执行。
 
 ## 5. 终端入口
 
@@ -134,7 +134,7 @@ requires_programs = ["lazygit"]
 - 终端标签在 attach 成功后写入 `hctui`、`hctui.plugin=<package-id>`、`hctui.terminal=<terminal-id>` 与 `where`；Space 与 Tab 有共享结构来源时同时写 `herdr.space`、`herdr.tab`。`plugins pane focus/close` 先按 Pane 编号与内存登记匹配，再按 core 里的这两条标签定位，所以视图关闭后仍能找回终端。
 - 关闭 Pane 不结束程序，按现有 keep / park 语义；`terminal.kill` 才结束程序与子进程。
 - 打开时为目标代际写 pin 文件 `<state>/plugins/pins/<package>/<generation>/<owner>.json`；动作入队即登记 `invocation` pin，调用结束后释放。终端先按请求登记占位身份，attach 后换成带 session 与机器名的核心地址；**关闭 Pane 不释放终端 pin**，只有 core 报告该终端结束（`finished`/`removed`/`lost` 事件、程序退出）才释放。进程 PID 存活不参与判断。
-- `plugins pane open` 先返回请求 ID；远端需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`unavailable`。
+- `plugins pane open` 先返回请求 ID；需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。探测结果回来后只验证冻结的目标仍然存在，不重新解析；目标 Space 已移除则报 `target_gone`，Pane 建在目标 Space 里，与探测期间的用户切换无关。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`unavailable`。
 - 不自动上传插件目录、不执行远端安装、不复制凭证、不转发本机 socket。需要回调客户端时走 `hc-tui` CLI 或事件流。
 
 ## 6. 多机
@@ -244,7 +244,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 ## 14. 验收
 
 - 两个真实插件：`git-tools`（动作读取远端 Git 摘要，终端入口在远端开 lazygit）与 `review`（长运行终端，验证 cwd、退出、park、detach 后保留）。
-- 目标冻结：动作执行中切换焦点，实际请求仍指向调用时的 Space 与 Pane。
+- 目标冻结：动作执行中切换焦点，实际请求仍指向调用时的 Space、Tab、机器与 cwd；显式目标不存在时报 `target_gone` 而不是换用当前焦点。
 - 多机：远端动作与终端在正确机器执行；缺失程序、离线、目标删除各自给出明确错误，不回落本机。
 - 超时与取消：SIGTERM 后 2 秒 SIGKILL，进程组与后代管道全部回收，完成状态为 `timed_out` 或 `cancelled`。
 - 并发与队列：超过全局与单包上限时排队，队列满返回 `busy`，界面仍可输入。
@@ -264,7 +264,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 | `src/plugin/registry.rs` | 安装记录、代际、启用状态、来源与预览 |
 | `src/plugin/runner.rs` | 动作进程、上下文 stdin、deadline、取消、进程组收尾、`shutdown` 与有界输出 |
 | `src/plugin/logs.rs` | 运行日志、轮转与查询 |
-| `src/plugin/terminal.rs` | 入口规划、placement 映射、包内相对程序规则、目标机器程序探测 |
+| `src/plugin/terminal.rs` | 目标解析（`TargetSelector`/`ExecutionTarget`）、入口规划、placement 映射、包内相对程序规则、执行位置程序探测 |
 | `src/plugin/lease.rs` | 代际的显式 pin、core 终结证据与显式 GC |
 | `src/plugin/cli.rs` | `plugins` 子命令 |
 | `src/app/plugin.rs` | 菜单与命令目录接入、上下文构造、结果展示、终端入口与标签 |
