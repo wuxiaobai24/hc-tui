@@ -1,16 +1,19 @@
-//! 插件清单：标准 TOML 解析、严格校验与行号错误。
+//! 包清单：标准 TOML 解析、严格校验与行号错误。
 //!
-//! 清单格式见 `docs/plugins.md` §2。未知键、未知表、非法 id、空 `argv`、
-//! 未知上下文、未知 placement 与不合规的参数 schema 都拒绝加载；错误带
-//! 文件、行、列，便于直接定位到清单行。
+//! 这是唯一清单模型：`plugin.toml`（v1）与 `hctui.toml`（v2）共用同一批字段，
+//! v2 额外允许 `[module]` 与 `[grants]`。未知键、未知表、非法 id、空 `argv`、
+//! 未知上下文、未知 placement、越界授予与不合规的参数 schema 都拒绝加载；
+//! 错误带文件、行、列，便于直接定位到清单行。
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
 
-/// 当前清单格式版本。
-pub const MANIFEST_VERSION: u32 = 1;
+use crate::pkg::{Capabilities, Grants, Module, ModuleInfo, OVERLAY_KINDS, PLACES};
+
+/// 当前清单格式版本；v1 仍可读。
+pub const MANIFEST_VERSION: u32 = 2;
 /// 当前宿主接口版本。
 pub const HOST_API: u32 = 1;
 
@@ -60,7 +63,7 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
-fn fail(
+pub(crate) fn fail(
     path: &Path,
     source: &str,
     span: std::ops::Range<usize>,
@@ -101,6 +104,12 @@ pub struct Manifest {
     /// 终端入口；M6 只校验与展示，执行在 M7。
     #[serde(default)]
     pub terminals: Vec<Terminal>,
+    /// 界面模块；有这一段才算贡献界面。
+    #[serde(default)]
+    pub module: Option<Module>,
+    /// 模块授予：宿主方法与事件。
+    #[serde(default)]
+    pub grants: Option<Grants>,
 }
 
 /// `[[actions]]`。
@@ -290,6 +299,30 @@ impl Manifest {
     pub fn action_name(&self, action: &Action) -> String {
         format!("{}.{}", self.id(), action.id())
     }
+
+    /// 由清单推导的能力，不在清单里手写声明。
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            actions: !self.actions.is_empty(),
+            terminals: !self.terminals.is_empty(),
+            module: self.module.is_some(),
+        }
+    }
+
+    /// 记录与 `packages list --json` 里的模块摘要；没有 `[module]` 时为 `None`。
+    pub fn module_info(&self) -> Option<ModuleInfo> {
+        self.module.as_ref().map(|module| module.info(self.name()))
+    }
+
+    /// `[grants]` 的 `host` 与 `events` 名单；没有声明时为空。
+    pub fn grants(&self) -> Vec<String> {
+        self.grants.as_ref().map(Grants::names).unwrap_or_default()
+    }
+
+    /// 模块 bundle 的包内相对路径。
+    pub fn bundle(&self) -> Option<&str> {
+        self.module.as_ref().map(Module::bundle)
+    }
 }
 
 /// 读取并校验清单；错误带行号。
@@ -320,7 +353,7 @@ pub fn parse(path: &Path, source: &str) -> Result<Manifest, ManifestError> {
 }
 
 impl Manifest {
-    fn validate(&self, path: &Path, source: &str) -> Result<(), ManifestError> {
+    pub(crate) fn validate(&self, path: &Path, source: &str) -> Result<(), ManifestError> {
         let check = |span: std::ops::Range<usize>, condition: bool, message: &str| {
             if condition {
                 Ok(())
@@ -330,8 +363,8 @@ impl Manifest {
         };
         check(
             self.manifest_version.span(),
-            *self.manifest_version.get_ref() == MANIFEST_VERSION,
-            &format!("manifest_version must be {MANIFEST_VERSION}"),
+            matches!(*self.manifest_version.get_ref(), 1 | 2),
+            &format!("manifest_version must be 1 or {MANIFEST_VERSION}"),
         )?;
         check(
             self.host_api.span(),
@@ -452,8 +485,108 @@ impl Manifest {
                 }
             }
         }
+        if let Some(module) = &self.module {
+            validate_module(path, source, module)?;
+        }
+        if let Some(grants) = &self.grants {
+            validate_grants(path, source, grants)?;
+        }
         Ok(())
     }
+}
+
+/// `[module]` 的字段校验；语义与旧 `[mod]` 一致。
+fn validate_module(path: &Path, source: &str, module: &Module) -> Result<(), ManifestError> {
+    if let Some(place) = &module.place {
+        if !PLACES.contains(&place.get_ref().as_str()) {
+            return Err(fail(
+                path,
+                source,
+                place.span(),
+                "module place must be left, right, top, bottom or none",
+            ));
+        }
+    }
+    if let Some(size) = &module.size {
+        if !size.get_ref().is_finite() || *size.get_ref() <= 0.0 {
+            return Err(fail(
+                path,
+                source,
+                size.span(),
+                "module size must be positive",
+            ));
+        }
+    }
+    if let Some(bundle) = &module.bundle {
+        if !bundle_path_ok(bundle.get_ref()) {
+            return Err(fail(
+                path,
+                source,
+                bundle.span(),
+                "module bundle must be a relative path inside the package",
+            ));
+        }
+    }
+    if let Some(overlay) = &module.overlay {
+        if let Some(kind) = &overlay.kind {
+            if !OVERLAY_KINDS.contains(&kind.get_ref().as_str()) {
+                return Err(fail(
+                    path,
+                    source,
+                    kind.span(),
+                    "overlay kind must be dialog, popup or window",
+                ));
+            }
+        }
+        for (value, name) in [(&overlay.width, "width"), (&overlay.height, "height")] {
+            if let Some(value) = value {
+                if !value.get_ref().is_finite() || *value.get_ref() <= 0.0 {
+                    return Err(fail(
+                        path,
+                        source,
+                        value.span(),
+                        format!("overlay {name} must be positive"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `[grants]` 必须落在宿主白名单内：方法照方法表，事件照事件表。
+fn validate_grants(path: &Path, source: &str, grants: &Grants) -> Result<(), ManifestError> {
+    for name in &grants.host {
+        if !crate::mods::host::METHODS.contains(&name.get_ref().as_str()) {
+            return Err(fail(
+                path,
+                source,
+                name.span(),
+                format!("`{}` is not a host method", name.get_ref()),
+            ));
+        }
+    }
+    for name in &grants.events {
+        if !crate::mods::EVENTS.contains(&name.get_ref().as_str()) {
+            return Err(fail(
+                path,
+                source,
+                name.span(),
+                format!("`{}` is not a known event", name.get_ref()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// bundle 只接受包内相对路径。
+fn bundle_path_ok(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 /// `requires_programs` 只接受 PATH 里的程序名：探测脚本会把它当词使用。

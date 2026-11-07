@@ -52,6 +52,8 @@ cleanup() {
   env -u XDG_RUNTIME_DIR -u XDG_STATE_HOME -u XDG_CONFIG_HOME -u XDG_CACHE_HOME \
     HC_SESSION="$PEER_SESSION" hc server stop >/dev/null 2>&1 || true
   rm -rf "$HOME/.local/state/herdr-core/$PEER_SESSION"
+  # 全部通过才清理现场；失败时保留 $ROOT 里的日志与状态。
+  if [ "$FAILED" -eq 0 ]; then rm -rf "$ROOT"; fi
 }
 trap cleanup EXIT
 

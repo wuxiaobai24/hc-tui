@@ -4,6 +4,14 @@ set -uo pipefail
 ROOTDIR=$(cd "$(dirname "$0")/.." && pwd)
 BIN="$ROOTDIR/target/debug/hc-tui"
 FAILED=0
+ROOTS=()
+
+cleanup() {
+  hc server stop >/dev/null 2>&1 || true
+  # 全部通过才清理现场；失败时保留 $ROOT 里的日志与状态。
+  if [ "$FAILED" -eq 0 ]; then rm -rf "${ROOTS[@]}"; fi
+}
+trap cleanup EXIT
 
 step() { echo "== $*"; }
 check() {
@@ -13,6 +21,7 @@ check() {
 run_mode() {
   local label=$1 flags=$2
   local ROOT=/tmp/hc-tui-degraded-$label
+  ROOTS+=("$ROOT")
   local SOCK="hctui-deg-$label-$$"
   local SESSION="hctui-deg-$label-$$"
   rm -rf "$ROOT"

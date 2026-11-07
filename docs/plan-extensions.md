@@ -2,8 +2,8 @@
 
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
-版本：v0.4（2026-11-07）
-状态：实施中。M1–M8 与 M10 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+版本：v0.5（2026-11-07）
+状态：实施中。M1–M8、M10 与 M11a 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -74,6 +74,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M9 默认模块迁移 | ⏳ 未开始 | |
 | M10 插件契约硬化 | ✅ 已交付（本次提交） | `src/store.rs`：`save_record` 同目录临时文件 + `fsync` + `rename` + 父目录 `fsync`，`current` 用临时指针 rename 原子切换，包级 `store/<id>/.lock`（`O_CREAT|O_EXCL`、30 秒超时、持有者 PID 存活判断、粒度一个包），代际分配在锁内（`.tmp-<gen>` 复制后 rename），`Store::open` 幂等恢复（清临时残渣、按记录重建缺失的 `current`、有指针无记录报 issue 并拒绝加载）且旧格式记录仍可读；`src/plugin/registry.rs`：`EnablePolicy::{Keep,Enable,Disable}`，`install`/`link` 默认不启用，更新保留已有状态，注册表磁盘指纹驱动运行中重载并发布 `registry.changed`，停用包的动作调用与 `plugins pane open` 返回 `disabled`；`src/plugin/manifest.rs`：递归参数校验（嵌套 object、array `items`、完整路径错误）、清单期校验 `default`、`integer`/`number` 区分、深度 8/单层 64/`items` 形状上限；新增 12 个用例，`plugins-smoke`、`plugin-terminals-smoke`、`events-smoke` 安装命令显式 `--enable` |
 | M10.1 验证补强 | ✅ 已交付 | 两个真进程安装用例（跨进程串行、SIGKILL 残留锁接管）、两个真实写失败注入用例（记录写失败保留旧代际、指针失败按记录修复）、`Store::open` 把「指针停在旧代际」也算需要重建、mods 安装改为记录先行、四个 smoke 全跑通；细节见 [M10.1](#m101-验证补强) |
+| M11a 统一包清单与模型 | ✅ 已交付（本次提交） | `src/pkg/`：`hctui.toml`(v2)、`plugin.toml`(v1) 与旧 `[mod]` 形态读成同一个 `Package`，`[module]` 与 `[grants]` 由 `src/plugin/manifest.rs` 的统一 TOML 严格解析负责（未知键、重复 id、越界授予、bundle 路径），能力 `capabilities { actions, terminals, module }` 由清单推导；`src/mods/store.rs::manifest_id` 与 `src/mods/mod.rs::manifest_grants` 的手写逐行解析删除，改走同一解析器；`Record` 增加 `capabilities` 与 `module`，旧记录按清单回填、不报 issue；`src/plugin/registry.rs` 合并两个 store 与两个开发目录（已安装代际按 id 优先），新增 `get`/`modules`/`entries`/`revision`，`PackageRegistry` 保留为旧名别名；`hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log`，`plugins` 与 `mods` 的安装类子命令成为别名并在 stderr 打一行弃用提示；四个 smoke 脚本的 `cleanup()` 在全部通过时清理 `$ROOT`；新增 9 个用例 |
 
 验证基线（M2 起，docs/release.md 同步记录）：musl amd64 冷构建约 106 s / 5.78 MiB，arm64 约 182 s / 5.22 MiB；nsh 未接线阶段发行体积增量 +136 KiB。
 

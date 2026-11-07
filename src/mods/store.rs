@@ -36,45 +36,19 @@ pub struct Preview {
     pub sha256: Option<String>,
     /// 最低运行时（签名包）。
     pub min_runtime: Option<String>,
+    /// 由清单推导的能力。
+    pub capabilities: crate::pkg::Capabilities,
+    /// 声明了模块时的模块摘要。
+    pub module: Option<crate::pkg::ModuleInfo>,
     /// 不阻断安装的提示。
     pub warnings: Vec<String>,
 }
 
-/// 读 `hctui.toml` 里的 `[mod] id`。
+/// 读包根目录清单里的包 ID：v2、v1 与旧 `[mod]` 共用同一个解析器。
 pub fn manifest_id(dir: &Path) -> Result<String, String> {
-    let path = dir.join("hctui.toml");
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut in_mod = false;
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') {
-            in_mod = line
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-                .trim()
-                == "mod";
-            continue;
-        }
-        if !in_mod {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() == "id" {
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                return Ok(value.to_string());
-            }
-        }
-    }
-    Err(format!("{}: [mod] id is required", path.display()))
+    crate::pkg::load_dir(dir)
+        .map(|loaded| loaded.manifest.id().to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// 读 `nsh.json` 里的显示名与版本；缺失时给默认值。
@@ -121,18 +95,17 @@ fn count_files(dir: &Path) -> usize {
 
 /// 本地目录的安装预览。
 pub fn preview_local(dir: &Path) -> Result<Preview, String> {
-    let id = manifest_id(dir)?;
+    let loaded = crate::pkg::install_ready(dir)?;
+    let id = loaded.manifest.id().to_string();
     let (name, version, build) = app_metadata(dir);
-    let grants = crate::mods::ModRuntime::manifest_grants(&dir.join("hctui.toml"));
-    if !dir.join("dist").join("bundle.js").exists() {
-        return Err(format!(
-            "{}: no dist/bundle.js; run `nsh build -o dist` first",
-            dir.display()
-        ));
-    }
+    let grants = loaded.manifest.grants();
     Ok(Preview {
         id,
-        name,
+        name: if name.is_empty() {
+            loaded.manifest.name().to_string()
+        } else {
+            name
+        },
         version,
         build,
         source: Source::Local,
@@ -141,6 +114,8 @@ pub fn preview_local(dir: &Path) -> Result<Preview, String> {
         origin: dir.to_path_buf(),
         sha256: None,
         min_runtime: None,
+        capabilities: loaded.manifest.capabilities(),
+        module: loaded.manifest.module_info(),
         warnings: Vec::new(),
     })
 }
@@ -209,9 +184,30 @@ pub fn verify_package(
         origin: path.to_path_buf(),
         sha256: Some(package.sha256.clone()),
         min_runtime: None,
+        capabilities: packaged_capabilities(),
+        module: Some(packaged_module(&package.app.name)),
         warnings: package.ignored.clone(),
     };
     Ok((preview, package, trust))
+}
+
+/// 签名包的清单由 [`package_manifest`] 生成：只有模块，没有动作与终端入口。
+fn packaged_capabilities() -> crate::pkg::Capabilities {
+    crate::pkg::Capabilities {
+        actions: false,
+        terminals: false,
+        module: true,
+    }
+}
+
+fn packaged_module(name: &str) -> crate::pkg::ModuleInfo {
+    crate::pkg::ModuleInfo {
+        title: name.to_string(),
+        bundle: crate::pkg::DEFAULT_BUNDLE.to_string(),
+        place: "none".to_string(),
+        size: None,
+        focusable: true,
+    }
 }
 
 fn package_host_grants(package: &VerifiedPackage) -> Vec<String> {
@@ -242,6 +238,8 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
         origin: PathBuf::new(),
         sha256: Some(package.sha256.clone()),
         min_runtime: None,
+        capabilities: packaged_capabilities(),
+        module: Some(packaged_module(&package.app.name)),
         warnings: package.ignored.clone(),
     };
     let record = Record {
@@ -261,6 +259,8 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
             "build": package.app.build,
         })),
         min_runtime: None,
+        capabilities: Some(preview.capabilities),
+        module: preview.module.clone(),
     };
     (record, preview)
 }
@@ -289,6 +289,8 @@ pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
             "build": preview.build,
         })),
         min_runtime: None,
+        capabilities: Some(preview.capabilities),
+        module: preview.module.clone(),
     };
     store
         .save_record(&record)
@@ -425,13 +427,10 @@ pub fn update(config: &Config, id: Option<&str>, target: &Path) -> Result<Record
 
 /// 链接本地目录：不拷贝，`current` 直接指向源目录，改动后重载生效。
 pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
-    let id = manifest_id(dir)?;
-    if !dir.join("dist").join("bundle.js").exists() {
-        return Err(format!(
-            "{}: no dist/bundle.js; run `nsh build -o dist` first",
-            dir.display()
-        ));
-    }
+    let loaded = crate::pkg::install_ready(dir)?;
+    let id = loaded.manifest.id().to_string();
+    let capabilities = loaded.manifest.capabilities();
+    let module = loaded.manifest.module_info();
     let store = Store::open(config.mods_state_dir());
     let target = std::path::absolute(dir).map_err(|error| error.to_string())?;
     let record = Record {
@@ -446,6 +445,8 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
         key_id: None,
         app: None,
         min_runtime: None,
+        capabilities: Some(capabilities),
+        module,
     };
     store
         .save_record(&record)

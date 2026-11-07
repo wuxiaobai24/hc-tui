@@ -396,6 +396,8 @@ mod tests {
             key_id: None,
             app: None,
             min_runtime: None,
+            capabilities: None,
+            module: None,
         }
     }
 

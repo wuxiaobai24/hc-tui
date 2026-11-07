@@ -2,9 +2,9 @@
 
 [返回 README](../README.md) · [界面模块](mods.md) · [命令](commands.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
-版本：v0.3（2026-11-07）
-状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）、M8（事件流）与 M10（发布事务、启用闸门、参数校验纵深）已实现。清单错误格式为 `文件:行:列: 原因`。
-定位：可分发的工作流包，提供一次性动作与真实终端入口。界面由 [界面模块](mods.md) 负责。
+版本：v0.4（2026-11-07）
+状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）、M8（事件流）、M10（发布事务、启用闸门、参数校验纵深）与 M11a（统一包清单与模型、`packages` CLI）已实现。清单错误格式为 `文件:行:列: 原因`。
+定位：可分发的工作流包。一个包可以同时提供一次性动作、真实终端入口与 [界面模块](mods.md)。
 
 ---
 
@@ -14,66 +14,91 @@
 
 | 能做 | 不能做 |
 |---|---|
-| 声明动作、菜单上下文、终端入口、最低版本与平台 | 绘制 hc-tui 界面；声明界面模块 |
+| 在同一个清单里声明动作、菜单上下文、终端入口与界面模块 | 绕过 `[grants]` 白名单访问宿主方法或事件 |
 | 任意语言编写动作与终端程序 | 依赖 core 未提供的方法、建立第二条 core 连接 |
 | 通过 `hc` 与 `hc-tui` CLI 访问工作台、远端机器与文件 | 修改共享布局文档、绕过动作分发器 |
 | 生命周期、日志、并发与超时受宿主约束 | OS 沙箱；插件以用户身份运行 |
 
-插件与界面模块相互独立：插件不贡献 TSX 模块，模块不携带可执行动作。两者共用动作分发器、状态快照与控制 socket。
+动作、终端入口与界面模块共用同一份清单、同一个存储代际与同一个注册表；一个包可以只贡献其中一部分。
 
 ## 2. 目录与清单
 
 ```
-~/.config/hc-tui/plugins/<name>/
-  plugin.toml       清单
+~/.config/hc-tui/plugins/<name>/     开发插件（也扫描 ~/.config/hc-tui/mods/）
+  hctui.toml        清单（v2，包根目录唯一清单）
+  dist/bundle.js    界面模块 bundle（声明 [module] 时必需）
   bin/...           可执行文件与脚本
   README.md
 ```
 
-清单使用标准 TOML 解析器（新增 `toml` 依赖），严格校验：未知键、未知表、重复 `id`、非法 `id`、空 `argv` 都直接拒绝加载。
+清单使用标准 TOML 解析器，严格校验：未知键、未知表、重复 `id`、非法 `id`、空 `argv`、未知 `contexts`/`placement`、越界授予都直接拒绝加载。
 
 ```toml
-manifest_version = 1
-id = "dev.example.git-tools"
-name = "Git tools"
+manifest_version = 2
+id = "dev.hctui.pkg.git-board"
+name = "Git board"
 version = "0.1.0"
 host_api = 1
 platforms = ["linux", "macos"]
-description = "工作区 Git 摘要与 lazygit 入口"
+description = "动作 + 终端 + 界面，一个包"
 
 [[actions]]
 id = "summary"
 title = "Git 摘要"
-description = "读取当前 Space 的 Git 状态并在 toast 中显示"
 contexts = ["global", "space", "pane"]
-argv = ["python3", "./summary.py"]
-timeout_ms = 10000
+argv = ["sh", "./bin/summary.sh"]
 
 [actions.args]
 type = "object"
 properties = { short = { type = "boolean", default = true } }
-additionalProperties = false
 
 [[terminals]]
 id = "git-ui"
 title = "Git UI"
 argv = ["lazygit"]
-placement = "tab"            # tab | right | down | float | popup | zoomed
-requires_programs = ["lazygit"]
+placement = "right"
+
+[module]                     # 可选；有这一段才算贡献界面
+title = "Git board"
+bundle = "dist/bundle.js"
+place = "right"
+size = 32
+focusable = true
+
+[grants]
+host = ["state", "run", "notify"]
+events = ["state.changed", "terminal.status"]
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `manifest_version` | 清单格式版本，当前为 1 |
+| `manifest_version` | 清单格式版本；当前为 2，`1` 仍可读 |
 | `host_api` | 宿主接口版本，与 hc-tui 内嵌版本不一致时拒绝加载 |
 | `platforms` | `linux` / `macos`；不匹配时跳过并给警告 |
 | `[[actions]].contexts` | `global`（命令面板与 `do`）、`space`（侧栏 Space 菜单）、`pane`（Pane 右键菜单） |
-| `[[actions]].argv` | 工作目录为插件目录；`./` 开头的程序相对插件目录解析 |
+| `[[actions]].argv` | 工作目录为包目录；`./` 开头的程序相对包目录解析 |
 | `[[actions]].args` | JSON Schema 子集：`type`、`properties`、`required`、`enum`、`default`、`additionalProperties`、`items`；逐层嵌套校验，深度上限 8、单层属性上限 64，`items` 只接受 object 或标量 schema |
 | `[[terminals]].placement` | 终端在 Tab 中的打开方式，映射到现有 `terminal.open`、`pane.split`、浮动与 popup |
 | `[[terminals]].requires_programs` | 启动前由实际执行位置（core）在目标机器检查 PATH，缺失时报 `missing_program` 并列出缺失项 |
+| `[module].bundle` | 包内相对路径；安装时校验文件存在且非空 |
+| `[module].place` / `size` / `focusable` | 与旧 `[mod]` 语义一致：停靠位置、停靠厚度（≤1 视为占比）、是否允许焦点移入 |
+| `[grants].host` / `events` | 宿主方法与事件；必须在宿主白名单内，越界在清单期报错 |
 
-动作名 `<package-id>.<action-id>`，终端名 `<package-id>.<terminal-id>`。包 id 允许点号做命名空间，元素 id 限 `[a-z0-9_-]{1,32}`。内置命令与动作名不可被覆盖。
+能力 `capabilities { actions, terminals, module }` 由清单推导，不在清单里手写声明。动作名 `<package-id>.<action-id>`，终端名 `<package-id>.<terminal-id>`。包 id 允许点号做命名空间，元素 id 限 `[a-z0-9_-]{1,32}`。内置命令与动作名不可被覆盖。
+
+### 2.1 兼容的三种清单
+
+三种清单读成同一个 `Package` 模型，安装记录与注册表对它们没有分支：
+
+| 清单 | 形态 | 动作 | 终端入口 | 界面模块 |
+|---|---|---|---|---|
+| `hctui.toml` | `manifest_version = 2` | 有 `[[actions]]` | 有 `[[terminals]]` | 有 `[module]` |
+| `plugin.toml` | `manifest_version = 1` | 有 `[[actions]]` | 有 `[[terminals]]` | 无 |
+| `hctui.toml` | 旧形态：只有 `[mod]` / `[grants]`，没有 `manifest_version` | 无 | 无 | 从 `[mod]` 取 |
+
+- 同目录同时有 `hctui.toml`(v2) 与 `plugin.toml` 时用 `hctui.toml`，并给一条提示说明忽略了 `plugin.toml`。
+- 旧 `hctui.toml` 的 `[mod]`、`[overlay]`、`[grants]` 由同一个解析器读出，不再有逐行手写解析。
+- 旧安装记录（M5 形态 JSON）仍可读；`capabilities` 与 `module` 缺失时按清单回填，不报 issue。
 
 ## 3. 身份
 
@@ -197,15 +222,32 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 
 ## 9. 安装、更新与卸载
 
+安装类子命令统一由 `packages` 提供：
+
+```sh
+hc-tui packages list [--json]
+hc-tui packages install <目录> [--enable|--disable] [--yes]
+hc-tui packages update [<id>] <目录|.nshpkg>
+hc-tui packages link <目录> / unlink <id>
+hc-tui packages uninstall <id>
+hc-tui packages enable <id> / disable <id>
+hc-tui packages gc [--json]
+hc-tui packages log <id> [-n 100]
+```
+
+`plugins <同名子命令>` 与 `mods install|update|uninstall|link|unlink|enable|disable` 是别名：行为一致、退出码一致，只在 stderr 打一行弃用提示：`note: <旧命令> is deprecated, use <packages 命令>`。`plugins action ...` 与 `plugins pane ...` 是动作与终端专用入口，名字不变。
+
 | 操作 | 行为 |
 |---|---|
-| `plugins link <目录>` | 注册为开发来源，代码原地读取，清单变化后重载 |
-| `plugins install <目录>` | 预览清单后复制到新代际，`current` 原子切换，默认不启用 |
-| `plugins update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，pin 释放后回收 |
-| `plugins unlink <id>` | 移除开发注册，不删除目录 |
-| `plugins uninstall <id>` | 只删除记录与 `current` 指针；有 pin 的代际保留（pin 在 `<state>/plugins/pins/`） |
-| `plugins gc` | 显式回收：删除没有记录指向、也没有任何 pin 的代际 |
-| `plugins enable` / `plugins disable <id>` | 只改变是否出现在命令目录与菜单 |
+| `packages link <目录>` | 注册为开发来源，代码原地读取，清单变化后重载 |
+| `packages install <目录>` | 预览清单后复制到新代际，`current` 原子切换，默认不启用 |
+| `packages update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，pin 释放后回收 |
+| `packages unlink <id>` | 移除开发注册，不删除目录 |
+| `packages uninstall <id>` | 只删除记录与 `current` 指针；有 pin 的代际保留（pin 在 `<state>/plugins/pins/`） |
+| `packages gc` | 显式回收：删除没有记录指向、也没有任何 pin 的代际 |
+| `packages enable` / `packages disable <id>` | 只改变是否出现在命令目录与菜单 |
+
+`packages list` 一行一个包，在启用状态后打出能力徽章：`A` 动作、`T` 终端入口、`M` 界面模块。`packages list --json` 每项包含 `id`、`name`、`version`、`source`、`generation`、`enabled`、`capabilities`、`module`（未声明时为 `null`）与 `issues`；记录里没有 `capabilities` 的旧版本会先按清单回填再输出。
 
 `records/<id>.json` 记录来源、清单哈希、代际、启用状态与安装时间。安装前显示 `id`、版本、`host_api`、平台、动作与终端入口、`requires_programs`；确认后才注册。构建失败不替换旧代际；`current` 指针切换使用临时目录加 rename。
 
@@ -274,8 +316,8 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 
 | 层 | 执行 | 界面 | 分发 |
 |---|---|---|---|
-| 插件 | 独立进程 | core 终端或 CLI 输出 | 目录、代际、显式启用 |
-| 界面模块 | hc-tui 进程内 | TSX 外框区域、Pane、覆盖层 | nsh bundle 或签名包 |
+| 动作与终端入口 | 独立进程 / core 终端 | core 终端或 CLI 输出 | 目录、代际、显式启用 |
+| 界面模块 | hc-tui 进程内 | TSX 外框区域、Pane、覆盖层 | `[module]` 的 bundle，或签名包 |
 | 脚本面板 | core 终端 | ANSI 文本 | `[[panels]]` 与 panels/*.json |
 
 共享布局中的 module 节点继续保留原始 JSON 与未知字段；插件不声明 module 名，模块需要展示插件数据时通过 `hc-tui` CLI 或动作读取。真实插件终端在共享结构中是普通终端地址，各客户端可 attach。

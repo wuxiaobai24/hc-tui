@@ -222,49 +222,14 @@ pub struct ModRuntime {
 }
 
 impl ModRuntime {
-    /// 从 `hctui.toml` 的 `[grants]` 读出 `host` 与 `events` 名单。
+    /// 从包清单的 `[grants]` 读出 `host` 与 `events` 名单。
     ///
-    /// 只按行读这两个数组键；未知键与其它段落忽略。TOML 的完整解析留给
-    /// 安装与分发阶段。
+    /// 与安装期共用同一个解析器（[`crate::pkg::load_file`]）；清单不合法时
+    /// 返回空名单，错误由安装与校验路径直接报出。
     pub fn manifest_grants(path: &std::path::Path) -> Vec<String> {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Vec::new();
-        };
-        let mut in_grants = false;
-        let mut names = Vec::new();
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() {
-                continue;
-            }
-            if line.starts_with('[') {
-                in_grants = line
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    == "grants";
-                continue;
-            }
-            if !in_grants {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            if !matches!(key.trim(), "host" | "events") {
-                continue;
-            }
-            let value = value.trim().trim_start_matches('[').trim_end_matches(']');
-            for item in value.split(',') {
-                let item = item.trim().trim_matches('"').trim_matches('\'');
-                if !item.is_empty() {
-                    names.push(item.to_string());
-                }
-            }
-        }
-        names
+        crate::pkg::load_file(path)
+            .map(|loaded| loaded.manifest.grants())
+            .unwrap_or_default()
     }
 
     /// 模块是否被显式禁用。
