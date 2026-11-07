@@ -30,7 +30,7 @@ COUNT=$("$BIN" plugins action list --json | jq 'length')
 "$BIN" plugins action list --json | jq -e '.[0].source | startswith("plugin:")' >/dev/null || FAILED=1
 
 step "install into the store and list"
-"$BIN" plugins install "$ROOT/config/hc-tui/plugins/hello" --yes || FAILED=1
+"$BIN" plugins install "$ROOT/config/hc-tui/plugins/hello" --yes --enable || FAILED=1
 "$BIN" plugins list --json | jq -e '.[0].source == "local"' >/dev/null || FAILED=1
 
 step "run the TUI"

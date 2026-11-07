@@ -488,6 +488,11 @@ fn valid_version(version: &str) -> bool {
             .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// 参数 schema 支持的嵌套深度上限。
+pub const SCHEMA_MAX_DEPTH: usize = 8;
+/// 单层 `properties` 数量上限。
+pub const SCHEMA_MAX_PROPERTIES: usize = 64;
+
 /// 参数 schema 的 JSON Schema 子集校验。
 fn validate_schema(
     path: &Path,
@@ -497,7 +502,7 @@ fn validate_schema(
 ) -> Result<(), ManifestError> {
     let json = serde_json::to_value(value)
         .map_err(|error| fail(path, source, span.clone(), error.to_string()))?;
-    validate_schema_value(path, source, &span, &json)
+    validate_schema_value(path, source, &span, &json, 1)
 }
 
 fn validate_schema_value(
@@ -505,14 +510,16 @@ fn validate_schema_value(
     source: &str,
     span: &std::ops::Range<usize>,
     schema: &Value,
+    depth: usize,
 ) -> Result<(), ManifestError> {
+    let error_at = |message: String| fail(path, source, span.clone(), message);
+    if depth > SCHEMA_MAX_DEPTH {
+        return Err(error_at(format!(
+            "args schema nesting exceeds {SCHEMA_MAX_DEPTH} levels"
+        )));
+    }
     let Some(object) = schema.as_object() else {
-        return Err(fail(
-            path,
-            source,
-            span.clone(),
-            "args schema must be an object",
-        ));
+        return Err(error_at("args schema must be an object".to_string()));
     };
     const KEYS: &[&str] = &[
         "type",
@@ -522,6 +529,7 @@ fn validate_schema_value(
         "default",
         "additionalProperties",
         "description",
+        "items",
     ];
     for key in object.keys() {
         if !KEYS.contains(&key.as_str()) {
@@ -556,15 +564,17 @@ fn validate_schema_value(
     }
     if let Some(properties) = object.get("properties") {
         let Some(properties) = properties.as_object() else {
-            return Err(fail(
-                path,
-                source,
-                span.clone(),
-                "args schema properties must be a table",
+            return Err(error_at(
+                "args schema properties must be a table".to_string(),
             ));
         };
+        if properties.len() > SCHEMA_MAX_PROPERTIES {
+            return Err(error_at(format!(
+                "args schema has more than {SCHEMA_MAX_PROPERTIES} properties at one level"
+            )));
+        }
         for property in properties.values() {
-            validate_schema_value(path, source, span, property)?;
+            validate_schema_value(path, source, span, property, depth + 1)?;
         }
     }
     if let Some(required) = object.get("required") {
@@ -605,55 +615,122 @@ fn validate_schema_value(
             ));
         }
     }
+    if let Some(items) = object.get("items") {
+        let Some(items_object) = items.as_object() else {
+            return Err(error_at("args schema items must be an object".to_string()));
+        };
+        match items_object.get("type").and_then(Value::as_str) {
+            Some("object" | "string" | "number" | "integer" | "boolean" | "null") => {}
+            Some("array") => {
+                return Err(error_at(
+                    "args schema items must be an object or scalar schema".to_string(),
+                ))
+            }
+            Some(_) => {
+                return Err(error_at(
+                    "args schema items type is not supported".to_string(),
+                ))
+            }
+            None => {
+                return Err(error_at(
+                    "args schema items must declare a type".to_string(),
+                ))
+            }
+        }
+        validate_schema_value(path, source, span, items, depth + 1)?;
+    }
+    if let Some(default) = object.get("default") {
+        validate_into(schema, default, "default")
+            .map_err(|message| error_at(format!("args schema default is invalid: {message}")))?;
+    }
     Ok(())
 }
 
-/// 按 schema 校验调用参数：填默认值、拒绝未知键与类型不符。
+/// 按 schema 校验调用参数：逐层填默认值、拒绝未知键、类型不符与缺失必填。
+/// 错误信息带完整路径（`args.remote.name`）。
 pub fn validate_args(schema: &Value, args: &Value) -> Result<Value, String> {
-    let Some(args) = args.as_object() else {
+    if !args.is_object() {
         return Err("arguments must be a JSON object".to_string());
+    }
+    validate_into(schema, args, "args")
+}
+
+fn validate_into(schema: &Value, value: &Value, path: &str) -> Result<Value, String> {
+    check_value_at(schema, value, path)?;
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => validate_object_into(schema, value, path),
+        Some("array") => validate_array_into(schema, value, path),
+        _ => Ok(value.clone()),
+    }
+}
+
+fn validate_object_into(schema: &Value, value: &Value, path: &str) -> Result<Value, String> {
+    let Some(map) = value.as_object() else {
+        return Err(format!("{path} must be object"));
     };
-    let empty = serde_json::Map::new();
-    let properties = schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
+    let properties = schema.get("properties").and_then(Value::as_object);
     let additional = schema
         .get("additionalProperties")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let required = schema.get("required").and_then(Value::as_array);
     let mut out = serde_json::Map::new();
-    for (key, value) in args {
-        let Some(property) = properties.get(key) else {
-            if !additional {
-                return Err(format!("unknown argument `{key}`"));
+    for (key, item) in map {
+        let child = format!("{path}.{key}");
+        match properties.and_then(|properties| properties.get(key)) {
+            Some(property) => {
+                out.insert(key.clone(), validate_into(property, item, &child)?);
             }
-            out.insert(key.clone(), value.clone());
-            continue;
-        };
-        check_value(key, property, value)?;
-        out.insert(key.clone(), value.clone());
+            None => {
+                if !additional {
+                    return Err(format!("{child} is not a known argument"));
+                }
+                out.insert(key.clone(), item.clone());
+            }
+        }
     }
-    for (key, property) in properties {
-        if out.contains_key(key) {
-            continue;
-        }
-        if let Some(default) = property.get("default") {
-            out.insert(key.clone(), default.clone());
-            continue;
-        }
-        if schema
-            .get("required")
-            .and_then(Value::as_array)
-            .is_some_and(|required| required.iter().any(|item| item.as_str() == Some(key)))
-        {
-            return Err(format!("missing required argument `{key}`"));
+    if let Some(properties) = properties {
+        for (key, property) in properties {
+            if out.contains_key(key) {
+                continue;
+            }
+            let child = format!("{path}.{key}");
+            if let Some(default) = property.get("default") {
+                out.insert(key.clone(), validate_into(property, default, &child)?);
+                continue;
+            }
+            if required.is_some_and(|required| {
+                required
+                    .iter()
+                    .any(|item| item.as_str() == Some(key.as_str()))
+            }) {
+                return Err(format!("{child} is required"));
+            }
         }
     }
     Ok(Value::Object(out))
 }
 
-fn check_value(key: &str, schema: &Value, value: &Value) -> Result<(), String> {
+fn validate_array_into(schema: &Value, value: &Value, path: &str) -> Result<Value, String> {
+    let Some(items) = value.as_array() else {
+        return Err(format!("{path} must be array"));
+    };
+    let item_schema = schema.get("items");
+    let mut out = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        match item_schema {
+            Some(item_schema) => out.push(validate_into(
+                item_schema,
+                item,
+                &format!("{path}[{index}]"),
+            )?),
+            None => out.push(item.clone()),
+        }
+    }
+    Ok(Value::Array(out))
+}
+
+fn check_value_at(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
     if let Some(kind) = schema.get("type").and_then(Value::as_str) {
         let ok = match kind {
             "object" => value.is_object(),
@@ -666,12 +743,12 @@ fn check_value(key: &str, schema: &Value, value: &Value) -> Result<(), String> {
             _ => false,
         };
         if !ok {
-            return Err(format!("argument `{key}` must be {kind}"));
+            return Err(format!("{path} must be {kind}"));
         }
     }
     if let Some(list) = schema.get("enum").and_then(Value::as_array) {
         if !list.contains(value) {
-            return Err(format!("argument `{key}` is not one of the allowed values"));
+            return Err(format!("{path} is not one of the allowed values"));
         }
     }
     Ok(())
@@ -783,5 +860,172 @@ additionalProperties = false
         assert!(validate_args(&schema, &serde_json::json!({"count": "x"})).is_err());
         assert!(validate_args(&schema, &serde_json::json!({"count": 1, "extra": true})).is_err());
         assert!(validate_args(&schema, &serde_json::json!({"count": 1})).is_ok());
+        // integer 只收整数，number 整数与浮点都收。
+        assert!(validate_args(&schema, &serde_json::json!({"count": 1.5})).is_err());
+        let number = serde_json::json!({
+            "type": "object",
+            "properties": { "ratio": { "type": "number" } },
+        });
+        assert!(validate_args(&number, &serde_json::json!({"ratio": 1})).is_ok());
+        assert!(validate_args(&number, &serde_json::json!({"ratio": 1.5})).is_ok());
+    }
+
+    const NESTED: &str = r#"
+manifest_version = 1
+id = "dev.example.nested"
+name = "Nested"
+version = "0.1.0"
+host_api = 1
+
+[[actions]]
+id = "run"
+title = "Run"
+argv = ["true"]
+
+[actions.args]
+type = "object"
+required = ["remote"]
+
+[actions.args.properties.remote]
+type = "object"
+required = ["name"]
+additionalProperties = false
+
+[actions.args.properties.remote.properties.name]
+type = "string"
+"#;
+
+    #[test]
+    fn nested_object_schema_rejects_missing_required_and_unknown_keys() {
+        let manifest = parse(Path::new("plugin.toml"), NESTED).unwrap();
+        let schema = manifest.actions[0].args_schema().unwrap();
+
+        assert_eq!(
+            validate_args(&schema, &serde_json::json!({})).unwrap_err(),
+            "args.remote is required"
+        );
+        assert_eq!(
+            validate_args(&schema, &serde_json::json!({"remote": {}})).unwrap_err(),
+            "args.remote.name is required"
+        );
+        assert_eq!(
+            validate_args(&schema, &serde_json::json!({"remote": {"name": 1}})).unwrap_err(),
+            "args.remote.name must be string"
+        );
+        assert_eq!(
+            validate_args(
+                &schema,
+                &serde_json::json!({"remote": {"name": "box", "extra": true}})
+            )
+            .unwrap_err(),
+            "args.remote.extra is not a known argument"
+        );
+        let filled =
+            validate_args(&schema, &serde_json::json!({"remote": {"name": "box"}})).unwrap();
+        assert_eq!(filled["remote"]["name"], serde_json::json!("box"));
+    }
+
+    #[test]
+    fn array_items_are_validated_element_wise() {
+        let text = r#"
+manifest_version = 1
+id = "dev.example.list"
+name = "List"
+version = "0.1.0"
+host_api = 1
+
+[[actions]]
+id = "run"
+title = "Run"
+argv = ["true"]
+
+[actions.args]
+type = "object"
+required = ["hosts"]
+
+[actions.args.properties.hosts]
+type = "array"
+
+[actions.args.properties.hosts.items]
+type = "object"
+required = ["name"]
+additionalProperties = false
+
+[actions.args.properties.hosts.items.properties.name]
+type = "string"
+"#;
+        let manifest = parse(Path::new("plugin.toml"), text).unwrap();
+        let schema = manifest.actions[0].args_schema().unwrap();
+
+        assert_eq!(
+            validate_args(&schema, &serde_json::json!({"hosts": [{"name": "a"}, {}]})).unwrap_err(),
+            "args.hosts[1].name is required"
+        );
+        assert_eq!(
+            validate_args(&schema, &serde_json::json!({"hosts": [{"name": 2}]})).unwrap_err(),
+            "args.hosts[0].name must be string"
+        );
+        assert_eq!(
+            validate_args(
+                &schema,
+                &serde_json::json!({"hosts": [{"name": "a", "port": 22}]})
+            )
+            .unwrap_err(),
+            "args.hosts[0].port is not a known argument"
+        );
+        assert!(validate_args(&schema, &serde_json::json!({"hosts": [{"name": "a"}]})).is_ok());
+    }
+
+    #[test]
+    fn an_invalid_default_is_rejected_at_load_time() {
+        let error = parse_err(
+            "manifest_version = 1\nid = \"dev.example.default\"\nname = \"Default\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\nargv = [\"true\"]\n\n[actions.args]\ntype = \"object\"\nproperties = { count = { type = \"integer\", default = \"many\" } }\n",
+        );
+        assert!(error.to_string().starts_with("plugin.toml:"), "{}", error);
+        assert!(
+            error.message.contains("default") && error.message.contains("integer"),
+            "{}",
+            error.message
+        );
+        assert!(error.line >= 12, "line: {}", error.line);
+    }
+
+    #[test]
+    fn oversized_and_too_deep_schemas_are_rejected_at_load_time() {
+        let header = "manifest_version = 1\nid = \"dev.example.wide\"\nname = \"Wide\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\nargv = [\"true\"]\n\n[actions.args]\ntype = \"object\"\n";
+        let mut wide = String::from(header);
+        for index in 0..65 {
+            wide.push_str(&format!(
+                "\n[actions.args.properties.p{index}]\ntype = \"string\"\n"
+            ));
+        }
+        let error = parse_err(&wide);
+        assert!(
+            error.message.contains("more than 64 properties"),
+            "{}",
+            error.message
+        );
+
+        let mut deep = String::from(header);
+        let mut path = String::from("actions.args");
+        for level in 0..9 {
+            path.push_str(&format!(".properties.l{level}"));
+            deep.push_str(&format!("\n[{path}]\ntype = \"object\"\n"));
+        }
+        let error = parse_err(&deep);
+        assert!(
+            error.message.contains("nesting exceeds"),
+            "{}",
+            error.message
+        );
+
+        let error = parse_err(
+            "manifest_version = 1\nid = \"dev.example.items\"\nname = \"Items\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\nargv = [\"true\"]\n\n[actions.args]\ntype = \"object\"\n\n[actions.args.properties.grid]\ntype = \"array\"\nitems = { type = \"array\" }\n",
+        );
+        assert!(
+            error.message.contains("object or scalar"),
+            "{}",
+            error.message
+        );
     }
 }

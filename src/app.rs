@@ -387,6 +387,10 @@ pub struct App {
     pub mod_chrome_sync: Option<String>,
     /// 插件注册表：配置目录与安装存储的当前代际。
     pub plugins: crate::plugin::registry::Registry,
+    /// 注册表加载时的磁盘指纹；变化时无需重启即可重新加载。
+    pub plugin_revision: u64,
+    /// 上一次主动扫描磁盘的时刻。
+    pub plugin_scan_at: Option<std::time::Instant>,
     /// 插件动作运行器。
     pub plugin_runner: crate::plugin::runner::Runner,
     /// 最近一次插件调用的请求 ID，控制通道回包时带上。
@@ -570,6 +574,8 @@ impl App {
             mods_windows: std::collections::BTreeMap::new(),
             mods: crate::mods::ModRuntime::default(),
             plugins: crate::plugin::registry::Registry::default(),
+            plugin_revision: 0,
+            plugin_scan_at: None,
             plugin_runner: crate::plugin::runner::Runner::new(""),
             plugin_request: None,
             event_publisher: crate::control::Publisher::default(),
@@ -681,6 +687,7 @@ impl App {
         };
         app.load_local_state();
         app.plugins = crate::plugin::registry::Registry::load(&app.config);
+        app.plugin_revision = crate::plugin::registry::revision(&app.config);
         app.plugin_runner = crate::plugin::runner::Runner::new(app.config.plugins_state_dir());
         app.plugin_startup_pins = app
             .plugin_terminals_on_disk()
@@ -819,42 +826,56 @@ impl App {
         }
     }
 
+    /// 控制 socket 的一问一答；界面与测试共用同一条分发路径。
+    pub(crate) fn control_reply(&mut self, body: &Value) -> Value {
+        // 启用状态可能在另一个进程里刚被改过：处理请求前先对齐磁盘。
+        self.refresh_plugins_if_changed();
+        match body["method"].as_str() {
+            Some("snapshot") => {
+                json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session,"plugin":t.plugin,"plugin_terminal":t.plugin_terminal,"cwd":t.cwd})).collect::<Vec<_>>()})
+            }
+            Some("do") if self.restore_pending => json!({"error":"layout is still loading"}),
+            Some("do") => {
+                let command = body["command"].as_str().unwrap_or("");
+                let args = body.get("args").cloned().unwrap_or(json!({}));
+                self.plugin_request = None;
+                if let Some(package) =
+                    crate::plugin::registry::disabled_package(&self.config, command)
+                {
+                    return json!({"error":t1("plugin {} is disabled", &package),"error_kind":"disabled"});
+                }
+                match self.execute_action(command, args) {
+                    Ok(()) => {
+                        let mut response =
+                            json!({"accepted":true,"confirmation_pending":self.prompt.is_some()});
+                        if let Some(request) = self.plugin_request.take() {
+                            response["request"] = json!(request);
+                        }
+                        response
+                    }
+                    Err(error) => json!({"error":error.to_string()}),
+                }
+            }
+            Some("plugins.status") => self.plugin_status(body),
+            Some("plugins.cancel") => self.plugin_cancel(body),
+            Some("plugins.log") => self.plugin_log(body),
+            Some("plugins.pane.open") => self.plugin_pane_open(body),
+            Some("plugins.pane.status") => self.plugin_pane_status(body),
+            Some("plugins.pane.focus") => self.plugin_pane_focus(body),
+            Some("plugins.pane.close") => self.plugin_pane_close(body),
+            _ => json!({"error":"unknown request method"}),
+        }
+    }
+
     pub fn pump(&mut self) {
+        self.poll_plugin_registry();
         let requests: Vec<_> = self
             .control
             .as_ref()
             .map(|rx| rx.try_iter().collect())
             .unwrap_or_default();
         for request in requests {
-            let response = match request.body["method"].as_str() {
-                Some("snapshot") => {
-                    json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session,"plugin":t.plugin,"plugin_terminal":t.plugin_terminal,"cwd":t.cwd})).collect::<Vec<_>>()})
-                }
-                Some("do") if self.restore_pending => json!({"error":"layout is still loading"}),
-                Some("do") => {
-                    let command = request.body["command"].as_str().unwrap_or("");
-                    let args = request.body.get("args").cloned().unwrap_or(json!({}));
-                    self.plugin_request = None;
-                    match self.execute_action(command, args) {
-                        Ok(()) => {
-                            let mut response = json!({"accepted":true,"confirmation_pending":self.prompt.is_some()});
-                            if let Some(request) = self.plugin_request.take() {
-                                response["request"] = json!(request);
-                            }
-                            response
-                        }
-                        Err(error) => json!({"error":error.to_string()}),
-                    }
-                }
-                Some("plugins.status") => self.plugin_status(&request.body),
-                Some("plugins.cancel") => self.plugin_cancel(&request.body),
-                Some("plugins.log") => self.plugin_log(&request.body),
-                Some("plugins.pane.open") => self.plugin_pane_open(&request.body),
-                Some("plugins.pane.status") => self.plugin_pane_status(&request.body),
-                Some("plugins.pane.focus") => self.plugin_pane_focus(&request.body),
-                Some("plugins.pane.close") => self.plugin_pane_close(&request.body),
-                _ => json!({"error":"unknown request method"}),
-            };
+            let response = self.control_reply(&request.body);
             let _ = request.reply.send(response);
         }
         let mut credits: Vec<(u32, usize)> = Vec::new();

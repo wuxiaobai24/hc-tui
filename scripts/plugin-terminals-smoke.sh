@@ -80,9 +80,9 @@ check_json() {
 store_dir() { echo "$ROOT/state/hc-tui/plugins"; }
 
 step "install the three example plugins"
-"$BIN" plugins install "$ROOT/src/git-tools" --yes >/dev/null || FAILED=1
-"$BIN" plugins install "$ROOT/src/review" --yes >/dev/null || FAILED=1
-"$BIN" plugins install "$ROOT/src/missing" --yes >/dev/null || FAILED=1
+"$BIN" plugins install "$ROOT/src/git-tools" --yes --enable >/dev/null || FAILED=1
+"$BIN" plugins install "$ROOT/src/review" --yes --enable >/dev/null || FAILED=1
+"$BIN" plugins install "$ROOT/src/missing" --yes --enable >/dev/null || FAILED=1
 "$BIN" plugins list | grep -q "git-ui" && echo "ok   terminal entries listed" || { echo "FAIL terminal entries listed"; FAILED=1; }
 
 step "machine peer over ssh to localhost"

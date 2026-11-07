@@ -4,9 +4,15 @@
 //! 每个模块的代码按代际存放在 `store/<id>/<generation>/`，`current/<id>`
 //! 指向当前代际；记录文件保存来源、代际、启用状态与安装时间。运行中的
 //! 表面继续使用已加载的代码，旧代际在最后一个引用关闭后回收。
+//!
+//! 记录是唯一发布真相，`current` 只是可重建索引：记录先原子落盘，指针再
+//! 原子切换；[`Store::open`] 在每次打开时做一次幂等恢复，清理临时目录、按
+//! 记录补回缺失的指针，并把「有指针没记录」的包报成问题而不是悄悄删除。
 
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -67,21 +73,185 @@ pub struct Record {
     pub min_runtime: Option<String>,
 }
 
+/// 一次恢复中发现的不一致；调用方把它报给用户，不静默修正数据。
+#[derive(Debug, Clone)]
+pub struct RecoveryIssue {
+    /// 可识别的包 ID。
+    pub id: Option<String>,
+    /// 相关路径。
+    pub path: PathBuf,
+    /// 人读的原因。
+    pub message: String,
+}
+
+/// 包级互斥的持有者；离开作用域即删除锁文件。
+#[derive(Debug)]
+pub struct PackageLock {
+    path: PathBuf,
+}
+
+impl Drop for PackageLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// 等待另一个安装者释放包锁的期限。
+const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// 等待包锁时的轮询间隔。
+const LOCK_POLL: Duration = Duration::from_millis(10);
+/// 不靠进程存活判断的平台，锁文件超过这个年龄视为残留。
+const LOCK_STALE_AGE: Duration = Duration::from_secs(120);
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 同目录临时文件名的唯一后缀。
+fn temp_id() -> u64 {
+    TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 /// 代际存储的根：`<state>/mods/`。
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    recovery: Vec<RecoveryIssue>,
 }
 
 impl Store {
-    /// 打开或创建存储根；目录按需创建。
+    /// 打开或创建存储根；目录按需创建，并做一次幂等恢复。
     pub fn open(root: impl Into<PathBuf>) -> Store {
-        Store { root: root.into() }
+        let mut store = Store {
+            root: root.into(),
+            recovery: Vec::new(),
+        };
+        store.recover();
+        store
     }
 
     /// 存储根。
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// 本次打开时发现的不一致。
+    pub fn recovery_issues(&self) -> &[RecoveryIssue] {
+        &self.recovery
+    }
+
+    /// 幂等恢复：清理临时残渣、按记录补回缺失的 `current`、上报无记录的指针。
+    /// 整个过程不动记录，也不删除有指针没记录的包目录。
+    fn recover(&mut self) {
+        self.clean_temporary_staging();
+        self.clean_temporary_records();
+        self.rebuild_missing_current();
+        self.report_current_without_record();
+    }
+
+    /// 删除安装中途留下的 `store/<id>/.tmp-*`。
+    ///
+    /// 正在安装的包持有 `.lock`，此时跳过，避免删掉别人正在复制的暂存目录。
+    fn clean_temporary_staging(&mut self) {
+        let Ok(packages) = std::fs::read_dir(self.root.join("store")) else {
+            return;
+        };
+        for package in packages.filter_map(Result::ok) {
+            if !package.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let id = package.file_name().to_string_lossy().to_string();
+            let Ok(entries) = std::fs::read_dir(package.path()) else {
+                continue;
+            };
+            let staging: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+                .map(|entry| entry.path())
+                .collect();
+            if staging.is_empty() {
+                continue;
+            }
+            let Some(_lock) = self.try_lock_package(&id) else {
+                continue;
+            };
+            for path in staging {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+
+    /// 删除写记录中途留下的临时文件。
+    fn clean_temporary_records(&mut self) {
+        let Ok(entries) = std::fs::read_dir(self.records_dir()) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            if entry.file_name().to_string_lossy().starts_with(".tmp-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// 记录存在而 `current` 缺失或指向不存在的目标时，按记录重建指针。
+    fn rebuild_missing_current(&mut self) {
+        for record in self.list() {
+            if self.current_dir(&record.id).is_some() {
+                continue;
+            }
+            let target = match record.source {
+                Source::Linked => record.origin.as_deref().map(PathBuf::from),
+                _ => Some(self.generation_dir(&record.id, record.generation)),
+            };
+            let Some(target) = target.filter(|path| path.is_dir()) else {
+                self.recovery.push(RecoveryIssue {
+                    id: Some(record.id.clone()),
+                    path: self.current_link(&record.id),
+                    message: format!(
+                        "record points at a missing generation {}; the package is not loaded",
+                        record.generation
+                    ),
+                });
+                continue;
+            };
+            // 与正在切换代际的安装者抢锁时让路，下次打开再修。
+            let Some(_lock) = self.try_lock_package(&record.id) else {
+                continue;
+            };
+            if let Err(error) = self.set_current(&record.id, &target) {
+                self.recovery.push(RecoveryIssue {
+                    id: Some(record.id.clone()),
+                    path: self.current_link(&record.id),
+                    message: format!("cannot rebuild the current pointer: {error}"),
+                });
+            }
+        }
+    }
+
+    /// 有 `current` 指针却没有记录：只报告，不删除。
+    fn report_current_without_record(&mut self) {
+        let Ok(entries) = std::fs::read_dir(self.root.join("current")) else {
+            return;
+        };
+        let mut broken: Vec<(String, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().to_string(),
+                    entry.path(),
+                )
+            })
+            .collect();
+        broken.sort();
+        for (id, path) in broken {
+            if self.record(&id).is_some() {
+                continue;
+            }
+            self.recovery.push(RecoveryIssue {
+                id: Some(id),
+                path,
+                message: "current pointer has no record; the package is not loaded".to_string(),
+            });
+        }
     }
 
     /// 信任根与撤销状态的目录。
@@ -135,11 +305,86 @@ impl Store {
         serde_json::from_str(&text).ok()
     }
 
-    /// 写一条记录。
+    /// 原子写一条记录：同目录临时文件 → fsync → rename → 父目录 fsync。
+    /// 失败时旧记录保持不变。
     pub fn save_record(&self, record: &Record) -> io::Result<()> {
         std::fs::create_dir_all(self.records_dir())?;
         let text = serde_json::to_string_pretty(record).map_err(io::Error::other)?;
-        std::fs::write(self.record_path(&record.id), text)
+        write_atomic(&self.record_path(&record.id), text.as_bytes())
+    }
+
+    /// 取得一个包的互斥锁；最多等 [`LOCK_TIMEOUT`]，超时返回 `TimedOut`。
+    /// 持有者进程已消失或锁文件过旧时视为残留并接管。
+    pub fn lock_package(&self, id: &str) -> io::Result<PackageLock> {
+        let dir = self.root.join("store").join(id);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(".lock");
+        let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match try_create_lock(&path) {
+                Ok(()) => return Ok(PackageLock { path }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if stale_lock(&path) {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("another install is in progress for {id}"),
+                        ));
+                    }
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// 不等待地尝试包锁；被占用时返回 `None`（恢复路径用）。
+    pub fn try_lock_package(&self, id: &str) -> Option<PackageLock> {
+        let dir = self.root.join("store").join(id);
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(".lock");
+        try_create_lock(&path).ok()?;
+        Some(PackageLock { path })
+    }
+
+    /// 在包锁内分配下一个代际，返回暂存目录 `store/<id>/.tmp-<gen>`。
+    /// 调用方复制完成后用 [`Store::publish_staged`] 换入正式目录。
+    pub fn alloc_generation(&self, id: &str) -> io::Result<(u64, PathBuf)> {
+        let generation = self.next_generation(id);
+        let staged = self
+            .root
+            .join("store")
+            .join(id)
+            .join(format!(".tmp-{generation}"));
+        if staged.exists() {
+            std::fs::remove_dir_all(&staged)?;
+        }
+        std::fs::create_dir_all(&staged)?;
+        Ok((generation, staged))
+    }
+
+    /// 把暂存目录整体 rename 成 `store/<id>/<generation>`。
+    pub fn publish_staged(&self, id: &str, generation: u64, staged: &Path) -> io::Result<PathBuf> {
+        let dir = self.generation_dir(id, generation);
+        if dir.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("generation {generation} already exists"),
+            ));
+        }
+        std::fs::rename(staged, &dir)?;
+        if let Some(parent) = dir.parent() {
+            sync_directory(parent);
+        }
+        Ok(dir)
+    }
+
+    /// 丢弃暂存目录；失败不影响错误返回。
+    pub fn discard_staged(&self, staged: &Path) {
+        let _ = std::fs::remove_dir_all(staged);
     }
 
     /// 下一个代际号：记录与磁盘上已有代际的较大者加一。
@@ -167,20 +412,26 @@ impl Store {
         Ok((generation, dir))
     }
 
-    /// 把 `current/<id>` 指向某个代际目录。
+    /// 原子切换 `current/<id>`：先在同目录建好临时指针，再 rename 覆盖。
+    /// 任何时刻从外部看指针要么指向旧代际，要么指向新代际。
     pub fn set_current(&self, id: &str, dir: &Path) -> io::Result<()> {
         let link = self.current_link(id);
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if std::fs::symlink_metadata(&link).is_ok() {
-            std::fs::remove_file(&link)?;
-        }
+        let Some(parent) = link.parent() else {
+            return Err(io::Error::other("current pointer has no parent"));
+        };
+        std::fs::create_dir_all(parent)?;
         let target = std::path::absolute(dir)?;
+        let staged = parent.join(format!(".tmp-{}-{}-{id}", std::process::id(), temp_id()));
+        let _ = std::fs::remove_file(&staged);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link)?;
+        std::os::unix::fs::symlink(&target, &staged)?;
         #[cfg(not(unix))]
-        std::fs::write(&link, target.to_string_lossy().as_bytes())?;
+        std::fs::write(&staged, target.to_string_lossy().as_bytes())?;
+        if let Err(error) = std::fs::rename(&staged, &link) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error);
+        }
+        sync_directory(parent);
         Ok(())
     }
 
@@ -281,6 +532,78 @@ impl Store {
     }
 }
 
+/// 同目录临时文件 → fsync → rename → 父目录 fsync。失败时目标文件不变。
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let staged = dir.join(format!(".tmp-{}-{}-{name}", std::process::id(), temp_id()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&staged)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&staged, path)?;
+        sync_directory(dir);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
+
+/// 目录 fsync；平台不支持时不影响已完成的 rename。
+fn sync_directory(dir: &Path) {
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
+}
+
+/// 排他创建锁文件并写入持有者 PID。
+fn try_create_lock(path: &Path) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    writeln!(file, "{}", std::process::id())?;
+    let _ = file.sync_all();
+    Ok(())
+}
+
+/// 锁文件是否残留：持有者进程已消失，或锁文件老到不可能还有活着的安装。
+fn stale_lock(path: &Path) -> bool {
+    let age = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| std::time::SystemTime::now().duration_since(time).ok());
+    if age.is_some_and(|age| age > LOCK_STALE_AGE) {
+        return true;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return true;
+    };
+    // 同一进程的另一线程不算残留，必须等它释放。
+    pid != std::process::id() && !process_alive(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_alive(_pid: u32) -> bool {
+    // 没有 /proc 时只靠锁文件年龄判断，避免把活着的持有者踢掉。
+    true
+}
+
 /// 当前 Unix 时间秒数；平台时间不可用时返回 0。
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -367,6 +690,131 @@ mod tests {
         assert!(!store.generation_dir("probe", 1).exists());
         assert!(store.generation_dir("probe", 2).exists());
         assert_eq!(store.list().len(), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn record(id: &str, generation: u64) -> Record {
+        Record {
+            id: id.to_string(),
+            source: Source::Local,
+            generation,
+            installed_at: now_unix(),
+            enabled: false,
+            manifest_hash: None,
+            origin: None,
+            sha256: None,
+            key_id: None,
+            app: None,
+            min_runtime: None,
+        }
+    }
+
+    #[test]
+    fn a_crash_between_copy_and_record_keeps_the_old_generation() {
+        let root = unique_dir("crash");
+        let store = Store::open(&root);
+        let (first, dir) = store.prepare_generation("probe").unwrap();
+        std::fs::write(dir.join("bundle.js"), "one").unwrap();
+        store.set_current("probe", &dir).unwrap();
+        store.save_record(&record("probe", first)).unwrap();
+
+        // 下一代已分配并复制完，然后在写记录前崩溃（锁随进程消失）。
+        let lock = store.lock_package("probe").unwrap();
+        let (second, staged) = store.alloc_generation("probe").unwrap();
+        assert_eq!(second, 2);
+        std::fs::write(staged.join("bundle.js"), "two").unwrap();
+        drop(lock);
+
+        let reopened = Store::open(&root);
+        assert_eq!(reopened.record("probe").unwrap().generation, first);
+        assert_eq!(
+            reopened.current_dir("probe").as_deref(),
+            Some(dir.as_path())
+        );
+        assert!(!staged.exists(), "staging directory survived recovery");
+        assert!(!reopened.generation_dir("probe", second).exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn store_rebuilds_a_missing_current_from_the_record() {
+        let root = unique_dir("rebuild");
+        let store = Store::open(&root);
+        let (generation, dir) = store.prepare_generation("probe").unwrap();
+        std::fs::write(dir.join("bundle.js"), "one").unwrap();
+        store.set_current("probe", &dir).unwrap();
+        store.save_record(&record("probe", generation)).unwrap();
+        std::fs::remove_file(root.join("current").join("probe")).unwrap();
+
+        let reopened = Store::open(&root);
+        assert_eq!(
+            reopened.current_dir("probe").as_deref(),
+            Some(dir.as_path())
+        );
+        assert!(
+            reopened.recovery_issues().is_empty(),
+            "{:?}",
+            reopened.recovery_issues()
+        );
+
+        // 幂等：再开一次仍指同一代际。
+        let again = Store::open(&root);
+        assert_eq!(again.current_dir("probe").as_deref(), Some(dir.as_path()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn store_reports_a_current_without_record_instead_of_deleting_it() {
+        let root = unique_dir("orphan");
+        let store = Store::open(&root);
+        let (_, dir) = store.prepare_generation("probe").unwrap();
+        store.set_current("probe", &dir).unwrap();
+
+        let reopened = Store::open(&root);
+        let issues = reopened.recovery_issues();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].id.as_deref(), Some("probe"));
+        assert!(
+            issues[0].message.contains("no record"),
+            "{}",
+            issues[0].message
+        );
+        assert_eq!(
+            reopened.current_dir("probe").as_deref(),
+            Some(dir.as_path()),
+            "pointer was deleted instead of reported"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn old_records_without_newer_fields_still_load() {
+        let root = unique_dir("legacy");
+        let store = Store::open(&root);
+        std::fs::create_dir_all(root.join("records")).unwrap();
+        std::fs::write(
+            root.join("records").join("probe.json"),
+            r#"{"id":"probe","source":"local","generation":3,"installedAt":1,"enabled":true}"#,
+        )
+        .unwrap();
+        let record = store.record("probe").expect("legacy record loads");
+        assert_eq!(record.generation, 3);
+        assert!(record.enabled);
+        assert_eq!(record.manifest_hash, None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dead_holders_lock_is_taken_over() {
+        let root = unique_dir("lock");
+        let store = Store::open(&root);
+        let dir = root.join("store").join("probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".lock"), "4294967295").unwrap();
+        let lock = store.lock_package("probe").expect("stale lock taken over");
+        drop(lock);
+        assert!(!dir.join(".lock").exists());
         std::fs::remove_dir_all(root).ok();
     }
 

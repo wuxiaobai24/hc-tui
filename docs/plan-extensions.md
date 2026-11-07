@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
 版本：v0.4（2026-11-07）
-状态：实施中。M1–M8 已交付（提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+状态：实施中。M1–M8 与 M10 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -72,6 +72,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M7 插件终端与多机 | ✅ 已交付（本次提交） | `src/plugin/terminal.rs` 入口规划（`terminal.run` 参数、placement 映射、`./` 相对程序规则、目标机器程序探测与错误码映射）；`src/plugin/lease.rs` 终端对代际的引用（`<state>/plugins/leases/<package>.<pid>.json`、进程存活判断、关闭后回收）；`src/plugin/registry.rs` 入口信息带根目录/代际/来源，卸载只删记录与指针并保留在用代际；`Launch` 增加 `env` 并贯通 `Command::Spawn` 与 `terminal.run`；`src/app/plugin.rs` 的 `plugins.pane.open|status|focus|close`（Space/machine/cwd/placement 解析、probe 等待、标签写入、按标签定位、关闭只断视图）；App 在 attach 后写 `hctui.plugin` / `hctui.terminal` / `where`，Pane 关闭释放代际；CLI `plugins pane open|status|focus|close` 与安装预览列出入口；示例 `examples/plugins/git-tools`（远端 lazygit）与 `examples/plugins/review`（包内相对程序长运行终端）；`scripts/plugin-terminals-smoke.sh` 与 `tests/plugin_terminals.rs` |
 | M8 事件与发行收尾 | ✅ 已交付（本次提交） | `src/control.rs` 事件长连接（`method = events`、按 `plugin`/`kinds` 过滤、每订阅者 256 条有界队列、溢出补发 `events.dropped`、断开即停止）；`src/main.rs` 的 `hc-tui events [--plugin/--kinds/--count]`，`HCTUI_SOCKET` 覆盖便于插件进程连接；App 发布 `terminal.status`/`terminal.turn`/`terminal.finished`/`terminal.opened`/`terminal.closed`（带 machine、terminal、turn、at_ms、data、plugin）；示例 `examples/plugins/events`（动作 `watch` 与终端 `feed`）；`scripts/events-smoke.sh` 覆盖两客户端各一次、过滤、断开、溢出与插件消费，`tests/events_stream.rs` 在控制层回归；共享契约补模块节点/未知字段/props/CAS 冲突断言；`--no-mods`、全部模块禁用、全部插件禁用三态由 `scripts/degraded-smoke.sh` 验证；`scripts/perf-baseline.sh` 与 docs/release.md 记录四目标现状、体积与性能 |
 | M9 默认模块迁移 | ⏳ 未开始 | |
+| M10 插件契约硬化 | ✅ 已交付（本次提交） | `src/store.rs`：`save_record` 同目录临时文件 + `fsync` + `rename` + 父目录 `fsync`，`current` 用临时指针 rename 原子切换，包级 `store/<id>/.lock`（`O_CREAT|O_EXCL`、30 秒超时、持有者 PID 存活判断、粒度一个包），代际分配在锁内（`.tmp-<gen>` 复制后 rename），`Store::open` 幂等恢复（清临时残渣、按记录重建缺失的 `current`、有指针无记录报 issue 并拒绝加载）且旧格式记录仍可读；`src/plugin/registry.rs`：`EnablePolicy::{Keep,Enable,Disable}`，`install`/`link` 默认不启用，更新保留已有状态，注册表磁盘指纹驱动运行中重载并发布 `registry.changed`，停用包的动作调用与 `plugins pane open` 返回 `disabled`；`src/plugin/manifest.rs`：递归参数校验（嵌套 object、array `items`、完整路径错误）、清单期校验 `default`、`integer`/`number` 区分、深度 8/单层 64/`items` 形状上限；新增 12 个用例，`plugins-smoke`、`plugin-terminals-smoke`、`events-smoke` 安装命令显式 `--enable` |
 
 验证基线（M2 起，docs/release.md 同步记录）：musl amd64 冷构建约 106 s / 5.78 MiB，arm64 约 182 s / 5.22 MiB；nsh 未接线阶段发行体积增量 +136 KiB。
 
@@ -256,6 +257,23 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 - 输入延迟、空闲 CPU、常驻内存、二进制体积与 M1 基线对比记录，无不可解释的回归。
 - 事件流断开即停、溢出发出 `events.dropped`、两个客户端各收到一次。
 - `--no-mods`、禁用全部模块、禁用全部插件三种状态下界面与终端功能完整。
+
+### M10 插件契约硬化
+
+目标：把安装、启用、校验三处名实落差补齐，不触碰 lease / runner / target 已定契约。
+
+工作项：
+
+- `src/store.rs`：记录为唯一发布真相，`current` 可重建；原子写记录与指针；包级互斥锁；锁内分配代际；`Store::open` 幂等恢复；旧记录兼容。
+- `src/plugin/registry.rs`、`src/main.rs`：`EnablePolicy` 贯穿 install / update / link；默认不启用；运行中重载；`disabled` 错误码。
+- `src/plugin/manifest.rs`：递归参数校验、默认值清单期校验、整数与浮点区分、schema 深度与宽度上限。
+
+退出条件：
+
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 全绿。
+- 并发安装只产生一个发布态；复制后崩溃保留旧代际；缺失 `current` 可重建；无记录指针只报告不删除。
+- 停用后无需重启即从目录与菜单消失，调用与入口返回 `disabled`，已排队调用继续跑完。
+- 嵌套 object 与 array 逐元素校验，非法默认值在清单期报 `文件:行:列`。
 
 ### M9 默认模块迁移
 

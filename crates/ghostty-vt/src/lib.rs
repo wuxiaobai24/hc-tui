@@ -1013,15 +1013,40 @@ impl Terminal {
     }
 
     /// Set defaults without replacing colors explicitly set by terminal OSC sequences.
-    pub fn set_default_colors(&mut self, foreground: RgbColor, background: RgbColor, cursor: RgbColor) -> Result<(), Error> {
+    pub fn set_default_colors(
+        &mut self,
+        foreground: RgbColor,
+        background: RgbColor,
+        cursor: RgbColor,
+    ) -> Result<(), Error> {
         for (option, color) in [
-            (ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, foreground),
-            (ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, background),
-            (ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, cursor),
+            (
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+                foreground,
+            ),
+            (
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+                background,
+            ),
+            (
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+                cursor,
+            ),
         ] {
-            let raw = ffi::GhosttyColorRgb { r: color.r, g: color.g, b: color.b };
+            let raw = ffi::GhosttyColorRgb {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+            };
             // SAFETY: the option expects a GhosttyColorRgb and the terminal is live.
-            unsafe { ffi::ghostty_terminal_set(self.raw, option, (&raw as *const ffi::GhosttyColorRgb).cast()).into_result()?; }
+            unsafe {
+                ffi::ghostty_terminal_set(
+                    self.raw,
+                    option,
+                    (&raw as *const ffi::GhosttyColorRgb).cast(),
+                )
+                .into_result()?;
+            }
         }
         Ok(())
     }

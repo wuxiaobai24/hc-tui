@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::logs;
 use super::lease::GenerationPin;
+use super::logs;
 
 /// 全局同时运行上限。
 pub const DEFAULT_GLOBAL: usize = 8;
@@ -533,7 +533,8 @@ struct Outcome {
     exit_code: Option<i32>,
 }
 
-fn record_result(state: &mut State, request: &str, outcome: Outcome) {    if let Some(invocation) = state.invocations.get_mut(request) {
+fn record_result(state: &mut State, request: &str, outcome: Outcome) {
+    if let Some(invocation) = state.invocations.get_mut(request) {
         invocation.status = outcome.status;
         invocation.error = outcome.error;
         invocation.exit_code = outcome.exit_code;

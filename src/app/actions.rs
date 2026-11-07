@@ -110,9 +110,15 @@ impl App {
     pub fn execute_action(&mut self, name: &str, args: Value) -> Result<()> {
         anyhow::ensure!(args.is_object(), t("command arguments must be an object"));
         // 插件动作与内置动作共用分发器；内置名不可被覆盖。
-        if !COMMANDS.iter().any(|(builtin, _)| *builtin == name) && self.plugins.owns(name) {
-            self.invoke_plugin(name, args)?;
-            return Ok(());
+        if !COMMANDS.iter().any(|(builtin, _)| *builtin == name) {
+            if self.plugins.owns(name) {
+                self.invoke_plugin(name, args)?;
+                return Ok(());
+            }
+            // 键位与菜单走同一道闸门：停用后的包里动作报 disabled。
+            if let Some(package) = crate::plugin::registry::disabled_package(&self.config, name) {
+                anyhow::bail!(t1("plugin {} is disabled", &package));
+            }
         }
         let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
         let direction = || match text("direction").as_deref().unwrap_or("right") {

@@ -11,6 +11,29 @@ use crate::store::{copy_tree, file_sha256, now_unix, Record, Source, Store};
 
 use super::manifest::{self, Manifest};
 
+/// 安装、更新与链接时的启用策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnablePolicy {
+    /// 保留已有记录的状态；没有记录时默认不启用。
+    #[default]
+    Keep,
+    /// 显式启用。
+    Enable,
+    /// 显式停用。
+    Disable,
+}
+
+impl EnablePolicy {
+    /// 把策略落成一个 `enabled` 值。
+    pub fn resolve(self, existing: Option<&Record>) -> bool {
+        match self {
+            EnablePolicy::Keep => existing.is_some_and(|record| record.enabled),
+            EnablePolicy::Enable => true,
+            EnablePolicy::Disable => false,
+        }
+    }
+}
+
 /// 一个可用插件。
 #[derive(Debug, Clone)]
 pub struct Plugin {
@@ -106,6 +129,13 @@ impl Registry {
         let store = Store::open(config.plugins_state_dir());
         let disabled = disabled_set(config);
         let mut registry = Registry::default();
+        for issue in store.recovery_issues() {
+            registry.issues.push(Issue {
+                path: issue.path.clone(),
+                id: issue.id.clone(),
+                message: issue.message.clone(),
+            });
+        }
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for record in store.list() {
             let Some(root) = store.current_dir(&record.id) else {
@@ -183,8 +213,21 @@ impl Registry {
 
     /// 启用的动作，按完整名排序。
     pub fn actions(&self) -> Vec<ActionInfo> {
+        self.collect_actions(true)
+    }
+
+    /// 全部动作，包括已停用的包；闸门判定用。
+    pub fn actions_any(&self) -> Vec<ActionInfo> {
+        self.collect_actions(false)
+    }
+
+    fn collect_actions(&self, enabled_only: bool) -> Vec<ActionInfo> {
         let mut actions = Vec::new();
-        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+        for plugin in self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.enabled || !enabled_only)
+        {
             for action in &plugin.manifest.actions {
                 actions.push(ActionInfo {
                     name: plugin.manifest.action_name(action),
@@ -207,8 +250,21 @@ impl Registry {
 
     /// 终端入口。
     pub fn terminals(&self) -> Vec<TerminalInfo> {
+        self.collect_terminals(true)
+    }
+
+    /// 全部终端入口，包括已停用的包；闸门判定用。
+    pub fn terminals_any(&self) -> Vec<TerminalInfo> {
+        self.collect_terminals(false)
+    }
+
+    fn collect_terminals(&self, enabled_only: bool) -> Vec<TerminalInfo> {
         let mut terminals = Vec::new();
-        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+        for plugin in self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.enabled || !enabled_only)
+        {
             for terminal in &plugin.manifest.terminals {
                 terminals.push(TerminalInfo {
                     name: format!("{}.{}", plugin.id, terminal.id()),
@@ -230,6 +286,26 @@ impl Registry {
         }
         terminals.sort_by(|a, b| a.name.cmp(&b.name));
         terminals
+    }
+
+    /// 已加载但被停用的包中拥有这个名字动作或终端入口的那个包。
+    pub fn disabled_owner(&self, name: &str) -> Option<String> {
+        self.plugins
+            .iter()
+            .filter(|plugin| !plugin.enabled)
+            .find(|plugin| {
+                plugin
+                    .manifest
+                    .actions
+                    .iter()
+                    .any(|action| plugin.manifest.action_name(action) == name)
+                    || plugin
+                        .manifest
+                        .terminals
+                        .iter()
+                        .any(|terminal| format!("{}.{}", plugin.id, terminal.id()) == name)
+            })
+            .map(|plugin| plugin.id.clone())
     }
 
     /// 按完整名查找动作。
@@ -313,7 +389,10 @@ pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), Strin
 }
 
 /// 安装一个插件目录到新代际；先校验清单。
-pub fn install(config: &Config, dir: &Path) -> Result<Record, String> {
+///
+/// 发布顺序在包锁内完成：分配代际 → 复制到暂存目录 → rename 成正式代际 →
+/// 原子写记录 → 切换 `current`。任何一步失败都不会改动旧记录与旧指针。
+pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record, String> {
     let manifest = manifest::load(&dir.join("plugin.toml")).map_err(|e| e.to_string())?;
     if !manifest.supports_this_platform() {
         return Err(format!(
@@ -323,19 +402,29 @@ pub fn install(config: &Config, dir: &Path) -> Result<Record, String> {
         ));
     }
     let store = Store::open(config.plugins_state_dir());
-    let (generation, target) = store
-        .prepare_generation(manifest.id())
+    let id = manifest.id().to_string();
+    let lock = store.lock_package(&id).map_err(|error| error.to_string())?;
+    let enabled = policy.resolve(store.record(&id).as_ref());
+    let (generation, staged) = store
+        .alloc_generation(&id)
         .map_err(|error| error.to_string())?;
-    copy_tree(dir, &target).map_err(|error| error.to_string())?;
-    store
-        .set_current(manifest.id(), &target)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = copy_tree(dir, &staged) {
+        store.discard_staged(&staged);
+        return Err(error.to_string());
+    }
+    let target = match store.publish_staged(&id, generation, &staged) {
+        Ok(target) => target,
+        Err(error) => {
+            store.discard_staged(&staged);
+            return Err(error.to_string());
+        }
+    };
     let record = Record {
-        id: manifest.id().to_string(),
+        id: id.clone(),
         source: Source::Local,
         generation,
         installed_at: now_unix(),
-        enabled: true,
+        enabled,
         manifest_hash: file_sha256(&target.join("plugin.toml")),
         origin: Some(dir.display().to_string()),
         sha256: None,
@@ -346,26 +435,31 @@ pub fn install(config: &Config, dir: &Path) -> Result<Record, String> {
         })),
         min_runtime: None,
     };
+    if let Err(error) = store.save_record(&record) {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(error.to_string());
+    }
     store
-        .save_record(&record)
+        .set_current(&id, &target)
         .map_err(|error| error.to_string())?;
+    drop(lock);
     Ok(record)
 }
 
 /// 链接一个开发插件目录；不拷贝。
-pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
+pub fn link(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record, String> {
     let manifest = manifest::load(&dir.join("plugin.toml")).map_err(|e| e.to_string())?;
     let store = Store::open(config.plugins_state_dir());
+    let id = manifest.id().to_string();
+    let lock = store.lock_package(&id).map_err(|error| error.to_string())?;
     let target = std::path::absolute(dir).map_err(|error| error.to_string())?;
-    store
-        .set_current(manifest.id(), &target)
-        .map_err(|error| error.to_string())?;
+    let enabled = policy.resolve(store.record(&id).as_ref());
     let record = Record {
-        id: manifest.id().to_string(),
+        id: id.clone(),
         source: Source::Linked,
         generation: 1,
         installed_at: now_unix(),
-        enabled: true,
+        enabled,
         manifest_hash: file_sha256(&target.join("plugin.toml")),
         origin: Some(target.display().to_string()),
         sha256: None,
@@ -379,7 +473,66 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
     store
         .save_record(&record)
         .map_err(|error| error.to_string())?;
+    store
+        .set_current(&id, &target)
+        .map_err(|error| error.to_string())?;
+    drop(lock);
     Ok(record)
+}
+
+/// 这个动作或终端入口属于一个已安装但被停用的包时返回包 ID。
+pub fn disabled_package(config: &Config, name: &str) -> Option<String> {
+    Registry::load(config).disabled_owner(name)
+}
+
+/// 注册表在磁盘上的指纹：记录、启用状态与开发清单的内容哈希。
+/// 运行中的 TUI 用它判断是否需要重新加载，不重启也能感知启用变化。
+pub fn revision(config: &Config) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let state = config.plugins_state_dir();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_files(&mut hasher, &state.join("records"));
+    if let Ok(text) = std::fs::read_to_string(state.join("disabled.json")) {
+        text.hash(&mut hasher);
+    }
+    let dev = config.plugins_dir();
+    if let Ok(entries) = std::fs::read_dir(&dev) {
+        let mut manifests: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("plugin.toml"))
+            .collect();
+        manifests.sort();
+        for path in manifests {
+            path.hash(&mut hasher);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                text.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_files(hasher: &mut impl std::hash::Hasher, dir: &Path) {
+    use std::hash::Hash as _;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        path.hash(hasher);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            text.hash(hasher);
+        }
+    }
 }
 
 /// 卸载插件：删除记录与 `current` 指针；代际目录只在没有任何 pin 持有者
@@ -416,16 +569,19 @@ mod tests {
     }
 
     fn write_plugin(root: &Path, id: &str) -> PathBuf {
-        let dir = root.join("config").join("plugins").join(id);
-        std::fs::create_dir_all(&dir).unwrap();
+        write_plugin_at(&root.join("config").join("plugins").join(id), id)
+    }
+
+    fn write_plugin_at(dir: &Path, id: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("plugin.toml"),
             format!(
-                "manifest_version = 1\nid = \"{id}\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\nargv = [\"true\"]\n"
+                "manifest_version = 1\nid = \"{id}\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\nargv = [\"true\"]\n\n[[terminals]]\nid = \"ui\"\ntitle = \"UI\"\nargv = [\"true\"]\nplacement = \"tab\"\n"
             ),
         )
         .unwrap();
-        dir
+        dir.to_path_buf()
     }
 
     #[test]
@@ -453,7 +609,7 @@ mod tests {
         let root = unique_dir("store");
         let config = config_in(&root);
         let source = write_plugin(&root, "dev.example.probe");
-        install(&config, &source).unwrap();
+        install(&config, &source, EnablePolicy::Enable).unwrap();
         let registry = Registry::load(&config);
         assert_eq!(registry.actions().len(), 1);
         assert_eq!(registry.plugins[0].source, Source::Local);
@@ -500,6 +656,142 @@ mod tests {
         assert!(Registry::load(&config).actions().is_empty());
         set_enabled(&config, "dev.example.probe", true).unwrap();
         assert_eq!(Registry::load(&config).actions().len(), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn install_and_link_start_disabled_until_enabled() {
+        let root = unique_dir("disabled-by-default");
+        let config = config_in(&root);
+        let source = write_plugin_at(&root.join("source").join("install"), "dev.example.install");
+        let record = install(&config, &source, EnablePolicy::Keep).unwrap();
+        assert!(!record.enabled, "fresh install must start disabled");
+        let store = crate::store::Store::open(config.plugins_state_dir());
+        assert!(!store.record("dev.example.install").unwrap().enabled);
+        assert!(Registry::load(&config).actions().is_empty());
+        assert!(Registry::load(&config).terminals().is_empty());
+
+        set_enabled(&config, "dev.example.install", true).unwrap();
+        assert_eq!(Registry::load(&config).actions().len(), 1);
+
+        let linked = write_plugin_at(&root.join("source").join("link"), "dev.example.link");
+        let record = link(&config, &linked, EnablePolicy::Keep).unwrap();
+        assert!(!record.enabled, "fresh link must start disabled");
+        let actions = Registry::load(&config).actions();
+        assert!(actions
+            .iter()
+            .all(|action| action.package != "dev.example.link"));
+        set_enabled(&config, "dev.example.link", true).unwrap();
+        assert!(Registry::load(&config)
+            .actions()
+            .iter()
+            .any(|action| action.package == "dev.example.link"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn update_preserves_the_disabled_state() {
+        let root = unique_dir("update-enabled");
+        let config = config_in(&root);
+        let source = write_plugin_at(&root.join("source").join("update"), "dev.example.update");
+
+        // 新装默认不启用；更新保留当前状态，不会把已禁用的包重新打开。
+        assert!(
+            !install(&config, &source, EnablePolicy::Keep)
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !install(&config, &source, EnablePolicy::Keep)
+                .unwrap()
+                .enabled
+        );
+
+        set_enabled(&config, "dev.example.update", true).unwrap();
+        assert!(
+            install(&config, &source, EnablePolicy::Keep)
+                .unwrap()
+                .enabled
+        );
+
+        set_enabled(&config, "dev.example.update", false).unwrap();
+        let record = install(&config, &source, EnablePolicy::Keep).unwrap();
+        assert!(!record.enabled);
+        assert_eq!(record.generation, 4);
+
+        // 显式策略优先于记录状态。
+        assert!(
+            install(&config, &source, EnablePolicy::Enable)
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !install(&config, &source, EnablePolicy::Disable)
+                .unwrap()
+                .enabled
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn two_installers_racing_leave_one_generation() {
+        let root = unique_dir("race");
+        let config = config_in(&root);
+        let source = write_plugin_at(&root.join("source").join("race"), "dev.example.race");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let config = config.clone();
+            let source = source.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                install(&config, &source, EnablePolicy::Keep).map(|record| record.generation)
+            }));
+        }
+        let results: Vec<Result<u64, String>> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(results.iter().any(Result::is_ok), "{results:?}");
+
+        let store = crate::store::Store::open(config.plugins_state_dir());
+        assert_eq!(store.list().len(), 1, "one record only");
+        let record = store.record("dev.example.race").expect("record published");
+        let current = store
+            .current_dir("dev.example.race")
+            .expect("current resolves");
+        // 唯一被发布的代际：记录与指针指向同一个完整目录。
+        assert_eq!(
+            current,
+            store.generation_dir("dev.example.race", record.generation)
+        );
+        assert!(current.join("plugin.toml").is_file());
+
+        // 两个安装者串行：成功的调用各自拿到不同代际，没有共享同一目录。
+        let mut generations: Vec<u64> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok().copied())
+            .collect();
+        assert!(!generations.is_empty());
+        let total = generations.len();
+        generations.sort_unstable();
+        generations.dedup();
+        assert_eq!(generations.len(), total, "installers shared one generation");
+        for generation in &generations {
+            assert!(store
+                .generation_dir("dev.example.race", *generation)
+                .join("plugin.toml")
+                .is_file());
+        }
+        // 发布态只有一个：记录指向的那一代就是 current，其他代际没有指针。
+        assert_eq!(record.generation, *generations.last().unwrap());
+        assert!(!store
+            .root()
+            .join("store")
+            .join("dev.example.race")
+            .join(format!(".tmp-{}", record.generation))
+            .exists());
         std::fs::remove_dir_all(root).ok();
     }
 }

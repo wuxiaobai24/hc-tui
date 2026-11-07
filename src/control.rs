@@ -401,6 +401,11 @@ pub fn call(_config: &Config, _request: Value) -> Result<Value> {
     anyhow::bail!(t("local command sockets require Unix"))
 }
 
+#[cfg(not(unix))]
+pub fn call_raw(_config: &Config, _request: Value) -> Result<Value> {
+    anyhow::bail!(t("local command sockets require Unix"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,6 +22,8 @@ pub const MISSING_PROGRAM: &str = "missing_program";
 pub const OFFLINE: &str = "offline";
 /// 触发对象已不存在。
 pub const TARGET_GONE: &str = "target_gone";
+/// 包已安装但被停用。
+pub const DISABLED: &str = "disabled";
 /// 其余无法立即创建的情况（布局没有空间、客户端没有视图等）。
 pub const UNAVAILABLE: &str = "unavailable";
 

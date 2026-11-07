@@ -57,7 +57,7 @@ trigger_status() {
 }
 
 step "install the events plugin"
-"$BIN" plugins install "$ROOT/src/events" --yes >/dev/null || FAILED=1
+"$BIN" plugins install "$ROOT/src/events" --yes --enable >/dev/null || FAILED=1
 
 step "run the TUI"
 tmux -L "$SOCK" new-session -d -s tui -x 110 -y 30 "cd /tmp && TERM=xterm-256color $BIN"

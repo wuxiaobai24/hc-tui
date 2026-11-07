@@ -12,11 +12,18 @@ use crate::config::Span;
 use crate::i18n::{t, t1, t2};
 use crate::layout::split::Axis;
 use crate::model::{Launch, Tab};
-use crate::plugin::lease::{self, GenerationPin, ResourceOwner, RetentionEvidence, TerminalAddress};
+use crate::plugin::lease::{
+    self, GenerationPin, ResourceOwner, RetentionEvidence, TerminalAddress,
+};
 use crate::plugin::manifest;
 use crate::plugin::registry::{ActionInfo, Registry};
 use crate::plugin::runner::{InvocationSpec, InvokeError};
-use crate::plugin::terminal::{self, ExecutionTarget, Plan, PlanError, PreparedTerminal, TargetSelector};
+use crate::plugin::terminal::{
+    self, ExecutionTarget, Plan, PlanError, PreparedTerminal, TargetSelector,
+};
+
+/// 主动扫描注册表磁盘指纹的间隔；控制请求前还会无节流对齐一次。
+const PLUGIN_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// 一个落在 Pane 里的插件终端入口。
 #[derive(Debug, Clone)]
@@ -71,6 +78,43 @@ pub struct PaneRequest {
 }
 
 impl App {
+    /// 每帧调用：节流比较注册表指纹，变了就重新加载。
+    pub fn poll_plugin_registry(&mut self) {
+        let now = std::time::Instant::now();
+        if self
+            .plugin_scan_at
+            .is_some_and(|last| now.duration_since(last) < PLUGIN_SCAN_INTERVAL)
+        {
+            return;
+        }
+        self.plugin_scan_at = Some(now);
+        self.refresh_plugins_if_changed();
+    }
+
+    /// 磁盘指纹变化时重新加载注册表：`plugins enable|disable` 无需重启。
+    pub fn refresh_plugins_if_changed(&mut self) {
+        let revision = crate::plugin::registry::revision(&self.config);
+        if revision == self.plugin_revision {
+            return;
+        }
+        self.plugin_revision = revision;
+        self.plugins = Registry::load(&self.config);
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        self.event_publisher.publish(&json!({
+            "kind": "registry.changed",
+            "at_ms": at_ms,
+            "data": {
+                "plugins": self.plugins.plugins.len(),
+                "actions": self.plugins.actions().len(),
+                "terminals": self.plugins.terminals().len(),
+            },
+        }));
+        self.dirty = true;
+    }
+
     /// 插件动作的菜单项；`target` 会冻结进调用上下文。
     pub fn plugin_menu_items(&self, context: &str, target: Value) -> Vec<ChooserItem> {
         self.plugins
@@ -86,6 +130,9 @@ impl App {
 
     /// 执行插件动作：校验参数、冻结目标、注入环境并提交给运行器。
     pub fn invoke_plugin(&mut self, name: &str, mut args: Value) -> Result<()> {
+        if let Some(package) = crate::plugin::registry::disabled_package(&self.config, name) {
+            anyhow::bail!(t1("plugin {} is disabled", &package));
+        }
         let Some(action) = self.plugins.action(name) else {
             anyhow::bail!(t1("unknown plugin action {}", name));
         };
@@ -313,7 +360,10 @@ impl App {
             machine: None,
             cwd: None,
             pane: Some(pane),
-            terminal: self.panes.get(&pane).and_then(|state| state.terminal.clone()),
+            terminal: self
+                .panes
+                .get(&pane)
+                .and_then(|state| state.terminal.clone()),
         };
         target.machine = machine_of(selector.machine.as_deref(), workspace.machine.clone());
         target.cwd = selector.cwd.clone().or_else(|| workspace.folder.clone());
@@ -325,9 +375,10 @@ impl App {
         index: usize,
         selector: &TargetSelector,
     ) -> std::result::Result<ExecutionTarget, PlanError> {
-        let workspace = self.workspaces.get(index).ok_or_else(|| {
-            PlanError::new(terminal::TARGET_GONE, t("the target space is gone"))
-        })?;
+        let workspace = self
+            .workspaces
+            .get(index)
+            .ok_or_else(|| PlanError::new(terminal::TARGET_GONE, t("the target space is gone")))?;
         let mut target = ExecutionTarget {
             space: format!("sp{}", workspace.id),
             space_name: workspace.label.clone(),
@@ -351,10 +402,7 @@ impl App {
         action: &ActionInfo,
         requested: Option<Value>,
     ) -> std::result::Result<(Value, Option<u32>), PlanError> {
-        let selector = requested
-            .as_ref()
-            .map(target_selector)
-            .unwrap_or_default();
+        let selector = requested.as_ref().map(target_selector).unwrap_or_default();
         let target = if selector.is_empty() {
             let pane_context = action.contexts.iter().any(|context| context == "pane");
             if pane_context {
@@ -614,6 +662,12 @@ impl App {
                 t("plugin terminal name is required"),
             ));
         }
+        if let Some(package) = crate::plugin::registry::disabled_package(&self.config, &name) {
+            return Err(PlanError::new(
+                terminal::DISABLED,
+                t1("plugin {} is disabled", &package),
+            ));
+        }
         let info = match self.plugins.terminal(&name) {
             Some(info) => info,
             None => {
@@ -827,9 +881,7 @@ impl App {
             .index
             .filter(|index| self.workspaces.get(*index).is_some_and(matches))
             .or_else(|| self.workspaces.iter().position(matches))
-            .ok_or_else(|| {
-                PlanError::new(terminal::TARGET_GONE, t1("space {} is gone", wanted))
-            })?;
+            .ok_or_else(|| PlanError::new(terminal::TARGET_GONE, t1("space {} is gone", wanted)))?;
         self.active_ws = index;
         self.zoom = false;
         if let Some(tab) = self.workspaces[index]
@@ -962,9 +1014,7 @@ impl App {
         // 上下文里的 Tab 必须是 Pane 实际所在的那一个：`tab`/`zoomed` 放置会建新 Tab。
         let placed_tab = self
             .locate(pane)
-            .map(|(index, tab)| {
-                format!("tb{}", self.workspaces[index].tabs[tab].id)
-            })
+            .map(|(index, tab)| format!("tb{}", self.workspaces[index].tabs[tab].id))
             .unwrap_or_else(|| target.tab.clone());
         let env = terminal::env(
             self.plugin_env_base(&plan.package, &plan.root),
@@ -1378,7 +1428,11 @@ mod tests {
                     return text;
                 }
             }
-            assert!(std::time::Instant::now() < deadline, "{} never appeared", path.display());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} never appeared",
+                path.display()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -1493,12 +1547,7 @@ mod tests {
             trigger = trigger.display(),
             out = out.display()
         );
-        let source = write_source(
-            &root,
-            "dev.example.keep",
-            "[\"./run.sh\"]",
-            "[\"true\"]",
-        );
+        let source = write_source(&root, "dev.example.keep", "[\"./run.sh\"]", "[\"true\"]");
         std::fs::write(source.join("run.sh"), script).unwrap();
         #[cfg(unix)]
         {
@@ -1509,7 +1558,12 @@ mod tests {
             )
             .unwrap();
         }
-        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        let record = crate::plugin::registry::install(
+            &app.config,
+            &source,
+            crate::plugin::registry::EnablePolicy::Enable,
+        )
+        .unwrap();
         app.plugins = Registry::load(&app.config);
         let dir = installed_generation(&app, "dev.example.keep", record.generation);
         let reply = app.plugin_pane_open(&json!({"name": "dev.example.keep.ui"}));
@@ -1548,7 +1602,12 @@ mod tests {
             "[\"true\"]",
             "[\"sh\", \"-c\", \"sleep 0.5; cat ./payload.txt\"]",
         );
-        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        let record = crate::plugin::registry::install(
+            &app.config,
+            &source,
+            crate::plugin::registry::EnablePolicy::Enable,
+        )
+        .unwrap();
         app.plugins = Registry::load(&app.config);
         let dir = installed_generation(&app, "dev.example.queue", record.generation);
         app.plugin_runner = crate::plugin::runner::Runner::with_limits(
@@ -1560,9 +1619,11 @@ mod tests {
                 output: 4096,
             },
         );
-        app.invoke_plugin("dev.example.queue.run", json!({})).unwrap();
+        app.invoke_plugin("dev.example.queue.run", json!({}))
+            .unwrap();
         let running = app.plugin_request.clone().unwrap();
-        app.invoke_plugin("dev.example.queue.run", json!({})).unwrap();
+        app.invoke_plugin("dev.example.queue.run", json!({}))
+            .unwrap();
         let queued = app.plugin_request.clone().unwrap();
         assert_eq!(
             app.plugin_runner.status(&queued).unwrap().status,
@@ -1589,10 +1650,16 @@ mod tests {
             "[\"true\"]",
             "[\"sh\", \"-c\", \"sleep 0.5; pwd; cat ./payload.txt\"]",
         );
-        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        let record = crate::plugin::registry::install(
+            &app.config,
+            &source,
+            crate::plugin::registry::EnablePolicy::Enable,
+        )
+        .unwrap();
         app.plugins = Registry::load(&app.config);
         let dir = installed_generation(&app, "dev.example.live", record.generation);
-        app.invoke_plugin("dev.example.live.run", json!({})).unwrap();
+        app.invoke_plugin("dev.example.live.run", json!({}))
+            .unwrap();
         let request = app.plugin_request.clone().unwrap();
         crate::plugin::registry::uninstall(&app.config, "dev.example.live").unwrap();
         let view = wait_for_status(&app, &request);
@@ -1617,10 +1684,16 @@ mod tests {
             "[\"true\"]",
             "[\"sh\", \"-c\", \"sleep 60 & echo $! > ./child.pid; sleep 60\"]",
         );
-        let record = crate::plugin::registry::install(&app.config, &source).unwrap();
+        let record = crate::plugin::registry::install(
+            &app.config,
+            &source,
+            crate::plugin::registry::EnablePolicy::Enable,
+        )
+        .unwrap();
         app.plugins = Registry::load(&app.config);
         let dir = installed_generation(&app, "dev.example.stop", record.generation);
-        app.invoke_plugin("dev.example.stop.run", json!({})).unwrap();
+        app.invoke_plugin("dev.example.stop.run", json!({}))
+            .unwrap();
         let request = app.plugin_request.clone().unwrap();
         let pidfile = dir.join("child.pid");
         let pid: u32 = wait_for_file(&pidfile).trim().parse().unwrap();
@@ -1698,7 +1771,12 @@ mod tests {
             "[\"true\"]",
             "[\"sh\", \"-c\", \"cat\"]",
         );
-        crate::plugin::registry::install(&app.config, &source).unwrap();
+        crate::plugin::registry::install(
+            &app.config,
+            &source,
+            crate::plugin::registry::EnablePolicy::Enable,
+        )
+        .unwrap();
         app.plugins = Registry::load(&app.config);
         app.invoke_plugin(
             "dev.example.target.run",
@@ -1726,7 +1804,12 @@ mod tests {
             "[\"true\"]",
             "[\"sh\", \"-c\", \"cat\"]",
         );
-        crate::plugin::registry::install(&app.config, &source).unwrap();
+        crate::plugin::registry::install(
+            &app.config,
+            &source,
+            crate::plugin::registry::EnablePolicy::Enable,
+        )
+        .unwrap();
         app.plugins = Registry::load(&app.config);
         "dev.example.miss.run".to_string()
     }
@@ -1736,10 +1819,8 @@ mod tests {
         let mut app = app();
         two_spaces(&mut app);
         let name = action_for_a_target(&mut app);
-        let missing = app.invoke_plugin(
-            &name,
-            json!({"_target": {"pane_or_terminal": "peer/t404"}}),
-        );
+        let missing =
+            app.invoke_plugin(&name, json!({"_target": {"pane_or_terminal": "peer/t404"}}));
         let error = format!("{}", missing.expect_err("unknown target must fail"));
         assert!(error.contains("target_gone"), "{error}");
         std::fs::remove_dir_all(scratch(&app)).ok();
@@ -1788,5 +1869,66 @@ mod tests {
         assert!(app
             .invoke_plugin("dev.example.missing.run", json!({}))
             .is_err());
+    }
+
+    #[test]
+    fn disabling_a_package_removes_its_actions_without_restart() {
+        let mut app = app();
+        let name = install(&mut app, "dev.example.gate", "true");
+        assert!(app.plugins.owns(&name));
+        assert!(!app.plugin_menu_items("global", json!({})).is_empty());
+
+        // 另一个进程里执行 `hc-tui plugins disable`：只落盘，不重启 TUI。
+        crate::plugin::registry::set_enabled(&app.config, "dev.example.gate", false).unwrap();
+        app.refresh_plugins_if_changed();
+
+        assert!(!app.plugins.owns(&name));
+        assert!(app.plugin_menu_items("global", json!({})).is_empty());
+        assert!(app.execute_action(&name, json!({})).is_err());
+
+        crate::plugin::registry::set_enabled(&app.config, "dev.example.gate", true).unwrap();
+        app.refresh_plugins_if_changed();
+        assert!(app.plugins.owns(&name), "enable did not take effect");
+        std::fs::remove_dir_all(scratch(&app)).ok();
+    }
+
+    #[test]
+    fn invoking_a_disabled_package_returns_disabled() {
+        let mut app = app();
+        let name = install(&mut app, "dev.example.off", "true");
+        crate::plugin::registry::set_enabled(&app.config, "dev.example.off", false).unwrap();
+        app.refresh_plugins_if_changed();
+        let reply = app.control_reply(&json!({"method": "do", "command": name, "args": {}}));
+        assert_eq!(reply["error_kind"], json!("disabled"), "{reply}");
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("disabled"),
+            "{reply}"
+        );
+
+        // 终端入口闸门同样返回 disabled，而不是 unknown terminal。
+        let terminal = install_terminal(&mut app, "dev.example.offterm", "tab");
+        crate::plugin::registry::set_enabled(&app.config, "dev.example.offterm", false).unwrap();
+        app.refresh_plugins_if_changed();
+        let reply = app.plugin_pane_open(&json!({"name": terminal}));
+        assert_eq!(reply["error_kind"], json!("disabled"), "{reply}");
+        std::fs::remove_dir_all(scratch(&app)).ok();
+    }
+
+    #[test]
+    fn an_invocation_already_queued_runs_to_completion_after_disable() {
+        let mut app = app();
+        let name = install(&mut app, "dev.example.inflight", "sleep 0.3; true");
+        app.execute_action(&name, json!({})).unwrap();
+        let request = app.plugin_request.clone().expect("request queued");
+
+        crate::plugin::registry::set_enabled(&app.config, "dev.example.inflight", false).unwrap();
+        app.refresh_plugins_if_changed();
+
+        let view = wait_for_status(&app, &request);
+        assert!(view.status.finished(), "running invocation was cut short");
+        std::fs::remove_dir_all(scratch(&app)).ok();
     }
 }

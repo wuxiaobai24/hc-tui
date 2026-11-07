@@ -2,8 +2,8 @@
 
 [返回 README](../README.md) · [界面模块](mods.md) · [命令](commands.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
-版本：v0.2（2026-11-07）
-状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）与 M8（事件流）已实现。清单错误格式为 `文件:行:列: 原因`。
+版本：v0.3（2026-11-07）
+状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）、M8（事件流）与 M10（发布事务、启用闸门、参数校验纵深）已实现。清单错误格式为 `文件:行:列: 原因`。
 定位：可分发的工作流包，提供一次性动作与真实终端入口。界面由 [界面模块](mods.md) 负责。
 
 ---
@@ -69,7 +69,7 @@ requires_programs = ["lazygit"]
 | `platforms` | `linux` / `macos`；不匹配时跳过并给警告 |
 | `[[actions]].contexts` | `global`（命令面板与 `do`）、`space`（侧栏 Space 菜单）、`pane`（Pane 右键菜单） |
 | `[[actions]].argv` | 工作目录为插件目录；`./` 开头的程序相对插件目录解析 |
-| `[[actions]].args` | JSON Schema 子集：`type`、`properties`、`required`、`enum`、`default`、`additionalProperties` |
+| `[[actions]].args` | JSON Schema 子集：`type`、`properties`、`required`、`enum`、`default`、`additionalProperties`、`items`；逐层嵌套校验，深度上限 8、单层属性上限 64，`items` 只接受 object 或标量 schema |
 | `[[terminals]].placement` | 终端在 Tab 中的打开方式，映射到现有 `terminal.open`、`pane.split`、浮动与 popup |
 | `[[terminals]].requires_programs` | 启动前由实际执行位置（core）在目标机器检查 PATH，缺失时报 `missing_program` 并列出缺失项 |
 
@@ -134,7 +134,7 @@ requires_programs = ["lazygit"]
 - 终端标签在 attach 成功后写入 `hctui`、`hctui.plugin=<package-id>`、`hctui.terminal=<terminal-id>` 与 `where`；Space 与 Tab 有共享结构来源时同时写 `herdr.space`、`herdr.tab`。`plugins pane focus/close` 先按 Pane 编号与内存登记匹配，再按 core 里的这两条标签定位，所以视图关闭后仍能找回终端。
 - 关闭 Pane 不结束程序，按现有 keep / park 语义；`terminal.kill` 才结束程序与子进程。
 - 打开时为目标代际写 pin 文件 `<state>/plugins/pins/<package>/<generation>/<owner>.json`；动作入队即登记 `invocation` pin，调用结束后释放。终端先按请求登记占位身份，attach 后换成带 session 与机器名的核心地址；**关闭 Pane 不释放终端 pin**，只有 core 报告该终端结束（`finished`/`removed`/`lost` 事件、程序退出）才释放。进程 PID 存活不参与判断。
-- `plugins pane open` 先返回请求 ID；需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。探测结果回来后只验证冻结的目标仍然存在，不重新解析；目标 Space 已移除则报 `target_gone`，Pane 建在目标 Space 里，与探测期间的用户切换无关。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`unavailable`。
+- `plugins pane open` 先返回请求 ID；需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。探测结果回来后只验证冻结的目标仍然存在，不重新解析；目标 Space 已移除则报 `target_gone`，Pane 建在目标 Space 里，与探测期间的用户切换无关。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`disabled`、`unavailable`；`disabled` 表示包已安装但被停用。
 - 不自动上传插件目录、不执行远端安装、不复制凭证、不转发本机 socket。需要回调客户端时走 `hc-tui` CLI 或事件流。
 
 ## 6. 多机
@@ -174,6 +174,7 @@ hc-tui events [--plugin <id>] [--kinds terminal.status,terminal.turn] [--count N
 结果语义：
 
 - `accepted` 表示已排队；`confirmation_pending` 表示仍需界面确认；两者都不等于完成。
+- 停用包的调用在分发器入口被拒绝：控制回包与 `plugins action invoke` 带 `error_kind = "disabled"`，不进入队列。
 - 完成状态为 `done`、`failed`、`cancelled`、`timed_out`，附退出码与日志末尾。
 - core 操作或布局 CAS 失败时，动作以 `failed` 结束，`error.kind` 区分 `conflict`、`offline`、`unavailable`。
 - 终端入口的请求状态为 `probing`、`opening`、`opened`、`closed`、`failed`；`opened` 才带终端地址，`failed` 带 `error_kind`。`open` 等到拿到地址或明确错误才返回，超时 20 秒。
@@ -190,7 +191,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 - 过滤：`--plugin <id>` 只看该包的终端事件（事件带 `plugin` 字段），`--kinds a,b` 只看列出的 kind；都缺省时收到全部。
 - 作用域是本客户端：同一个 TUI 的多个订阅者各收到一次；另一台机器或另一个 hc-tui 实例不共享。
 - 投递不保证恰好一次；每个订阅者 256 条队列，溢出时丢弃并补发 `{"kind":"events.dropped","count":N}`，随后应由消费者重新读取状态。
-- kind：`terminal.status`（`data.status`）、`terminal.turn`（`data.turn`）、`terminal.finished`（`data.reason`）、`terminal.opened`、`terminal.closed`（`data.reason = "pane_closed"`）。负载带 `machine`、`terminal`、`turn`、`at_ms` 与 `data`；属于插件终端时带 `plugin`。
+- kind：`terminal.status`（`data.status`）、`terminal.turn`（`data.turn`）、`terminal.finished`（`data.reason`）、`terminal.opened`、`terminal.closed`（`data.reason = "pane_closed"`），以及 `registry.changed`（`data.plugins` / `data.actions` / `data.terminals`，运行中的实例重新加载注册表后发出，不带 `plugin` 字段）。终端类负载带 `machine`、`terminal`、`turn`、`at_ms` 与 `data`；属于插件终端时带 `plugin`。
 - 注入的 `HCTUI_SOCKET` 被 `hc-tui events` 优先采用，插件动作与终端无需自行推导会话。
 - 邮件、部署、通知外部服务等副作用不绑定到多客户端事件流；需要单次执行时用独立 runner（systemd 单元、远端分离进程）读取同一 `hc-tui events` 或直接调用 core。
 
@@ -208,6 +209,34 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 
 `records/<id>.json` 记录来源、清单哈希、代际、启用状态与安装时间。安装前显示 `id`、版本、`host_api`、平台、动作与终端入口、`requires_programs`；确认后才注册。构建失败不替换旧代际；`current` 指针切换使用临时目录加 rename。
 
+`plugins install` 与 `plugins link` 默认**不启用**，需要时加 `--enable`；`--disable` 显式关闭。`plugins update` 保留记录里已有的启用状态，不会把已停用的包重新打开。
+
+### 9.1 发布事务与恢复
+
+记录是唯一发布真相，`current` 只是可重建索引：
+
+- `save_record` 在记录目录写临时文件，`fsync` 后 `rename` 覆盖，再 `fsync` 父目录；失败时旧记录保持原样，不会留下半截 JSON。
+- 包级互斥是 `store/<id>/.lock`（`O_CREAT|O_EXCL`、写入持有者 PID、30 秒超时、持有者进程已消失或锁文件超过 120 秒视为残留）；锁的粒度是一个包，不同包的安装互不阻塞。
+- 代际分配在锁内：`next_generation` → 复制到 `store/<id>/.tmp-<gen>` → 同一文件系统 `rename` 到 `store/<id>/<gen>` → 原子写记录 → 最后切 `current`。复制失败清理暂存目录并返回错误；记录写失败删除刚发布的代际目录，旧记录与旧指针不变。
+- `Store::open` 每次打开做一次幂等恢复：清理持有者已消失的 `.tmp-*` 与记录临时文件；记录存在而 `current` 缺失或指向不存在的目标时按记录重建指针（linked 来源按记录里的 `origin` 重建）；`current` 存在但没有记录时不静默删除，作为 issue 报出来并拒绝加载该包。
+- 旧格式记录仍可读：新增字段都带 `#[serde(default)]`，schema 变化不要求重装。
+- `hc-tui plugins gc` 语义不变：只回收没有记录指向、也没有任何 pin 的旧代际。
+
+### 9.2 启用语义
+
+- `plugins enable|disable <id>` 只改变是否出现在命令目录与菜单，不移动代际、不删除代码。
+- 运行中的 TUI 无需重启：每 250 毫秒比较注册表磁盘指纹（记录、`disabled.json`、开发清单的内容哈希），处理控制请求前还会无节流对齐一次；变化时重新加载注册表并发布 `registry.changed` 事件。命令目录、命令面板、Pane 右键菜单、Space 菜单与 `[[keys.command]] type = "action"` 绑定因此立即同步。
+- `plugins action list` 不再列出停用包的动作；`plugins action invoke` 返回 `{"error": ..., "error_kind": "disabled"}`；`plugins pane open` 返回 `error_kind = "disabled"`。
+- 已排队或已运行的调用继续跑到结束，不因停用而腰斩；已打开的终端不 kill，只拒绝新的入口请求。
+
+### 9.3 参数校验
+
+- 递归校验 `args`：object 逐层检查未知键、嵌套必填与 `additionalProperties`，array 按 `items` 逐元素校验；错误带完整路径（`args.remote.name must be string`、`args.hosts[1].name is required`）。
+- 清单加载期逐个校验 `default`，不合法时报 `文件:行:列: 原因`，不会把非法默认值带进运行期结果。
+- `integer` 只接受整数，`number` 接受整数与浮点；未知 `type` 在清单期拒绝。
+- 防爆：schema 递归深度上限 8、单层属性上限 64、`items` 只允许 object 或标量 schema，超限在清单期报错；运行期递归深度由清单约束，不会递归到栈溢出。
+- `plugins action list --json` 里的 `args` 原样输出 schema，不注入默认值、不改形状。
+
 ## 10. 信任与权限
 
 - 插件是以用户身份运行的受信本地代码，没有 OS 沙箱；`capabilities` 不作为隔离承诺。
@@ -217,7 +246,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 
 ## 11. 生命周期与故障
 
-- 注册表在启动时扫描配置目录与 state 中的安装记录；清单无效时保留记录并标记 `broken`，不执行。
+- 注册表在启动时扫描配置目录与 state 中的安装记录，运行中按磁盘指纹重新加载；清单无效时保留记录并标记 `broken`，不执行。
 - 动作进程按调用创建与回收；宿主退出走与取消相同的终止路径（取消排队项、SIGTERM 后 SIGKILL 终止进程组、等待收尾，3 秒 deadline），终端继续由 core 持有。
 - 连续三次启动即失败或超时的包标记 `failed`，停止自动重试；`plugins enable` 或下一次显式调用恢复。
 - 崩溃与超时写日志并附告警；进程组、管道与子进程一并回收，阻塞在输出管道上的后代不会拖住完成报告。
@@ -251,7 +280,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 - 输出洪泛：持续输出超过 64 KiB 时内存有界、管道不堵塞、日志轮转正常。
 - 更新：新代际切换后旧调用与旧终端继续运行；失败安装不影响旧代际；卸载不删除用户终端。
 - 事件：两个客户端各收到一次，断开即停；队列溢出发出 `events.dropped`。
-- 命令目录：插件动作带参数 schema 与来源；禁用后从目录与菜单消失；内置动作不可覆盖。
+- 命令目录：插件动作带参数 schema 与来源；禁用后从目录与菜单消失（无需重启），动作调用返回 `disabled`；内置动作不可覆盖。
 - 旧配置：`[[panels]]`、`[[keys.command]]`、`mod.open` 行为不变。
 
 ## 15. 实施清单

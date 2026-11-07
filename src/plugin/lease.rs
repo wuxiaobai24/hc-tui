@@ -236,7 +236,12 @@ fn load_file(path: &Path) -> Option<GenerationPin> {
         path: path.to_path_buf(),
         package: value.get("package").and_then(Value::as_str)?.to_string(),
         generation: value.get("generation").and_then(Value::as_u64)?,
-        root: PathBuf::from(value.get("root").and_then(Value::as_str).unwrap_or_default()),
+        root: PathBuf::from(
+            value
+                .get("root")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
         owner: ResourceOwner::from_json(value.get("owner")?)?,
     })
 }
@@ -336,7 +341,8 @@ pub fn gc(config: &Config, package: &str, evidence: &RetentionEvidence) -> GcRep
             report.generations.push(generation);
         }
     }
-    if report.generations.contains(&1) && std::fs::read_dir(&dir).is_ok_and(|mut e| e.next().is_none())
+    if report.generations.contains(&1)
+        && std::fs::read_dir(&dir).is_ok_and(|mut e| e.next().is_none())
     {
         // 空的代际目录留着没有意义；记录与 pin 都不需要它。
         let _ = std::fs::remove_dir_all(&dir);
@@ -453,7 +459,10 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(live_generations(&config, "dev.example.git"), vec![generation]);
+        assert_eq!(
+            live_generations(&config, "dev.example.git"),
+            vec![generation]
+        );
         Store::open(config.plugins_state_dir())
             .detach("dev.example.git")
             .unwrap();
@@ -512,7 +521,14 @@ mod tests {
             machine: "local".into(),
             address: "pending/tp1".into(),
         });
-        pin(&config, "dev.example.git", generation, &dir, pending.clone()).unwrap();
+        pin(
+            &config,
+            "dev.example.git",
+            generation,
+            &dir,
+            pending.clone(),
+        )
+        .unwrap();
         repin(
             &config,
             "dev.example.git",

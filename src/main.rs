@@ -361,12 +361,24 @@ fn plugins_command(args: &[String]) -> Result<()> {
             if let Some(pane) = pane {
                 args["_target"] = serde_json::json!({"pane_or_terminal": pane});
             }
-            let response = call(serde_json::json!({
-                "method": "do",
-                "command": name,
-                "args": args,
-            }))?;
+            let response = hc_tui::control::call_raw(
+                &config,
+                serde_json::json!({
+                    "method": "do",
+                    "command": name,
+                    "args": args,
+                }),
+            )?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+            if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+                match response
+                    .get("error_kind")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some(kind) => anyhow::bail!("{kind}: {error}"),
+                    None => anyhow::bail!("{error}"),
+                }
+            }
             Ok(())
         }
         "status" | "cancel" | "log" => {
@@ -553,6 +565,7 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
     let mut config_path = None;
     let mut json = false;
     let mut yes = false;
+    let mut policy = hc_tui::plugin::registry::EnablePolicy::Keep;
     let mut targets: Vec<String> = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -567,6 +580,8 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
             }
             "--json" => json = true,
             "--yes" | "-y" => yes = true,
+            "--enable" => policy = hc_tui::plugin::registry::EnablePolicy::Enable,
+            "--disable" => policy = hc_tui::plugin::registry::EnablePolicy::Disable,
             other if other.starts_with('-') => anyhow::bail!(t1("unknown option: {}", other)),
             other => targets.push(other.to_string()),
         }
@@ -614,9 +629,11 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
             Ok(())
         }
         "install" | "update" => {
-            let dir = targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui plugins install <dir>")))?;
+            let dir = targets.first().ok_or_else(|| {
+                anyhow::anyhow!(t(
+                    "usage: hc-tui plugins install <dir> [--enable|--disable]"
+                ))
+            })?;
             let manifest =
                 hc_tui::plugin::manifest::load(&std::path::Path::new(dir).join("plugin.toml"))
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -672,21 +689,42 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
                     anyhow::bail!(t("pass --yes to install without a terminal"));
                 }
             }
-            let record = hc_tui::plugin::registry::install(&config, std::path::Path::new(dir))
-                .map_err(anyhow::Error::msg)?;
+            let record =
+                hc_tui::plugin::registry::install(&config, std::path::Path::new(dir), policy)
+                    .map_err(anyhow::Error::msg)?;
             println!(
                 "{}",
-                t2("installed {} generation {}", record.id, record.generation)
+                t3(
+                    "installed {} generation {} ({})",
+                    record.id,
+                    record.generation,
+                    if record.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
             );
             Ok(())
         }
         "link" => {
-            let dir = targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui plugins link <dir>")))?;
-            let record = hc_tui::plugin::registry::link(&config, std::path::Path::new(dir))
+            let dir = targets.first().ok_or_else(|| {
+                anyhow::anyhow!(t("usage: hc-tui plugins link <dir> [--enable|--disable]"))
+            })?;
+            let record = hc_tui::plugin::registry::link(&config, std::path::Path::new(dir), policy)
                 .map_err(anyhow::Error::msg)?;
-            println!("{}", t1("linked {}", record.id));
+            println!(
+                "{}",
+                t2(
+                    "linked {} ({})",
+                    record.id,
+                    if record.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
+            );
             Ok(())
         }
         "uninstall" => {
