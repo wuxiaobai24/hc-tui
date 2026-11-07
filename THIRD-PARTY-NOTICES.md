@@ -18,6 +18,17 @@
   - 许可：**MIT**（Copyright © 2024 Mitchell Hashimoto, Ghostty contributors）
   - 注意：Ghostty 与 libghostty-vt 是 MIT，不是 Apache-2.0；两者都要保留声明。
 
+## 界面模块运行时（nsh）
+
+M2 起以 git 依赖引入，构建时编译进二进制图（M3/M4 接线后才实际链接进发行体积）：
+
+- **nsh**（`nsh-platform-tui` / `nsh-engine` / `nsh-core` 等，`Cargo.toml` 固定 commit）
+  - 上游：https://github.com/longbridge/nsh
+  - 固定 commit：`951556dc1af6f5acf593cfd28640a0fd467b71e3`
+  - 许可：**Apache-2.0**
+- **QuickJS**（`quickjs-jit` / `quickjs-jit-core` / `quickjs-jit-sys`，nsh 的 JS 引擎）
+  - 许可：**MIT**（Rust 封装与 QuickJS 引擎本身均为 MIT）
+
 ## Rust 依赖
 
 由 `Cargo.lock` 固定，主要包括：
@@ -26,6 +37,10 @@
 |---|---|
 | ratatui | MIT |
 | crossterm | MIT |
+| nsh | Apache-2.0 |
+| quickjs-jit / QuickJS | MIT |
+| ureq / rustls（nsh `net` 特性引入） | MIT OR Apache-2.0 / ISC 系 |
+| crossbeam-channel（含 dev 探针） | MIT OR Apache-2.0 |
 | tokio | MIT |
 | serde / serde_json | MIT / Apache-2.0 |
 | tracing / tracing-subscriber | MIT |

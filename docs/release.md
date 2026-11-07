@@ -20,6 +20,23 @@
 - `just smoke` 回归交互、窗口和机器折叠；nvim 固定回放见 tests/fixtures/README.md。
 - 核对 [同步契约](sync-contract.md)，不要把本地主题、焦点或 settle 混进共享文档。
 
+## 依赖与体积基线
+
+M2 引入 nsh（`nsh-platform-tui` / `nsh-engine`，固定提交 `951556dc1af6f5acf593cfd28640a0fd467b71e3`）后的冷构建探针基线，供后续里程碑对比：
+
+| 目标 | M1（无 nsh） | M2（含 nsh 探针） | M2 体积 |
+|---|---|---|---|
+| x86_64-unknown-linux-musl | 约 16 s，5.65 MiB | 约 106 s，5.78 MiB | 5,783,656 B |
+| aarch64-unknown-linux-musl | 未测 | 约 182 s，5.22 MiB | 5,218,096 B |
+| x86_64-apple-darwin / aarch64-apple-darwin | 未测 | 由 release CI 构建验证 | 未测 |
+
+说明：
+
+- 机器为 32 线程 Linux，release + zigbuild，冷目标目录；时间仅供趋势对比，不作绝对门限。
+- nsh 尚未接线（M3/M4 才嵌入帧与宿主通道），链接器剔除未引用代码，发行二进制增量约 +136 KiB（约 +2.4%）；接线后需重测并更新本表。
+- `oxc`、`quickjs-jit` 的编译开销主要在 dev-dependencies（探针测试），不影响发行构建时间；`nsh-engine` 的 `js`/`net` 特性带来 QuickJS、`ureq`/`rustls` 等运行时依赖。
+- 体积或编译时间出现明显跳变时，先关未用 feature，再考虑裁剪 `nsh-base` 可选组件。
+
 ## 四平台构建与打包
 
 `.github/workflows/release.yml` 覆盖：
