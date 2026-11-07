@@ -51,3 +51,12 @@ unicode-width = "0.2"
 [dev-dependencies]
 nsh-bundler = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false }
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false }
+
+# --- disk/compile tuning (added 2026-11-07) ---
+# 自己的 crate 保留行号表（够 panic backtrace），依赖完全不生成调试符号。
+# 依据实测：单 crate debug 产物 792M，strip 后 116M（85% 是 DWARF）。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
