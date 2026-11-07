@@ -55,9 +55,28 @@ pub struct Plugin {
 }
 
 impl Plugin {
-    /// 由清单推导的能力。
+    /// 记录里缓存的能力；旧记录按清单回填。
     pub fn capabilities(&self) -> Capabilities {
-        self.manifest.capabilities()
+        self.record
+            .as_ref()
+            .and_then(|record| record.capabilities)
+            .unwrap_or_else(|| self.manifest.capabilities())
+    }
+
+    /// 模块摘要：记录优先，旧记录按清单回填。
+    pub fn module_info(&self) -> Option<ModuleInfo> {
+        self.record
+            .as_ref()
+            .and_then(|record| record.module.clone())
+            .or_else(|| self.manifest.module_info())
+    }
+
+    /// 运行期授予：记录优先，旧记录按清单回填。
+    pub fn grants(&self) -> Vec<String> {
+        self.record
+            .as_ref()
+            .and_then(|record| record.grants.clone())
+            .unwrap_or_else(|| self.manifest.grants())
     }
 }
 
@@ -274,6 +293,21 @@ impl Registry {
     }
 
     fn push(&mut self, plugin: Plugin) {
+        if plugin.capabilities().module {
+            if let Some(module) = plugin.module_info() {
+                let bundle = plugin.root.join(&module.bundle);
+                if !bundle.is_file() {
+                    self.issues.push(Issue {
+                        path: bundle.clone(),
+                        id: Some(plugin.id.clone()),
+                        message: format!(
+                            "module bundle {} is missing; the module is not loaded",
+                            bundle.display()
+                        ),
+                    });
+                }
+            }
+        }
         if !plugin.manifest.supports_this_platform() {
             self.issues.push(Issue {
                 path: plugin.root.clone(),
@@ -413,8 +447,13 @@ impl Registry {
             .plugins
             .iter()
             .filter(|plugin| plugin.enabled)
+            .filter(|plugin| plugin.capabilities().module)
             .filter_map(|plugin| {
-                let module = plugin.manifest.module_info()?;
+                let module = plugin.module_info()?;
+                let bundle = plugin.root.join(&module.bundle);
+                if !bundle.is_file() {
+                    return None;
+                }
                 Some(ModuleEntry {
                     id: plugin.id.clone(),
                     root: plugin.root.clone(),
@@ -422,7 +461,7 @@ impl Registry {
                     generation: plugin.generation,
                     enabled: plugin.enabled,
                     module,
-                    grants: plugin.manifest.grants(),
+                    grants: plugin.grants(),
                 })
             })
             .collect();
@@ -475,7 +514,7 @@ impl Registry {
                     .or_else(|| plugin.map(Plugin::capabilities))
                     .unwrap_or_default();
                 let module = plugin
-                    .and_then(|plugin| plugin.manifest.module_info())
+                    .and_then(Plugin::module_info)
                     .or_else(|| record.module.clone());
                 let app_field = |key: &str| {
                     record
@@ -554,6 +593,11 @@ fn disabled_set(config: &Config) -> std::collections::BTreeMap<String, ()> {
     keys.into_iter().map(|id| (id, ())).collect()
 }
 
+/// 开发目录里的包是否启用；`disabled.json` 是它们的启用状态。
+pub fn dev_enabled(config: &Config, id: &str) -> bool {
+    !disabled_set(config).contains_key(id)
+}
+
 /// 停用一个开发插件：写入 `disabled.json`；安装来源同时更新记录。
 pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), String> {
     let store = Store::open(config.plugins_state_dir());
@@ -630,6 +674,7 @@ pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Reco
         min_runtime: None,
         capabilities: Some(manifest.capabilities()),
         module: manifest.module_info(),
+        grants: Some(manifest.grants()),
     };
     if let Err(error) = store.save_record(&record) {
         let _ = std::fs::remove_dir_all(&target);
@@ -669,6 +714,7 @@ pub fn link(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record,
         min_runtime: None,
         capabilities: Some(manifest.capabilities()),
         module: manifest.module_info(),
+        grants: Some(manifest.grants()),
     };
     store
         .save_record(&record)

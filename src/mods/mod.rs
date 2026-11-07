@@ -222,16 +222,6 @@ pub struct ModRuntime {
 }
 
 impl ModRuntime {
-    /// 从包清单的 `[grants]` 读出 `host` 与 `events` 名单。
-    ///
-    /// 与安装期共用同一个解析器（[`crate::pkg::load_file`]）；清单不合法时
-    /// 返回空名单，错误由安装与校验路径直接报出。
-    pub fn manifest_grants(path: &std::path::Path) -> Vec<String> {
-        crate::pkg::load_file(path)
-            .map(|loaded| loaded.manifest.grants())
-            .unwrap_or_default()
-    }
-
     /// 模块是否被显式禁用。
     pub fn is_enabled(&self, mod_id: &str) -> bool {
         self.enabled.get(mod_id).copied().unwrap_or(true)
@@ -499,19 +489,48 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
-        let path = std::env::temp_dir().join(format!("hctui-grants-{unique}.toml"));
+        let root = std::env::temp_dir().join(format!("hctui-grants-{unique}"));
+        let config = crate::config::Config {
+            config_path: root.join("config").join("config.toml"),
+            state_path: root.join("state").join("state.json"),
+            ..crate::config::Config::default()
+        };
+        let store = crate::store::Store::open(config.plugins_state_dir());
+        let (generation, dir) = store.prepare_generation("probe").unwrap();
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
         std::fs::write(
-            &path,
-            "[mod]\nid = \"probe\"\n\n[grants]\nhost = [\"state\", \"run\"]\nevents = [\"state.changed\"]\n",
+            dir.join("hctui.toml"),
+            "[mod]\nid = \"probe\"\nhost_api = 1\n\n[grants]\nhost = [\"state\", \"run\"]\nevents = [\"state.changed\"]\n",
         )
         .unwrap();
+        std::fs::write(dir.join("dist").join("bundle.js"), "// bundle").unwrap();
+        let record = crate::store::Record {
+            id: "probe".into(),
+            source: crate::store::Source::Local,
+            generation,
+            installed_at: 0,
+            enabled: true,
+            manifest_hash: None,
+            origin: None,
+            sha256: None,
+            key_id: None,
+            app: None,
+            min_runtime: None,
+            capabilities: None,
+            module: None,
+            grants: None,
+        };
+        store.save_record(&record).unwrap();
+        // 旧记录缺 `grants` 时，按同一代际目录的清单回填。
+        let package = crate::pkg::resolve(&config, "probe").unwrap().unwrap();
         assert_eq!(
-            ModRuntime::manifest_grants(&path),
+            package.grants,
             vec![
                 "state".to_string(),
                 "run".to_string(),
                 "state.changed".to_string()
             ]
         );
+        std::fs::remove_dir_all(root).ok();
     }
 }

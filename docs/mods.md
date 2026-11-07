@@ -2,8 +2,8 @@
 
 [返回 README](../README.md) · [配置](configuration.md) · [命令](commands.md) · [插件](plugins.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
-版本：v0.4（2026-11-06）
-状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地；安装、代际、签名包与 `mods` CLI（§10、§12、§13）随 M5 落地，示例见 `examples/mods/`。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
+版本：v0.4（2026-11-08）
+状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地；安装、代际、签名包与 `mods` CLI（§10、§12、§13）随 M5 落地；M11b 把模块纳入统一包：模块从包记录加载，动作、终端入口与模块表面共用同一个启用闸门与同一份授予。示例见 `examples/mods/` 与 `examples/packages/git-board/`。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
 取代：本文 v0.3。
 运行时基线：nsh 提交 `951556dc1af6f5acf593cfd28640a0fd467b71e3`（`crates/nsh-platform-tui`、`crates/nsh-tui-host`）；发行版 0.4.0 尚无 TUI 后端。宿主侧 ratatui 0.30.2、crossterm 0.29。
 
@@ -12,6 +12,8 @@
 ## 1. 定位
 
 界面模块（下称 mod）是 TSX 应用，由 hc-tui 在自己的帧里嵌入运行。hc-tui 负责外框组合、表面矩形、输入仲裁、数据与动作；nsh 负责表面内部的布局、组件、动画、键鼠、文本输入、沙箱与权限。
+
+模块是包（package）的一类能力：同一个 `hctui.toml` 可以用 `[[actions]]`、`[[terminals]]` 与 `[module]` 同时声明动作、终端入口与界面模块，一个包也可以只贡献其中一部分。安装、启用、授权与卸载都按包进行，模块没有独立的安装单位。
 
 默认界面由 8 个内置模块组成：`sidebar`、`tabs`、`status`、`picker`、`dialogs`、`settings`、`help`、`toast`，共享 `ui-base` 组件库。它们随二进制分发，默认外框绑定它们；Rust 实现保留为 `--no-mods` 与单个模块禁用时的回退。用户模块通过显式绑定替换区域、占用 Pane 或以覆盖层出现，不能在加载时自行占据全屏或改写默认界面。
 
@@ -105,6 +107,15 @@ ui/                             仓库内的默认模块源码
 ```
 
 ### `hctui.toml`
+
+以下旧形态仍可加载，属于兼容形态：只有 `[mod]` / `[overlay]` / `[grants]`、没有 `manifest_version` 的 `hctui.toml`。新包使用 `manifest_version = 2` 的 `[module]` 段，语义与 `[mod]` 一致（`title`、`place`、`size`、`focusable`，`bundle` 默认 `dist/bundle.js`）。旧安装记录缺 `capabilities` / `module` / `grants` 时，在代际目录里读一次清单回填，不要求重装。
+
+### 包：安装、权威、启用、授权
+
+- 安装：`hc-tui packages install <目录> [--yes] [--enable]` 复制到新代际并写记录；`packages link <目录>` 原地读取开发目录。两种来源对运行期没有分支。
+- 权威：`records/<id>.json` 是唯一真相。模块是否加载由 `Record.module` 与 `Record.capabilities.module` 决定，`[module].bundle` 相对记录指向的代际目录解析；`crate::pkg::resolve` 是「模块装在哪」的唯一判断。记录损坏、代际缺失或 bundle 不存在的包只给一条 issue，其它包照常加载。
+- 启用：`packages enable|disable <id>` 只改写记录。250 毫秒的注册表指纹轮询接上同一次重载：动作从命令目录消失、终端入口返回 `disabled`、模块表面从外框撤下（不留空区域）；启用后按 `[module].place` 原地停靠，不需要重启。正在跑的终端不 kill，已排队的动作不腰斩。`--no-mods` 只跳过模块表面，动作与终端入口照常。
+- 授权：来源唯一，清单 `[grants]` → 记录 `Record.grants` → 安装期一次确认。运行期只读记录，不再按 `hctui.toml` 现读；`mods grant --revoke` 之后该表面收到 `grant.changed`，后续调用返回 `denied` 且无副作用。
 
 ```toml
 [mod]
@@ -326,7 +337,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | nsh 能力 | `nsh.json` 的 `capabilities` | nsh 引擎 | 网络主机与端口、文件读写路径、可执行程序、环境变量、剪贴板、通知、打开 URL、选择器 |
 | 宿主授予 | `hctui.toml` 的 `[grants]` | hc-tui | 上表全部方法与 12 个事件名 |
 
-- 加载时计算 `needed = 声明的 nsh 能力 ∪ 宿主授予`；与上次批准不一致时弹出确认，逐项可拒绝；结果存 `state.json` 的 `mods_grants`。
+- 加载时计算 `needed = 声明的 nsh 能力 ∪ 宿主授予`；与上次批准不一致时弹出确认，逐项可拒绝；结果存 `state.json` 的 `mods_grants`。授予的权威是安装记录的 `Record.grants`，清单只在安装与旧记录回填时读。
 - 引擎的 `Policy { declared, granted }` 用批准后的集合收窄；宿主方法在 hc-tui 侧再次校验，未授予返回 `forbidden`。
 - `requestGrants` 可在运行期申请新增授予，同样走确认流程。
 - nsh 能力与宿主授予描述依赖与路由范围，不构成对恶意代码的 OS 隔离：`process.execute` 能绕过文件写入路径的限制，网络与执行权限按用户身份生效。信任边界是安装来源、安装前预览与签名包的信任根。
@@ -391,7 +402,7 @@ stateDiagram-v2
 - 激活后旧代际的迟到回复按 `generation` 丢弃；旧代码的定时器与挂起任务随实例停止。
 - 崩溃：`on_error` 与 `on_app_error` 记录并保留上一帧；连续三次失败进入 `failed`，`mods.reload` 恢复。
 - 内置模块随 hc-tui 版本更新：升级后使用新版本目录，旧版本在引用释放后回收；用户克隆的副本不随升级覆盖。
-- 默认界面的回退：`--no-mods` 关闭全部模块并使用内置外框；单个 mod `disable` 后其区域回到内置内容，或被显式设为 `none`；回退路径不依赖 nsh 运行时。
+- 默认界面的回退：`--no-mods` 关闭全部模块表面并使用内置外框，动作与终端入口不受影响；单个包 `disable` 后其模块区域从外框撤下，外框回落到内置内容，不留空框；全部包停用时动作目录为空而不是报错。回退路径不依赖 nsh 运行时。
 - 关闭：表面关闭时调用 `AppView::stop`，期限 250 ms；退出时所有表面共用该预算。
 
 ## 12. 持久化
@@ -495,7 +506,7 @@ M6 起插件动作带 `<package-id>.<action-id>` 完整名进入同一分发器�
 
 ## 17. 验收
 
-- `examples/mods/` 提供三个示例：`agents`（区域替换，列表与跳转）、`spaces`（外框左侧，状态点与折叠）、`prs`（覆盖层，`exec` 拉取远端数据）。
+- `examples/mods/` 提供三个模块示例：`agents`（区域替换，列表与跳转）、`spaces`（外框左侧，状态点与折叠）、`prs`（覆盖层，`exec` 拉取远端数据）。`examples/packages/git-board/` 用一份清单同时提供动作、终端入口与右侧模块，`scripts/packages-smoke.sh` 验证安装、停用、启用与卸载。
 - `hc-tui mods check examples/mods/*` 与 `nsh test` 全部通过。
 - 数据一致性：示例列表与内置侧栏逐项相等；`setAgentOrder` 改变 `agent.next` 顺序；`revision` 跳号后重新取快照。
 - 交互：点击、右键、滚轮、输入与粘贴、菜单与浮层、覆盖层拖动与 `key` 记忆、焦点在 Pane 与表面之间往返、前缀与双前缀、`Ctrl+B` 在文本输入中的行为。

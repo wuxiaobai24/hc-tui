@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use toml::Spanned;
 
+use crate::config::Config;
 use crate::plugin::manifest::{self, fail, Manifest, ManifestError, HOST_API};
+use crate::store::{Record, Source, Store};
 
 /// 包根目录里唯一清单的文件名。
 pub const MANIFEST_FILE: &str = "hctui.toml";
@@ -241,6 +243,183 @@ impl Loaded {
     pub fn capabilities(&self) -> Capabilities {
         self.manifest.capabilities()
     }
+}
+
+/// 一个包按记录解析出的运行期形态。
+///
+/// `Record.module` 与 `Record.capabilities.module` 决定是否加载、bundle 相对
+/// 哪一代际目录解析；`Record.grants` 是运行期授予的唯一来源。旧记录缺字段时
+/// 只在同一代际目录里读一次清单回填，不要求重新安装。
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    /// 包 ID。
+    pub id: String,
+    /// 显示名。
+    pub name: String,
+    /// 代码根目录（记录指向的代际，或开发目录本身）。
+    pub root: PathBuf,
+    /// 来源。
+    pub source: Source,
+    /// 代际。
+    pub generation: u64,
+    /// 是否启用。
+    pub enabled: bool,
+    /// 记录里的能力；旧记录按清单回填。
+    pub capabilities: Capabilities,
+    /// 声明了模块时的模块摘要；旧记录按清单回填。
+    pub module: Option<ModuleInfo>,
+    /// 记录里的 `[grants]`；旧记录按清单回填。
+    pub grants: Vec<String>,
+}
+
+impl Resolved {
+    /// 模块 bundle 的绝对路径；没有模块时为 `None`。
+    pub fn bundle_path(&self) -> Option<PathBuf> {
+        self.module
+            .as_ref()
+            .map(|module| self.root.join(&module.bundle))
+    }
+}
+
+/// 按包记录解析一个包；两个 store 的记录优先，其次是两个开发目录。
+pub fn resolve(config: &Config, id: &str) -> Result<Option<Resolved>, String> {
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        let store = Store::open(state);
+        let Some(record) = store.record(id) else {
+            continue;
+        };
+        let root = record_root(&store, &record)?;
+        let loaded = load_dir(&root).ok();
+        return Ok(Some(from_record(&root, record, loaded.as_ref())));
+    }
+    for dir in [config.plugins_dir(), config.mods_dir()] {
+        let root = dir.join(id);
+        if !root.is_dir() {
+            continue;
+        }
+        let loaded = match load_dir(&root) {
+            Ok(loaded) if loaded.manifest.id() == id => Some(loaded),
+            Ok(_) => continue,
+            // 只有 bundle、没有清单的开发目录按模块处理：与 `store::module_root`
+            // 的旧行为一致，授予为空，等价于清单没有 `[grants]`。
+            Err(_) if root.join(DEFAULT_BUNDLE).is_file() => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let resolved = match loaded {
+            Some(loaded) => Resolved {
+                id: id.to_string(),
+                name: loaded.manifest.name().to_string(),
+                capabilities: loaded.manifest.capabilities(),
+                module: loaded.manifest.module_info(),
+                grants: loaded.manifest.grants(),
+                root,
+                source: Source::Linked,
+                generation: 1,
+                enabled: true,
+            },
+            None => Resolved {
+                id: id.to_string(),
+                name: id.to_string(),
+                capabilities: Capabilities {
+                    module: true,
+                    ..Capabilities::default()
+                },
+                module: Some(ModuleInfo {
+                    title: id.to_string(),
+                    bundle: DEFAULT_BUNDLE.to_string(),
+                    place: "right".to_string(),
+                    size: None,
+                    focusable: true,
+                }),
+                grants: Vec::new(),
+                root,
+                source: Source::Linked,
+                generation: 1,
+                enabled: true,
+            },
+        };
+        return Ok(Some(Resolved {
+            enabled: resolved.enabled && crate::plugin::registry::dev_enabled(config, id),
+            ..resolved
+        }));
+    }
+    Ok(None)
+}
+
+/// 记录指向的代码根：链接来源用来源目录，其余用记录里的代际目录。
+fn record_root(store: &Store, record: &Record) -> Result<PathBuf, String> {
+    let root = match record.source {
+        Source::Linked => record.origin.as_deref().map(PathBuf::from),
+        Source::Local | Source::Packaged => {
+            Some(store.generation_dir(&record.id, record.generation))
+        }
+    }
+    .ok_or_else(|| format!("{}: linked record has no origin", record.id))?;
+    if !root.is_dir() {
+        return Err(format!("{}: {} is missing", record.id, root.display()));
+    }
+    Ok(root)
+}
+
+/// 记录缺字段时，从同一代际目录的清单回填能力、模块与授予。
+fn from_record(root: &Path, record: Record, loaded: Option<&Loaded>) -> Resolved {
+    let capabilities = record
+        .capabilities
+        .or_else(|| loaded.map(Loaded::capabilities))
+        .unwrap_or_default();
+    let module = record
+        .module
+        .clone()
+        .or_else(|| loaded.and_then(|loaded| loaded.manifest.module_info()));
+    let grants = record
+        .grants
+        .clone()
+        .or_else(|| loaded.map(|loaded| loaded.manifest.grants()))
+        .unwrap_or_default();
+    let name = loaded
+        .map(|loaded| loaded.manifest.name().to_string())
+        .or_else(|| {
+            record
+                .app
+                .as_ref()
+                .and_then(|app| app.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| record.id.clone());
+    Resolved {
+        id: record.id.clone(),
+        name,
+        root: root.to_path_buf(),
+        source: record.source,
+        generation: record.generation,
+        enabled: record.enabled,
+        capabilities,
+        module,
+        grants,
+    }
+}
+
+/// 单一启用闸门：已安装包改记录，开发目录写 `disabled.json`。
+pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), String> {
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        let store = Store::open(state);
+        if let Some(mut record) = store.record(id) {
+            record.enabled = enabled;
+            return store
+                .save_record(&record)
+                .map_err(|error| error.to_string());
+        }
+    }
+    crate::plugin::registry::set_enabled(config, id, enabled)
+}
+
+/// 包代码根：先按记录解析，其次开发目录；这是“模块装在哪”的唯一判断。
+pub fn module_root(config: &Config, id: &str) -> Option<PathBuf> {
+    resolve(config, id)
+        .ok()
+        .flatten()
+        .map(|resolved| resolved.root)
 }
 
 /// 旧 `hctui.toml` 的整份文件。

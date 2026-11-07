@@ -398,6 +398,7 @@ mod tests {
             min_runtime: None,
             capabilities: None,
             module: None,
+            grants: None,
         }
     }
 

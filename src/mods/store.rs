@@ -171,7 +171,7 @@ pub fn verify_package(
         .verify(&bytes, nsh_package::RUNTIME_VERSION)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let id = package.app.id.clone();
-    let grants = package_host_grants(&package);
+    let grants = package_grants(&package);
     let files = 1 + usize::from(package.source_map.is_some()) + package.assets.len();
     let preview = Preview {
         id,
@@ -225,8 +225,15 @@ fn package_host_grants(package: &VerifiedPackage) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 签名包生成的清单授予：声明的宿主方法加上全部已知事件。
+fn package_grants(package: &VerifiedPackage) -> Vec<String> {
+    let mut grants = package_host_grants(package);
+    grants.extend(EVENTS.iter().map(|name| (*name).to_string()));
+    grants
+}
+
 fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
-    let grants = package_host_grants(package);
+    let grants = package_grants(package);
     let preview = Preview {
         id: package.app.id.clone(),
         name: package.app.name.clone(),
@@ -261,6 +268,7 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
         min_runtime: None,
         capabilities: Some(preview.capabilities),
         module: preview.module.clone(),
+        grants: Some(preview.grants.clone()),
     };
     (record, preview)
 }
@@ -291,6 +299,7 @@ pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
         min_runtime: None,
         capabilities: Some(preview.capabilities),
         module: preview.module.clone(),
+        grants: Some(preview.grants.clone()),
     };
     store
         .save_record(&record)
@@ -431,6 +440,7 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
     let id = loaded.manifest.id().to_string();
     let capabilities = loaded.manifest.capabilities();
     let module = loaded.manifest.module_info();
+    let grants = loaded.manifest.grants();
     let store = Store::open(config.mods_state_dir());
     let target = std::path::absolute(dir).map_err(|error| error.to_string())?;
     let record = Record {
@@ -447,6 +457,7 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
         min_runtime: None,
         capabilities: Some(capabilities),
         module,
+        grants: Some(grants),
     };
     store
         .save_record(&record)
@@ -476,14 +487,9 @@ pub fn uninstall(config: &Config, id: &str) -> Result<(), String> {
     store.remove(id).map_err(|error| error.to_string())
 }
 
-/// 已安装模块的根目录：优先 store 当前代际，其次配置目录。
+/// 模块的根目录：按包记录解析（两个 store 与两个开发目录由 [`crate::pkg::resolve`] 统一判断）。
 pub fn module_root(config: &Config, id: &str) -> Option<PathBuf> {
-    let store = Store::open(config.mods_state_dir());
-    if let Some(dir) = store.current_dir(id) {
-        return Some(dir);
-    }
-    let path = config.mods_dir().join(id);
-    path.is_dir().then_some(path)
+    crate::pkg::module_root(config, id)
 }
 
 /// 记录里的启用状态；损坏记录按启用处理。
@@ -508,9 +514,11 @@ pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), Strin
 
 /// 启动时把记录里的启用状态载入运行时。
 pub fn apply_enabled(config: &Config, runtime: &mut crate::mods::ModRuntime) {
-    for record in Store::open(config.mods_state_dir()).list() {
-        if !record.enabled {
-            runtime.enabled.insert(record.id, false);
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        for record in Store::open(state).list() {
+            if !record.enabled {
+                runtime.enabled.insert(record.id, false);
+            }
         }
     }
 }

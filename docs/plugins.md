@@ -2,8 +2,8 @@
 
 [返回 README](../README.md) · [界面模块](mods.md) · [命令](commands.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
-版本：v0.4（2026-11-07）
-状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）、M8（事件流）、M10（发布事务、启用闸门、参数校验纵深）与 M11a（统一包清单与模型、`packages` CLI）已实现。清单错误格式为 `文件:行:列: 原因`。
+版本：v0.4（2026-11-08）
+状态：实施中。M6（清单与动作、CLI、代际注册）、M7（终端入口、多机、`plugins pane`、代际引用）、M8（事件流）、M10（发布事务、启用闸门、参数校验纵深）、M11a（统一包清单与模型、`packages` CLI）与 M11b（运行期按包记录加载、单一启用闸门、记录里的授权、三合一示例）已实现。清单错误格式为 `文件:行:列: 原因`。
 定位：可分发的工作流包。一个包可以同时提供一次性动作、真实终端入口与 [界面模块](mods.md)。
 
 ---
@@ -98,7 +98,28 @@ events = ["state.changed", "terminal.status"]
 
 - 同目录同时有 `hctui.toml`(v2) 与 `plugin.toml` 时用 `hctui.toml`，并给一条提示说明忽略了 `plugin.toml`。
 - 旧 `hctui.toml` 的 `[mod]`、`[overlay]`、`[grants]` 由同一个解析器读出，不再有逐行手写解析。
-- 旧安装记录（M5 形态 JSON）仍可读；`capabilities` 与 `module` 缺失时按清单回填，不报 issue。
+- 旧安装记录（M5 形态 JSON）仍可读；`capabilities`、`module` 与 `grants` 缺失时按清单回填，不报 issue。
+
+### 2.2 包的运行期形态
+
+运行期只有一套包视图：`Record` 是权威，清单只在安装与回填时读。
+
+- 模块加载由 `Record.module` 与 `Record.capabilities.module` 决定；`[module].bundle` 相对记录指向的代际目录解析（`linked` 来源按 `origin`）。`src/pkg::resolve` 是「模块装在哪」的唯一判断，`src/mods/store.rs::module_root` 转发到它。
+- 旧记录没有 `module` / `capabilities` / `grants` 时，在同一代际目录读一次清单回填，不要求用户重装。
+- 单个包的记录缺代际目录、清单无效或 bundle 缺失时只给一条 issue，其它包照常加载。
+- 运行期授予只读记录里的 `[grants]`；`src/mods/mod.rs` 不再按 `hctui.toml` 现读。
+
+### 2.3 一次安装三样都有
+
+`examples/packages/git-board` 是完整示例：`[[actions]]` 的 `bin/summary.sh` 读当前 Space 的 Git 分支与改动，`[[terminals]]` 的 `lazygit` 在 Space 的机器上开真实终端，`[module]` 的 `dist/bundle.js` 停靠外框右侧显示最近提交。安装、停用、启用、授权、卸载各一条命令，全部生效不需要重启：
+
+```sh
+hc-tui packages install examples/packages/git-board --yes --enable
+hc-tui packages disable dev.hctui.pkg.git-board
+hc-tui packages enable dev.hctui.pkg.git-board
+hc-tui mods grant dev.hctui.pkg.git-board --host state --host exec
+hc-tui packages uninstall dev.hctui.pkg.git-board
+```
 
 ## 3. 身份
 
@@ -245,7 +266,7 @@ hc-tui packages log <id> [-n 100]
 | `packages unlink <id>` | 移除开发注册，不删除目录 |
 | `packages uninstall <id>` | 只删除记录与 `current` 指针；有 pin 的代际保留（pin 在 `<state>/plugins/pins/`） |
 | `packages gc` | 显式回收：删除没有记录指向、也没有任何 pin 的代际 |
-| `packages enable` / `packages disable <id>` | 只改变是否出现在命令目录与菜单 |
+| `packages enable` / `packages disable <id>` | 只改变记录里的启用状态；动作、终端入口与模块表面同时生效 |
 
 `packages list` 一行一个包，在启用状态后打出能力徽章：`A` 动作、`T` 终端入口、`M` 界面模块。`packages list --json` 每项包含 `id`、`name`、`version`、`source`、`generation`、`enabled`、`capabilities`、`module`（未声明时为 `null`）与 `issues`；记录里没有 `capabilities` 的旧版本会先按清单回填再输出。
 
@@ -284,10 +305,12 @@ hc-tui packages log <id> [-n 100]
 
 ### 9.2 启用语义
 
-- `plugins enable|disable <id>` 只改变是否出现在命令目录与菜单，不移动代际、不删除代码。
+- `packages enable|disable <id>` 只改写记录（开发目录写 `disabled.json`），不移动代际、不删除代码；三类入口由同一个闸门决定。
 - 运行中的 TUI 无需重启：每 250 毫秒比较注册表磁盘指纹（记录、`disabled.json`、开发清单的内容哈希），处理控制请求前还会无节流对齐一次；变化时重新加载注册表并发布 `registry.changed` 事件。命令目录、命令面板、Pane 右键菜单、Space 菜单与 `[[keys.command]] type = "action"` 绑定因此立即同步。
-- `plugins action list` 不再列出停用包的动作；`plugins action invoke` 返回 `{"error": ..., "error_kind": "disabled"}`；`plugins pane open` 返回 `error_kind = "disabled"`。
+- 停用包的动作从目录消失；`plugins action list` 不再列出，`plugins action invoke` 返回 `{"error": ..., "error_kind": "disabled"}`；`plugins pane open` 返回 `error_kind = "disabled"`。
+- 停用包的模块表面从外框撤下（不留空区域），已打开的表面关闭；启用后按记录的 `[module].place` / `size` 原地停靠，帧循环内完成，不需要重启。用户主动 `mods.undock` 过的模块不会被自动停靠回来。
 - 已排队或已运行的调用继续跑到结束，不因停用而腰斩；已打开的终端不 kill，只拒绝新的入口请求。
+- `--no-mods` 只跳过模块表面：动作与终端入口照常可用，`packages list` 仍列出能力徽章；全部包停用时外框回落到内置界面，动作目录为空而不是报错。
 
 ### 9.3 参数校验
 
@@ -300,6 +323,8 @@ hc-tui packages log <id> [-n 100]
 ## 10. 信任与权限
 
 - 插件是以用户身份运行的受信本地代码，没有 OS 沙箱；`capabilities` 不作为隔离承诺。
+- 授予的唯一来源是清单 `[grants]` → 安装记录的 `Record.grants` → 安装期一次确认。`[grants]` 的 host 与 events 在清单期对宿主白名单逐项校验（越界直接报 `文件:行:列`），运行期只读记录，不再按 `hctui.toml` 现读。
+- 一次安装只确认一次；更新写新代际时同时写入新记录的授予。`mods grant --revoke` 之后该表面收到 `grant.changed`，后续调用被撤销的方法返回 `forbidden`/`denied` 且无副作用。
 - 信任边界是安装来源、安装前预览与显式启用。共享文档、界面模块或远端布局中的插件引用不自动获得执行权。
 - 键位由用户绑定到命令名；插件不能静默改写全局键位，也不能覆盖内置动作。
 - 日志、配置与状态目录由宿主创建，权限 0700；插件目录只读挂载不强制，路径由清单解析。
@@ -342,6 +367,9 @@ hc-tui packages log <id> [-n 100]
 - 更新：新代际切换后旧调用与旧终端继续运行；失败安装不影响旧代际；卸载不删除用户终端。
 - 事件：两个客户端各收到一次，断开即停；队列溢出发出 `events.dropped`。
 - 命令目录：插件动作带参数 schema 与来源；禁用后从目录与菜单消失（无需重启），动作调用返回 `disabled`；内置动作不可覆盖。
+- 三合一示例：`packages install examples/packages/git-board --yes --enable` 后动作、终端入口与模块同时可用；`packages disable` 后三者同时消失；`packages enable` 恢复；`scripts/packages-smoke.sh` 覆盖安装、三类入口、停用、启用、卸载并以 0 退出。
+- 运行期权威：模块 bundle 按 `Record.module` 的代际目录解析；旧记录（只有 `[mod]` 或缺失 `grants`）按清单回填后照常渲染；记录坏了只影响该包并给 issue。
+- `--no-mods`：动作与终端入口照常，模块表面不出现，`packages list` 仍带能力徽章。
 - 旧配置：`[[panels]]`、`[[keys.command]]`、`mod.open` 行为不变。
 
 ## 15. 实施清单
@@ -360,6 +388,8 @@ hc-tui packages log <id> [-n 100]
 | `src/app/plugin.rs` | 菜单与命令目录接入、上下文构造、结果展示、终端入口与标签 |
 | `examples/plugins/git-tools/` | 动作读取远端 Git 摘要；终端入口在远端开 lazygit |
 | `examples/plugins/review/` | 包内相对程序的长运行终端（cwd、park、detach） |
+| `examples/packages/git-board/` | 一个包同时声明动作、终端入口与右侧模块的三合一示例 |
+| `scripts/packages-smoke.sh` | 安装 → 三类入口可用 → 停用后消失 → 启用恢复 → 卸载清干净 |
 | `docs/plugins.md` | 本文 |
 
 修改：

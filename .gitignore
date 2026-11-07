@@ -2,6 +2,9 @@
 /dist
 **/target
 **/dist
+!examples/packages/git-board/dist/
+!examples/packages/git-board/dist/bundle.js
+!examples/packages/git-board/dist/capabilities.json
 **/.nsh/
 /dist
 **/zig-out

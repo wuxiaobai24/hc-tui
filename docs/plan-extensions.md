@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
 版本：v0.5（2026-11-07）
-状态：实施中。M1–M8、M10 与 M11a 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+状态：实施中。M1–M8、M10、M11a 与 M11b 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10、M11a、M11b 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -75,6 +75,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M10 插件契约硬化 | ✅ 已交付（本次提交） | `src/store.rs`：`save_record` 同目录临时文件 + `fsync` + `rename` + 父目录 `fsync`，`current` 用临时指针 rename 原子切换，包级 `store/<id>/.lock`（`O_CREAT|O_EXCL`、30 秒超时、持有者 PID 存活判断、粒度一个包），代际分配在锁内（`.tmp-<gen>` 复制后 rename），`Store::open` 幂等恢复（清临时残渣、按记录重建缺失的 `current`、有指针无记录报 issue 并拒绝加载）且旧格式记录仍可读；`src/plugin/registry.rs`：`EnablePolicy::{Keep,Enable,Disable}`，`install`/`link` 默认不启用，更新保留已有状态，注册表磁盘指纹驱动运行中重载并发布 `registry.changed`，停用包的动作调用与 `plugins pane open` 返回 `disabled`；`src/plugin/manifest.rs`：递归参数校验（嵌套 object、array `items`、完整路径错误）、清单期校验 `default`、`integer`/`number` 区分、深度 8/单层 64/`items` 形状上限；新增 12 个用例，`plugins-smoke`、`plugin-terminals-smoke`、`events-smoke` 安装命令显式 `--enable` |
 | M10.1 验证补强 | ✅ 已交付 | 两个真进程安装用例（跨进程串行、SIGKILL 残留锁接管）、两个真实写失败注入用例（记录写失败保留旧代际、指针失败按记录修复）、`Store::open` 把「指针停在旧代际」也算需要重建、mods 安装改为记录先行、四个 smoke 全跑通；细节见 [M10.1](#m101-验证补强) |
 | M11a 统一包清单与模型 | ✅ 已交付（本次提交） | `src/pkg/`：`hctui.toml`(v2)、`plugin.toml`(v1) 与旧 `[mod]` 形态读成同一个 `Package`，`[module]` 与 `[grants]` 由 `src/plugin/manifest.rs` 的统一 TOML 严格解析负责（未知键、重复 id、越界授予、bundle 路径），能力 `capabilities { actions, terminals, module }` 由清单推导；`src/mods/store.rs::manifest_id` 与 `src/mods/mod.rs::manifest_grants` 的手写逐行解析删除，改走同一解析器；`Record` 增加 `capabilities` 与 `module`，旧记录按清单回填、不报 issue；`src/plugin/registry.rs` 合并两个 store 与两个开发目录（已安装代际按 id 优先），新增 `get`/`modules`/`entries`/`revision`，`PackageRegistry` 保留为旧名别名；`hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log`，`plugins` 与 `mods` 的安装类子命令成为别名并在 stderr 打一行弃用提示；四个 smoke 脚本的 `cleanup()` 在全部通过时清理 `$ROOT`；新增 9 个用例 |
+| M11b 统一包运行时接线 | ✅ 已交付（本次提交） | `src/pkg/mod.rs` 的 `Resolved`/`resolve`/`set_enabled`/`module_root`：模块加载按 `Record.module` 与 `Record.capabilities.module` 决定，bundle 相对代际目录解析，旧记录按清单回填，坏包只给 issue；`Record.grants` 成为运行期授予唯一来源，`src/mods/mod.rs::manifest_grants` 删除；`src/app/mods.rs::sync_package_modules` 把模块 surface 的撤下/恢复接到同一 250 ms 重载路径，`--no-mods` 只跳过模块；`examples/packages/git-board/` 三合一示例与 `scripts/packages-smoke.sh`；新增 7 个用例 |
 
 验证基线（M2 起，docs/release.md 同步记录）：musl amd64 冷构建约 106 s / 5.78 MiB，arm64 约 182 s / 5.22 MiB；nsh 未接线阶段发行体积增量 +136 KiB。
 
@@ -294,6 +295,24 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 - `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 全绿（312 个库内用例 + 2 个跨进程用例）。
 - 四个 smoke 全跑通：`plugins-smoke`、`plugin-terminals-smoke`、`events-smoke`、`degraded-smoke` 退出码 0。
 - 失败注入的覆盖面与只靠实现保证的分支列在 [插件文档 §9.1](plugins.md#91-发布事务与恢复)。
+
+### M11b 统一包运行时接线
+
+目标：让运行期真的按包工作——模块从 package record 加载，动作、终端入口、模块表面共用单一启用闸门与一份授予，交付一个包同时提供三类能力的示例。
+
+工作项：
+
+- `src/pkg/mod.rs`：`Resolved` 与 `resolve` 按两个 store、两个开发目录解析；`Record.module` + `capabilities.module` 决定加载，bundle 相对代际目录；旧记录按清单回填；`set_enabled` 与 `module_root` 成为唯一入口。
+- `src/store.rs`：`Record` 增加 `grants`；安装、链接、签名包三条路径都写入。
+- `src/app/mods.rs`、`src/app/plugin.rs`：模块 bundle 与授予改读记录；`sync_package_modules` 把模块区域接到 250 ms 重载；`prune_mod_generations` 只碰模块商店，插件代际仍由 `plugin::lease` 按 pin 回收。
+- `examples/packages/git-board/`：`hctui.toml` 同时声明动作、终端与 `[module]`，`bin/summary.sh` 读 Space 的 Git 分支，`dist/bundle.js` 显示最近提交。
+- `scripts/packages-smoke.sh`、`src/app/package_tests.rs` 与两份规格、`CHANGELOG`。
+
+交付记录：
+
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 全绿（328 个库内用例，含 7 个新用例；集成用例全部通过）。
+- `scripts/packages-smoke.sh` 退出码 0：安装后动作、终端入口与模块同时可用，`packages disable` 后三者同时消失，`enable` 恢复，卸载后记录、代际与模块区域清干净。
+- 证据与输出见仓库根下的票据交付记录。
 
 ### M9 默认模块迁移
 

@@ -653,16 +653,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
         "enable" | "disable" => {
             let id = package_target(&targets, group)?;
             let enabled = group == "enable";
-            if hc_tui::store::Store::open(config.mods_state_dir())
-                .record(id)
-                .is_some()
-            {
-                hc_tui::mods::store::set_enabled(&config, id, enabled)
-                    .map_err(anyhow::Error::msg)?;
-            } else {
-                hc_tui::plugin::registry::set_enabled(&config, id, enabled)
-                    .map_err(anyhow::Error::msg)?;
-            }
+            hc_tui::pkg::set_enabled(&config, id, enabled).map_err(anyhow::Error::msg)?;
             println!(
                 "{}",
                 t2("{} {}", if enabled { "enabled" } else { "disabled" }, id)
