@@ -139,6 +139,8 @@ pub struct Launch {
     pub cwd: Option<String>,
     /// 在另一台机器上运行（`terminal.run` 的 `on`）。
     pub on: Option<String>,
+    /// 叠加在 core 环境之上的变量（`terminal.run` 的 `env`）。
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl Launch {
@@ -147,6 +149,7 @@ impl Launch {
             argv,
             cwd,
             on: None,
+            env: Default::default(),
         }
     }
 
@@ -155,6 +158,7 @@ impl Launch {
             argv,
             cwd,
             on: Some(on),
+            env: Default::default(),
         }
     }
 }

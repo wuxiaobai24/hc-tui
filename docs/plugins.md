@@ -2,8 +2,8 @@
 
 [返回 README](../README.md) · [界面模块](mods.md) · [命令](commands.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
-版本：v0.1（2026-11-06）
-状态：实施中。M6（清单与动作、CLI、代际注册）已实现；终端入口（§5–§6）随 M7，事件流（§8）随 M8。清单错误格式为 `文件:行:列: 原因`。
+版本：v0.2（2026-11-07）
+状态：实施中。M6（清单与动作、CLI、代际注册）与 M7（终端入口、多机、`plugins pane`、代际引用）已实现；事件流（§8）随 M8。清单错误格式为 `文件:行:列: 原因`。
 定位：可分发的工作流包，提供一次性动作与真实终端入口。界面由 [界面模块](mods.md) 负责。
 
 ---
@@ -125,12 +125,15 @@ requires_programs = ["lazygit"]
 
 ## 5. 终端入口
 
-- 通过 core `terminal.run {argv, cwd, on, env}` 在 Space 的机器上创建真实 PTY，随后按 `placement` 放入 Tab、分屏、浮动或 popup。
-- `argv[0]` 以 `./` 开头时相对代际目录解析，只允许在安装所在的客户端主机上启动；目标机器不同时返回 `unsupported` 并说明原因。
-- PATH 中的程序允许在任何已连接机器上启动，启动前按 `requires_programs` 检查。
-- 注入变量与动作相同；另加 `HCTUI_CONTEXT`（JSON，≤32 KiB）与 `HCTUI_PLACEMENT`。大块数据通过文件或 CLI 获取，不塞进环境变量。
-- 终端标签写入 `herdr.space`、`herdr.tab`、`where` 与 `hctui.plugin=<package-id>`、`hctui.terminal=<terminal-id>`；`plugins pane focus/close` 按标签定位。
+- 通过 core `terminal.run {argv, cwd, on, keep, env}` 在 Space 的机器上创建真实 PTY，随后按 `placement` 放入 Tab、分屏、浮动或 popup。
+- `placement` 映射：`tab` 新 Tab；`right` / `down` 在当前 Pane 右/下分屏；`float` 分屏后浮起；`popup` 覆盖层（80%）；`zoomed` 新 Tab 并放大。分屏没有空间时返回 `unavailable`，不改成别的布局。
+- `argv[0]` 以 `./` 开头时相对代际目录解析，只允许在安装所在的客户端主机上启动；目标机器不同时返回 `unsupported` 并说明原因，不回落本机。包内文件缺失报 `missing_program` 并给出解析到的路径。
+- PATH 中的程序允许在任何已连接机器上启动。`requires_programs` 与 PATH 形式的 `argv[0]` 都在目标机器上检查：本机按 PATH 逐一查找，远端用 `machine.exec` 执行 `command -v` 探测；缺失时报 `missing_program` 并列出缺失项。清单里这两类程序名限 `[A-Za-z0-9._+-]`，探测脚本按词引用。
+- 注入变量与动作相同；另加 `HCTUI_CONTEXT`（JSON，≤32 KiB，超出时退化成 `{"api_version":1,"truncated":true}`）与 `HCTUI_PLACEMENT`；`HCTUI_CONTEXT_ID` 用完整入口名。大块数据通过文件或 CLI 获取，不塞进环境变量。
+- 终端标签在 attach 成功后写入 `hctui`、`hctui.plugin=<package-id>`、`hctui.terminal=<terminal-id>` 与 `where`；Space 与 Tab 有共享结构来源时同时写 `herdr.space`、`herdr.tab`。`plugins pane focus/close` 先按 Pane 编号与内存登记匹配，再按 core 里的这两条标签定位，所以视图关闭后仍能找回终端。
 - 关闭 Pane 不结束程序，按现有 keep / park 语义；`terminal.kill` 才结束程序与子进程。
+- 打开时为目标代际写引用文件 `<state>/plugins/leases/<package>.<pid>.json`；最后一个终端关闭后删除并回收代际。进程已退出的引用文件在下一次扫描时清理。
+- `plugins pane open` 先返回请求 ID；远端需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`unavailable`。
 - 不自动上传插件目录、不执行远端安装、不复制凭证、不转发本机 socket。需要回调客户端时走 `hc-tui` CLI 或事件流。
 
 ## 6. 多机
@@ -143,8 +146,9 @@ requires_programs = ["lazygit"]
 
 - 动作默认以 `client` 为宿主，通过参数里的 `workspace` 与 `folder` 决定远端操作的目标。
 - 远端操作使用 `hc exec --on`、`hc-tui do`，文件使用 `hc file read/write --on` 或 `hc-tui read`。
-- 终端入口在 `workspace` 上启动；包内相对程序仅限 `client` 与安装同机的场景。
-- 离线、无权限、目标不存在分别返回 `offline`、`forbidden`、`target_gone`，不静默回退到本机。
+- 终端入口在 `workspace` 上启动；包内相对程序仅限 `client` 与安装同机的场景，请求远端时返回 `unsupported`。
+- 目标机器由 `--machine` 或 Space 的机器决定；`local` 与空值表示本机。`requires_programs` 在目标机器上检查。
+- 离线与目标不存在分别返回 `offline`、`target_gone`，不静默回退到本机：机器被移除或连接断开（`machine_unknown`、`offline`、`io`、`closed`、`timeout`）都归入 `offline`。
 
 ## 7. 命令与结果
 
@@ -159,9 +163,10 @@ hc-tui plugins action invoke <id>.<action> '{"short":true}' [--pane t7]
 hc-tui plugins action status <request>
 hc-tui plugins action cancel <request>
 hc-tui plugins action log <request> [-n 100]
-hc-tui plugins pane open <id>.<terminal> [--cwd DIR] [--machine M] [--placement P]
-hc-tui plugins pane focus <terminal>
-hc-tui plugins pane close <terminal>
+hc-tui plugins pane open <id>.<terminal> [--cwd DIR] [--machine M] [--placement P] [--space spN]
+hc-tui plugins pane status <request>
+hc-tui plugins pane focus <terminal|id.terminal|pane>
+hc-tui plugins pane close <terminal|id.terminal|pane>
 ```
 
 结果语义：
@@ -169,6 +174,7 @@ hc-tui plugins pane close <terminal>
 - `accepted` 表示已排队；`confirmation_pending` 表示仍需界面确认；两者都不等于完成。
 - 完成状态为 `done`、`failed`、`cancelled`、`timed_out`，附退出码与日志末尾。
 - core 操作或布局 CAS 失败时，动作以 `failed` 结束，`error.kind` 区分 `conflict`、`offline`、`unavailable`。
+- 终端入口的请求状态为 `probing`、`opening`、`opened`、`closed`、`failed`；`opened` 才带终端地址，`failed` 带 `error_kind`。`open` 等到拿到地址或明确错误才返回，超时 20 秒。
 
 命令面板、`[[keys.command]] type = "action"` 与 `hc-tui do` 使用同一分发器；插件动作在启用前不出现在目录中。
 
@@ -192,7 +198,7 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 | `plugins install <目录>` | 预览清单后复制到新代际，`current` 原子切换，默认不启用 |
 | `plugins update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，引用释放后回收 |
 | `plugins unlink <id>` | 移除开发注册，不删除目录 |
-| `plugins uninstall <id>` | 先禁用；有运行中的终端时保留代际直到它们结束 |
+| `plugins uninstall <id>` | 先禁用；有运行中的终端时保留代际直到它们结束（引用在 `<state>/plugins/leases/`） |
 | `plugins enable` / `plugins disable <id>` | 只改变是否出现在命令目录与菜单 |
 
 `records/<id>.json` 记录来源、清单哈希、代际、启用状态与安装时间。安装前显示 `id`、版本、`host_api`、平台、动作与终端入口、`requires_programs`；确认后才注册。构建失败不替换旧代际；`current` 指针切换使用临时目录加 rename。
@@ -253,8 +259,12 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 | `src/plugin/registry.rs` | 安装记录、代际、启用状态、来源与预览 |
 | `src/plugin/runner.rs` | 动作进程、上下文 stdin、超时、取消、进程组回收、有界输出 |
 | `src/plugin/logs.rs` | 运行日志、轮转与查询 |
+| `src/plugin/terminal.rs` | 入口规划、placement 映射、包内相对程序规则、目标机器程序探测 |
+| `src/plugin/lease.rs` | 终端对代际的引用、进程存活判断与回收 |
 | `src/plugin/cli.rs` | `plugins` 子命令 |
-| `src/app/plugin.rs` | 菜单与命令目录接入、上下文构造、结果展示 |
+| `src/app/plugin.rs` | 菜单与命令目录接入、上下文构造、结果展示、终端入口与标签 |
+| `examples/plugins/git-tools/` | 动作读取远端 Git 摘要；终端入口在远端开 lazygit |
+| `examples/plugins/review/` | 包内相对程序的长运行终端（cwd、park、detach） |
 | `docs/plugins.md` | 本文 |
 
 修改：
@@ -262,10 +272,10 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 | 文件 | 改动 |
 |---|---|
 | `Cargo.toml` | `toml` 依赖 |
-| `src/app/actions.rs` | `COMMANDS` 增加 `plugins.*`；分发器接入插件动作 |
+| `src/app/actions.rs` | `COMMANDS` 增加 `plugins.*`；分发器接入插件动作；新建 Space 换机器时重置来源 |
 | `src/app/interaction.rs` | Pane 与 Space 菜单加入上下文匹配的插件动作 |
-| `src/control.rs` | 动作调用、状态查询、取消、`events` 长连接 |
-| `src/main.rs` | `plugins` 子命令与 `events` 子命令 |
+| `src/control.rs` | 动作调用、状态查询、取消、`plugins.pane.*`、原始应答 |
+| `src/main.rs` | `plugins` 子命令（含 `pane`）与 `events` 子命令 |
 | `src/config.rs` | `plugins_dir()`、安装记录路径、启用状态 |
 | `src/i18n/*` | 提示文案 |
 | `README.md`、`docs/development.md` | 文档导航与模块表 |

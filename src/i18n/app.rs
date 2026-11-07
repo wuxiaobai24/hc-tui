@@ -119,6 +119,20 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "subscribing" => Some("正在订阅"),
         "attached {} (resize notifications on)" => Some("已附加 {}（开启尺寸通知）"),
         "attached {}" => Some("已附加 {}"),
+        // 插件终端入口
+        "plugin terminal name is required" => Some("需要插件终端名"),
+        "unknown plugin terminal {}" => Some("未知的插件终端 {}"),
+        "space {} is gone" => Some("空间 {} 已不存在"),
+        "terminal or name is required" => Some("需要终端地址或插件终端名"),
+        "plugin terminal {} is gone" => Some("插件终端 {} 已不存在"),
+        "terminal {} has no view in this client" => Some("本客户端没有终端 {} 的视图"),
+        "no room to split" => Some("没有空间分屏"),
+        "no room to float a pane" => Some("没有空间浮起 Pane"),
+        "unknown placement {}" => Some("未知的放置方式 {}"),
+        "plugin terminal {} opened" => Some("插件终端 {} 已打开"),
+        "plugin terminal closed; {} generations {} reclaimed" => {
+            Some("插件终端已关闭；{} 的代际 {} 已回收")
+        }
         "popup ended: {}" => Some("弹窗结束：{}"),
         "Kill failed: {}" => Some("结束失败：{}"),
         "image attached · {}" => Some("图片已附加 · {}"),

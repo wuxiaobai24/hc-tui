@@ -391,6 +391,16 @@ pub struct App {
     pub plugin_runner: crate::plugin::runner::Runner,
     /// 最近一次插件调用的请求 ID，控制通道回包时带上。
     pub plugin_request: Option<String>,
+    /// 落在 Pane 里的插件终端：Pane → 入口与代际引用。
+    pub plugin_terminals: HashMap<u32, plugin::PluginTerminal>,
+    /// 终端入口请求的进展，`plugins pane status` 查询。
+    pub plugin_panes: HashMap<String, plugin::PaneRequest>,
+    /// 请求 ID 的插入顺序，超过 128 条时丢弃最早的。
+    pub plugin_pane_order: Vec<String>,
+    /// 等目标机器程序探测返回的入口：请求 ID → 规划。
+    pub plugin_pending: HashMap<String, crate::plugin::terminal::Plan>,
+    /// 终端入口请求编号。
+    pub next_plugin_pane: u64,
     /// 有待发的 `state.changed`。
     pub mods_dirty: bool,
     /// 模块通过 `setAgentOrder` 设定的 agent 顺序（按终端地址）。
@@ -558,6 +568,11 @@ impl App {
             plugins: crate::plugin::registry::Registry::default(),
             plugin_runner: crate::plugin::runner::Runner::new(""),
             plugin_request: None,
+            plugin_terminals: HashMap::new(),
+            plugin_panes: HashMap::new(),
+            plugin_pane_order: Vec::new(),
+            plugin_pending: HashMap::new(),
+            next_plugin_pane: 0,
             mod_revision: 0,
             mod_wake: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mod_chrome_sync: None,
@@ -802,7 +817,7 @@ impl App {
         for request in requests {
             let response = match request.body["method"].as_str() {
                 Some("snapshot") => {
-                    json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session})).collect::<Vec<_>>()})
+                    json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session,"plugin":t.plugin,"plugin_terminal":t.plugin_terminal,"cwd":t.cwd})).collect::<Vec<_>>()})
                 }
                 Some("do") if self.restore_pending => json!({"error":"layout is still loading"}),
                 Some("do") => {
@@ -823,6 +838,10 @@ impl App {
                 Some("plugins.status") => self.plugin_status(&request.body),
                 Some("plugins.cancel") => self.plugin_cancel(&request.body),
                 Some("plugins.log") => self.plugin_log(&request.body),
+                Some("plugins.pane.open") => self.plugin_pane_open(&request.body),
+                Some("plugins.pane.status") => self.plugin_pane_status(&request.body),
+                Some("plugins.pane.focus") => self.plugin_pane_focus(&request.body),
+                Some("plugins.pane.close") => self.plugin_pane_close(&request.body),
                 _ => json!({"error":"unknown request method"}),
             };
             let _ = request.reply.send(response);
@@ -1204,10 +1223,17 @@ impl App {
             let size = (slot.inner.width, slot.inner.height);
             if pane.needs_spawn() {
                 pane.mark_spawned(size);
-                let (argv, cwd, on) = pane
+                let (argv, cwd, on, env) = pane
                     .launch
                     .as_ref()
-                    .map(|launch| (launch.argv.clone(), launch.cwd.clone(), launch.on.clone()))
+                    .map(|launch| {
+                        (
+                            launch.argv.clone(),
+                            launch.cwd.clone(),
+                            launch.on.clone(),
+                            launch.env.clone(),
+                        )
+                    })
                     .unwrap_or_default();
                 spawns.push((
                     slot.pane,
@@ -1215,6 +1241,7 @@ impl App {
                     argv,
                     cwd,
                     on,
+                    env,
                     size,
                     !pane.transient,
                 ));
@@ -1222,7 +1249,7 @@ impl App {
                 resizes.push((slot.pane, size));
             }
         }
-        for (pane, target, argv, cwd, on, (cols, rows), keep) in spawns {
+        for (pane, target, argv, cwd, on, env, (cols, rows), keep) in spawns {
             self.send(Command::Spawn {
                 keep,
                 pane,
@@ -1230,6 +1257,7 @@ impl App {
                 argv,
                 cwd,
                 on,
+                env,
                 cols,
                 rows,
             });
@@ -4509,6 +4537,7 @@ impl App {
 
     /// 只断视图，不杀进程。
     fn remove_pane_view(&mut self, pane: u32) {
+        self.release_plugin_terminal(pane);
         self.send(Command::Close { pane });
         self.panes.remove(&pane);
         if self.copy.as_ref().is_some_and(|copy| copy.pane == pane) {
@@ -4854,7 +4883,12 @@ impl App {
         if argv.is_empty() && cwd.is_none() && on.is_none() {
             None
         } else {
-            Some(Launch { argv, cwd, on })
+            Some(Launch {
+                argv,
+                cwd,
+                on,
+                env: Default::default(),
+            })
         }
     }
 
@@ -5033,6 +5067,7 @@ impl App {
                             argv: shell_argv(&command.command),
                             cwd,
                             on: on.clone(),
+                            env: Default::default(),
                         };
                         if let Some(state) = self.panes.get_mut(&pane) {
                             state.transient = true;
@@ -5392,6 +5427,7 @@ impl App {
                     }
                 }
                 self.sync_terminals();
+                self.label_plugin_terminal(pane, &terminal);
                 if let Some(task) = self.initial_tasks.remove(&pane) {
                     self.call_rpc(
                         &format!("send-task:{pane}"),
@@ -5443,6 +5479,17 @@ impl App {
                     state.state = PaneState::Ended {
                         reason: reason.clone(),
                     };
+                }
+                // 插件终端还没拿到地址就断开：请求直接失败，不让状态停在 opening。
+                if let Some(terminal) = self.plugin_terminals.get(&pane) {
+                    if let Some(record) = self.plugin_panes.get_mut(&terminal.request) {
+                        if record.terminal.is_none() {
+                            record.status = plugin::PaneStatus::Failed {
+                                kind: crate::plugin::terminal::UNAVAILABLE.to_string(),
+                                message: reason.clone(),
+                            };
+                        }
+                    }
                 }
                 if program_exit && self.popup.is_some_and(|popup| popup.pane == pane) {
                     self.popup = None;
@@ -5502,6 +5549,10 @@ impl App {
         if tag.starts_with("mod-rpc-") {
             let outcome = result.map_err(|error| error.message);
             self.settle_mod_rpc(tag, &outcome);
+            return;
+        }
+        if let Some(request) = tag.strip_prefix("plugin-probe:") {
+            self.plugin_probe_reply(request, result);
             return;
         }
         if let Some(id) = tag
@@ -7982,5 +8033,53 @@ mod tests {
         app.move_focus(crate::layout::split::Direction::Right);
         assert_eq!(app.focused(), focused);
         assert!(app.focused_mod.is_none());
+    }
+}
+
+#[cfg(test)]
+mod space_origin_tests {
+    use super::*;
+
+    fn offline_app() -> App {
+        let (_, events) = std::sync::mpsc::channel();
+        App::with_network(
+            Config {
+                restore: false,
+                state_path: std::path::PathBuf::from("/nonexistent/hctui-test-state"),
+                ..Config::default()
+            },
+            None,
+            events,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_local_space_created_from_a_remote_space_gets_local_origins() {
+        let mut app = offline_app();
+        app.execute_action("space.new", json!({"name":"remote","machine":"peer"}))
+            .unwrap();
+        assert!(app
+            .workspace()
+            .unwrap()
+            .origin
+            .as_deref()
+            .is_some_and(|origin| origin.starts_with("peer/")));
+        app.execute_action("space.new", json!({"name":"local","machine":""}))
+            .unwrap();
+        let workspace = app.workspace().unwrap();
+        let origin = workspace.origin.clone().unwrap();
+        assert!(!origin.contains('/'), "local space origin: {origin}");
+        for tab in &workspace.tabs {
+            let origin = tab.origin.clone().unwrap();
+            assert!(!origin.contains('/'), "local tab origin: {origin}");
+            for pane in tab.panes() {
+                let origin = app.panes.get(&pane.0).and_then(|p| p.origin.clone());
+                assert!(
+                    origin.as_deref().is_none_or(|origin| !origin.contains('/')),
+                    "local pane origin: {origin:?}"
+                );
+            }
+        }
     }
 }

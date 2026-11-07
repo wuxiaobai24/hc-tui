@@ -164,12 +164,24 @@ hc-tui plugins link <目录>
 hc-tui plugins unlink <id>
 hc-tui plugins uninstall <id>
 hc-tui plugins enable|disable <id>
+hc-tui plugins pane open <id>.<terminal> [--cwd DIR] [--machine M] [--placement P] [--space spN]
+hc-tui plugins pane status <request>
+hc-tui plugins pane focus <terminal|id.terminal|pane>
+hc-tui plugins pane close <terminal|id.terminal|pane>
 ```
 
 `action list`、`list`、`install`、`link`、`unlink`、`uninstall`、`enable`、`disable` 不要求窗口；
 `action invoke/status/cancel/log` 经本地控制 socket 转给运行中的 TUI（运行状态与进程都在客户端进程内）。插件动作名 `<package-id>.<action-id>`，
 内置动作不可被覆盖；禁用或卸载后动作立即从命令目录、命令面板与右键菜单消失。动作在客户端主机运行，
 stdin 收到上下文 JSON，超时、取消、进程组回收与并发队列由宿主约束。
+
+`plugins pane` 要求运行中的 TUI。`open` 在 Space 的机器上创建真实终端：`--machine` 缺省用 Space
+的机器，`--cwd` 缺省用 Space 目录，`--placement` 覆盖清单里的 placement。`tab` / `right` / `down` /
+`float` / `popup` / `zoomed` 分别对应新 Tab、右分屏、下分屏、浮动、覆盖层与放大。包内相对程序
+（`./`）在请求远端机器时返回 `unsupported`，不回落本机；`requires_programs` 在目标机器上检查，
+缺失返回 `missing_program` 并列出缺失项；机器不可达返回 `offline`；目标 Space 或终端消失返回
+`target_gone`。`focus` 与 `close` 可用终端地址、`<id>.<terminal>` 或 Pane 编号定位（按标签查找）；
+`close` 只关视图，程序继续运行。
 
 安装与分发走 `hc-tui mods`：
 

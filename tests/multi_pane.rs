@@ -190,6 +190,7 @@ fn two_panes_have_independent_streams() -> Result<()> {
         argv: Vec::new(),
         cwd: None,
         on: None,
+        env: Default::default(),
         cols: 60,
         rows: 20,
     });
@@ -200,6 +201,7 @@ fn two_panes_have_independent_streams() -> Result<()> {
         argv: Vec::new(),
         cwd: None,
         on: None,
+        env: Default::default(),
         cols: 40,
         rows: 10,
     });

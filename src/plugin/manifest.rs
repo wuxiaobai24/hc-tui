@@ -442,9 +442,27 @@ impl Manifest {
                 PLACEMENTS.contains(&terminal.placement()),
                 "placement must be tab, right, down, float, popup or zoomed",
             )?;
+            if let Some(programs) = &terminal.requires_programs {
+                for program in programs.get_ref() {
+                    check(
+                        program.span(),
+                        valid_program_name(program.get_ref()),
+                        "requires_programs entries must be plain program names",
+                    )?;
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// `requires_programs` 只接受 PATH 里的程序名：探测脚本会把它当词使用。
+fn valid_program_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
 }
 
 fn valid_package_id(id: &str) -> bool {

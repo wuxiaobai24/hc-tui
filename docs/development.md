@@ -23,7 +23,7 @@ mise exec -- cargo build --release -p hc-tui
 | src/mods/ | 界面模块运行时：外框树（chrome.rs）、表面与代际（mod.rs）、宿主通道（host.rs）、输入翻译（input.rs）、绘制顺序与预算（render.rs）、`mods check`（check.rs） |
 | src/app/mods.rs | App 侧模块集成：调用分发、快照、事件、授予、键鼠路由、staging 重载 |
 | src/store.rs | 通用代际存储：代际目录、`current` 指针、records、回收与日志轮转 |
-| src/plugin/ | 插件：清单（manifest.rs）、注册表与代际（registry.rs）、受限动作进程（runner.rs）、日志（logs.rs） |
+| src/plugin/ | 插件：清单（manifest.rs）、注册表与代际（registry.rs）、受限动作进程（runner.rs）、终端入口规划与目标机器探测（terminal.rs）、代际引用（lease.rs）、日志（logs.rs） |
 | src/app/plugin.rs | App 侧插件集成：菜单、参数校验、上下文冻结、结果提示与控制通道 |
 | src/mods/store.rs | 模块安装分发：本地/链接/签名包、预览、更新、卸载与授予侧车 |
 | examples/mods/ | 示例模块：agents（区域替换）、spaces（左侧状态与折叠）、prs（dialog 覆盖层 + exec） |
@@ -48,7 +48,7 @@ core 持有终端和进程；TUI 持有布局、VT、attach 意图和显示状�
 cargo fmt -p hc-tui -- --check
 mise exec -- cargo clippy -p hc-tui --all-targets -- -D warnings
 mise exec -- cargo test -p hc-tui
-HC_TUI_E2E=1 mise exec -- cargo test -p hc-tui --test g1_attach --test multi_pane
+HC_TUI_E2E=1 mise exec -- cargo test -p hc-tui --test g1_attach --test multi_pane --test plugin_terminals
 mise exec -- just smoke
 mise exec -- just parity
 ```
@@ -58,6 +58,7 @@ mise exec -- just parity
 ```sh
 mise exec -- cargo build -p hc-tui
 HC_TUI_BIN=target/debug/hc-tui bash scripts/ui-smoke.sh
+bash scripts/plugin-terminals-smoke.sh
 python3 scripts/herdr-parity-smoke.py
 ```
 

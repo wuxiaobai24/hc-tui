@@ -18,6 +18,10 @@ pub struct TerminalSummary {
     pub cwd: Option<String>,
     pub program: Option<String>,
     pub space: Option<String>,
+    /// `labels.hctui.plugin`：插件终端的包 ID。
+    pub plugin: Option<String>,
+    /// `labels.hctui.terminal`：插件终端的入口 ID。
+    pub plugin_terminal: Option<String>,
     pub session: Option<String>,
     pub turn: u64,
     pub seen_turn: u64,
@@ -87,6 +91,16 @@ impl TerminalSummary {
             session: value
                 .pointer("/labels/session")
                 .and_then(Value::as_str)
+                .map(str::to_string),
+            plugin: value
+                .pointer("/labels/hctui.plugin")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            plugin_terminal: value
+                .pointer("/labels/hctui.terminal")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string),
             title: string("title").unwrap_or_default(),
             turn: value.get("turn").and_then(Value::as_u64).unwrap_or(0),

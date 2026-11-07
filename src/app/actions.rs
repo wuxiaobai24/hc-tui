@@ -183,14 +183,29 @@ impl App {
         match name {
             "space.new" => {
                 self.new_workspace(text("name"));
-                let ws = self.workspaces.get_mut(self.active_ws).unwrap();
-                if args.get("machine").is_some() {
-                    let next = text("machine").filter(|m| !m.is_empty());
-                    if next != ws.machine {
-                        ws.folder = None;
+                let mut stale_origins = Vec::new();
+                {
+                    let ws = self.workspaces.get_mut(self.active_ws).unwrap();
+                    if args.get("machine").is_some() {
+                        let next = text("machine").filter(|m| !m.is_empty());
+                        if next != ws.machine {
+                            ws.folder = None;
+                            // 刚建的 Space 还没发布；换机器后不能沿用上一台机器的身份。
+                            ws.origin = None;
+                            for tab in &mut ws.tabs {
+                                tab.origin = None;
+                                stale_origins.extend(tab.panes().into_iter().map(|pane| pane.0));
+                            }
+                        }
+                        ws.machine = next;
                     }
-                    ws.machine = next;
                 }
+                for pane in stale_origins {
+                    if let Some(state) = self.panes.get_mut(&pane) {
+                        state.origin = None;
+                    }
+                }
+                let ws = self.workspaces.get_mut(self.active_ws).unwrap();
                 if args.get("folder").is_some() {
                     ws.folder = text("folder");
                 }

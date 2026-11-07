@@ -1,0 +1,21 @@
+manifest_version = 1
+id = "dev.hctui.plugins.review"
+name = "Review"
+version = "0.1.0"
+host_api = 1
+platforms = ["linux", "macos"]
+description = "包内相对程序的长运行终端，验证 cwd、park 与 detach 后保留"
+
+[[actions]]
+id = "note"
+title = "Review note"
+description = "打印本次调用的上下文摘要"
+contexts = ["global", "space", "pane"]
+argv = ["sh", "./bin/note.sh"]
+timeout_ms = 5000
+
+[[terminals]]
+id = "review"
+title = "Review"
+argv = ["./bin/review.sh"]
+placement = "tab"

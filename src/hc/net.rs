@@ -55,6 +55,8 @@ pub enum Command {
         cwd: Option<String>,
         /// 在另一台机器上启动（`terminal.run` 的 `on`）。
         on: Option<String>,
+        /// 叠加在 core 环境之上的变量（`terminal.run` 的 `env`）。
+        env: std::collections::BTreeMap<String, String>,
         cols: u16,
         rows: u16,
     },
@@ -224,6 +226,7 @@ struct PaneIntent {
     argv: Vec<String>,
     cwd: Option<String>,
     on: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
     cols: u16,
     rows: u16,
     wanted: bool,
@@ -237,6 +240,7 @@ impl PaneIntent {
             argv: Vec::new(),
             cwd: None,
             on: None,
+            env: Default::default(),
             cols: cols.max(1),
             rows: rows.max(1),
             wanted: true,
@@ -372,6 +376,7 @@ fn apply_offline_command(
             argv,
             cwd,
             on,
+            env,
             cols,
             rows,
         } => {
@@ -389,6 +394,9 @@ fn apply_offline_command(
             }
             if on.is_some() {
                 intent.on = on;
+            }
+            if !env.is_empty() {
+                intent.env = env;
             }
             intent.keep = keep;
             intent.size(cols, rows);
@@ -577,6 +585,7 @@ impl Session<'_> {
                 argv,
                 cwd,
                 on,
+                env,
                 cols,
                 rows,
             } => {
@@ -595,6 +604,9 @@ impl Session<'_> {
                 }
                 if on.is_some() {
                     intent.on = on;
+                }
+                if !env.is_empty() {
+                    intent.env = env;
                 }
                 intent.keep = keep;
                 intent.size(cols, rows);
@@ -921,6 +933,7 @@ impl Session<'_> {
             argv: intent.argv.clone(),
             cwd: intent.cwd.clone(),
             on: intent.on.clone(),
+            env: intent.env.clone(),
         };
         self.attach_once(pane, launch, cols, rows).await
     }
@@ -944,6 +957,9 @@ impl Session<'_> {
                 }
                 if let Some(on) = launch.on {
                     params["on"] = json!(on);
+                }
+                if !launch.env.is_empty() {
+                    params["env"] = json!(launch.env);
                 }
                 let run = self.rpc("terminal.run", params).await?;
                 let address = run
@@ -1076,6 +1092,7 @@ struct AttachLaunch {
     argv: Vec<String>,
     cwd: Option<String>,
     on: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
 }
 
 /// RPC 失败，保留 core 的稳定 `kind`，供界面重试或报告。

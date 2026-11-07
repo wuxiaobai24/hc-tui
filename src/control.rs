@@ -126,6 +126,16 @@ impl Server {
 
 #[cfg(unix)]
 pub fn call(config: &Config, request: Value) -> Result<Value> {
+    let result = call_raw(config, request)?;
+    if let Some(error) = result.get("error") {
+        anyhow::bail!("{error}");
+    }
+    Ok(result)
+}
+
+/// 与 [`call`] 相同，但把带 `error` 的应答也原样返回给调用方。
+#[cfg(unix)]
+pub fn call_raw(config: &Config, request: Value) -> Result<Value> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket_path(config))?;
@@ -133,11 +143,7 @@ pub fn call(config: &Config, request: Value) -> Result<Value> {
     writeln!(stream, "{request}")?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
-    let result: Value = serde_json::from_str(&line)?;
-    if let Some(error) = result.get("error") {
-        anyhow::bail!("{error}");
-    }
-    Ok(result)
+    Ok(serde_json::from_str(&line)?)
 }
 #[cfg(not(unix))]
 pub fn call(_config: &Config, _request: Value) -> Result<Value> {

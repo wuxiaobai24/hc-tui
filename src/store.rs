@@ -142,11 +142,21 @@ impl Store {
         std::fs::write(self.record_path(&record.id), text)
     }
 
-    /// 下一个代际号：已有记录加一。
+    /// 下一个代际号：记录与磁盘上已有代际的较大者加一。
+    ///
+    /// 卸载会保留正在被终端使用的旧代际；重装必须跳过它们，不能覆盖运行中的代码。
     pub fn next_generation(&self, id: &str) -> u64 {
-        self.record(id)
-            .map(|record| record.generation + 1)
-            .unwrap_or(1)
+        let recorded = self.record(id).map(|record| record.generation).unwrap_or(0);
+        let on_disk = std::fs::read_dir(self.root.join("store").join(id))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        recorded.max(on_disk) + 1
     }
 
     /// 建好下一个代际目录并返回 `(代际, 目录)`。
@@ -209,21 +219,33 @@ impl Store {
 
     /// 删除一个模块的记录、指针、代际与日志。
     pub fn remove(&self, id: &str) -> io::Result<()> {
+        self.detach(id)?;
+        self.remove_store(id)?;
+        let logs = self.log_dir(id);
+        if logs.exists() {
+            std::fs::remove_dir_all(logs)?;
+        }
+        Ok(())
+    }
+
+    /// 只删除记录与 `current` 指针，代际目录留给引用释放后再回收。
+    pub fn detach(&self, id: &str) -> io::Result<()> {
         let record = self.record_path(id);
         if record.exists() {
             std::fs::remove_file(record)?;
         }
         let link = self.current_link(id);
         if std::fs::symlink_metadata(&link).is_ok() {
-            std::fs::remove_file(&link)?;
+            std::fs::remove_file(link)?;
         }
+        Ok(())
+    }
+
+    /// 删除 `store/<id>` 下的全部代际目录，保留记录、指针与日志。
+    pub fn remove_store(&self, id: &str) -> io::Result<()> {
         let store = self.root.join("store").join(id);
         if store.exists() {
             std::fs::remove_dir_all(store)?;
-        }
-        let logs = self.log_dir(id);
-        if logs.exists() {
-            std::fs::remove_dir_all(logs)?;
         }
         Ok(())
     }
@@ -345,6 +367,19 @@ mod tests {
         assert!(!store.generation_dir("probe", 1).exists());
         assert!(store.generation_dir("probe", 2).exists());
         assert_eq!(store.list().len(), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn retained_generations_are_not_reused_after_uninstall() {
+        let root = unique_dir("retained");
+        let store = Store::open(&root);
+        let (first, dir) = store.prepare_generation("probe").unwrap();
+        assert_eq!(first, 1);
+        std::fs::write(dir.join("bundle.js"), "one").unwrap();
+        store.detach("probe").unwrap();
+        // 记录已删、代际目录还在：下一代必须跳过它，避免覆盖运行中的代码。
+        assert_eq!(store.next_generation("probe"), 2);
         std::fs::remove_dir_all(root).ok();
     }
 

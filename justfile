@@ -19,7 +19,7 @@ run:
 
 # 真实 core 的端到端验收（隔离 session，默认在 cargo test 里跳过）
 e2e:
-    HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach --test multi_pane -- --nocapture
+    HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach --test multi_pane --test plugin_terminals -- --nocapture
 
 probe:
     cargo run -p hc-tui -- probe
@@ -27,6 +27,10 @@ probe:
 # 插件动作的端到端冒烟（隔离 XDG 与 hc session；需要 tmux、hc、jq）
 plugins-smoke: build-smoke
     bash scripts/plugins-smoke.sh
+
+# 插件终端的端到端冒烟（远端 placement/cwd/环境/标签、代际保留、离线与缺失程序；需要 tmux、hc、jq、ssh localhost）
+plugin-terminals-smoke: build-smoke
+    bash scripts/plugin-terminals-smoke.sh
 
 # 真实 core + tmux 的 UI 冒烟测试（隔离 session；需要 hc、tmux）
 smoke: build-smoke

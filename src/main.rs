@@ -103,6 +103,10 @@ fn usage() {
     );
     println!(
         "{}",
+        t("       hc-tui plugins pane open|status|focus|close ...")
+    );
+    println!(
+        "{}",
         t("       hc-tui do <command> [JSON arguments] [options]")
     );
     println!();
@@ -136,6 +140,9 @@ fn plugins_command(args: &[String]) -> Result<()> {
             "usage: hc-tui plugins action list|invoke|status|cancel|log"
         ))
     };
+    if group == "pane" {
+        return plugins_pane(&args[1..]);
+    }
     if group != "action" {
         return plugins_manage(group, &args[1..]);
     }
@@ -275,6 +282,154 @@ fn plugins_command(args: &[String]) -> Result<()> {
     }
 }
 
+/// `hc-tui plugins pane open|status|focus|close`：经运行中的 TUI 创建与定位
+/// 插件终端。`open` 等到拿到终端地址或明确错误才返回。
+fn plugins_pane(args: &[String]) -> Result<()> {
+    let Some(sub) = args.first().map(String::as_str) else {
+        anyhow::bail!(t(
+            "usage: hc-tui plugins pane open|status|focus|close <name|terminal>"
+        ));
+    };
+    let mut config_path = None;
+    let mut cwd = None;
+    let mut machine = None;
+    let mut placement = None;
+    let mut space = None;
+    let mut targets: Vec<String> = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                config_path = Some(std::path::PathBuf::from(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--config needs a value")))?,
+                ));
+            }
+            "--cwd" => {
+                index += 1;
+                cwd = args.get(index).cloned();
+            }
+            "--machine" => {
+                index += 1;
+                machine = args.get(index).cloned();
+            }
+            "--placement" => {
+                index += 1;
+                placement = args.get(index).cloned();
+            }
+            "--space" => {
+                index += 1;
+                space = args.get(index).cloned();
+            }
+            other if other.starts_with('-') => anyhow::bail!(t1("unknown option: {}", other)),
+            other => targets.push(other.to_string()),
+        }
+        index += 1;
+    }
+    let config = hc_tui::config::Config::load(config_path);
+    let target = targets.first().cloned().unwrap_or_default();
+    let call = |body: serde_json::Value| hc_tui::control::call_raw(&config, body);
+    match sub {
+        "open" => {
+            anyhow::ensure!(!target.is_empty(), t("a plugin terminal name is required"));
+            let mut request = serde_json::json!({
+                "method": "plugins.pane.open",
+                "name": target,
+            });
+            for (key, value) in [
+                ("cwd", cwd),
+                ("machine", machine),
+                ("placement", placement),
+                ("space", space),
+            ] {
+                if let Some(value) = value {
+                    request[key] = serde_json::json!(value);
+                }
+            }
+            let reply = call(request)?;
+            if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) {
+                println!("{}", serde_json::to_string_pretty(&reply)?);
+                anyhow::bail!("{error}");
+            }
+            let request_id = reply
+                .get("request")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let final_status = wait_for_pane(&config, &request_id)?;
+            println!("{}", serde_json::to_string_pretty(&final_status)?);
+            if let Some(error) = final_status
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+            {
+                anyhow::bail!("{error}");
+            }
+            Ok(())
+        }
+        "status" => {
+            anyhow::ensure!(!target.is_empty(), t("a request ID is required"));
+            let reply = call(serde_json::json!({
+                "method": "plugins.pane.status",
+                "request": target,
+            }))?;
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) {
+                anyhow::bail!("{error}");
+            }
+            Ok(())
+        }
+        "focus" | "close" => {
+            anyhow::ensure!(!target.is_empty(), t("a terminal or name is required"));
+            let reply = call(serde_json::json!({
+                "method": format!("plugins.pane.{sub}"),
+                "terminal": target,
+            }))?;
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) {
+                anyhow::bail!("{error}");
+            }
+            Ok(())
+        }
+        other => anyhow::bail!(t1("unknown plugins pane action: {}", other)),
+    }
+}
+
+/// `open` 之后等终端地址：探测、attach 与标签都在下一轮界面循环里完成。
+fn wait_for_pane(config: &hc_tui::config::Config, request: &str) -> Result<serde_json::Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let reply = hc_tui::control::call_raw(
+            config,
+            serde_json::json!({"method": "plugins.pane.status", "request": request}),
+        )?;
+        let status = reply
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let done = status == "failed"
+            || (status == "opened"
+                && reply
+                    .get("terminal")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some());
+        if done
+            || reply
+                .get("error")
+                .map(|error| !error.is_null())
+                .unwrap_or(false)
+        {
+            return Ok(reply);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(t1("plugin terminal {} did not open in time", request));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// `hc-tui plugins list|install|update|link|uninstall|enable|disable`：
 /// 插件注册与代际管理，复用 M5 的通用存储。
 fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
@@ -304,6 +459,7 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
     match group {
         "list" => {
             let records = hc_tui::store::Store::open(config.plugins_state_dir()).list();
+            let registry = hc_tui::plugin::registry::Registry::load(&config);
             if json {
                 println!("{}", serde_json::to_string_pretty(&records)?);
                 return Ok(());
@@ -323,6 +479,20 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
                         "disabled"
                     }
                 );
+                if let Some(plugin) = registry
+                    .plugins
+                    .iter()
+                    .find(|plugin| plugin.id == record.id)
+                {
+                    for terminal in &plugin.manifest.terminals {
+                        println!(
+                            "    {:<40} {} · {}",
+                            format!("{}.{}", plugin.id, terminal.id()),
+                            terminal.placement(),
+                            terminal.title()
+                        );
+                    }
+                }
             }
             Ok(())
         }
@@ -355,6 +525,22 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
                 )
             );
             println!("{}", t1("  platforms {}", manifest.platforms().join(", ")));
+            for terminal in &manifest.terminals {
+                println!(
+                    "{}",
+                    t2(
+                        "  terminal {} ({})",
+                        format!("{}.{}", manifest.id(), terminal.id()),
+                        terminal.placement()
+                    )
+                );
+                if !terminal.requires_programs().is_empty() {
+                    println!(
+                        "{}",
+                        t1("    requires {}", terminal.requires_programs().join(", "))
+                    );
+                }
+            }
             if !yes {
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     print!("{} [y/N] ", t("install?"));

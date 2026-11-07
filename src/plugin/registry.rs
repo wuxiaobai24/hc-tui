@@ -64,7 +64,7 @@ pub struct ActionInfo {
     pub argv: Vec<String>,
 }
 
-/// 一个终端入口（M7 执行；这里用于展示与预览）。
+/// 一个终端入口：`plugins pane open` 与预览使用。
 #[derive(Debug, Clone)]
 pub struct TerminalInfo {
     /// `<package>.<terminal>`。
@@ -81,6 +81,12 @@ pub struct TerminalInfo {
     pub argv: Vec<String>,
     /// 需要的程序。
     pub requires_programs: Vec<String>,
+    /// 代码根目录（`./` 相对程序的基准）。
+    pub root: PathBuf,
+    /// 代际。
+    pub generation: u64,
+    /// 来源。
+    pub source: Source,
 }
 
 /// 一次注册表加载的全部结果。
@@ -213,6 +219,9 @@ impl Registry {
                         .iter()
                         .map(|s| s.to_string())
                         .collect(),
+                    root: plugin.root.clone(),
+                    generation: plugin.generation,
+                    source: plugin.source,
                 });
             }
         }
@@ -228,6 +237,13 @@ impl Registry {
     /// 该完整名是否被插件动作占用。
     pub fn owns(&self, name: &str) -> bool {
         self.action(name).is_some()
+    }
+
+    /// 按完整名查找终端入口。
+    pub fn terminal(&self, name: &str) -> Option<TerminalInfo> {
+        self.terminals()
+            .into_iter()
+            .find(|entry| entry.name == name)
     }
 }
 
@@ -363,11 +379,16 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
     Ok(record)
 }
 
-/// 卸载插件：删除记录与代际；开发目录里的源码不动。
+/// 卸载插件：删除记录与 `current` 指针；仍有终端在用的代际保留到关闭后回收。
+/// 开发目录里的源码与用户日志不动。
 pub fn uninstall(config: &Config, id: &str) -> Result<(), String> {
-    Store::open(config.plugins_state_dir())
-        .remove(id)
-        .map_err(|error| error.to_string())
+    let store = Store::open(config.plugins_state_dir());
+    let live = crate::plugin::lease::live_generations(config, id);
+    store.detach(id).map_err(|error| error.to_string())?;
+    if live.is_empty() {
+        store.remove_store(id).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
