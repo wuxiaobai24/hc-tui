@@ -1,5 +1,5 @@
 use anyhow::Result;
-use hc_tui::i18n::{t, t1, t2};
+use hc_tui::i18n::{t, t1, t2, t3};
 
 fn main() -> Result<()> {
     hc_tui::i18n::set_zh(hc_tui::config::detect_zh());
@@ -122,38 +122,149 @@ fn usage() {
     );
 }
 
-/// `hc-tui mods` 子命令；只读检查不依赖运行中的窗口。
+/// `hc-tui mods` 子命令：安装分发与只读检查，不依赖运行中的窗口；
+/// `open` / `close` / `reload` / `grant` / `enable` / `disable` 优先经本地
+/// 控制 socket 转发给运行中的 TUI。
+#[derive(Default)]
+struct ModsArgs {
+    targets: Vec<String>,
+    config: Option<std::path::PathBuf>,
+    json: bool,
+    yes: bool,
+    lines: usize,
+    host: Vec<String>,
+    events: Vec<String>,
+    revoke: bool,
+    props: Option<String>,
+    place: Option<String>,
+}
+
+fn parse_mods_args(args: &[String]) -> Result<ModsArgs> {
+    let mut parsed = ModsArgs {
+        lines: 100,
+        ..ModsArgs::default()
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                parsed.config = Some(std::path::PathBuf::from(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--config needs a value")))?,
+                ));
+            }
+            "--json" => parsed.json = true,
+            "--yes" | "-y" => parsed.yes = true,
+            "-n" => {
+                index += 1;
+                parsed.lines = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!(t("-n needs a value")))?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!(t("-n needs a number")))?;
+            }
+            "--host" => {
+                index += 1;
+                parsed.host.push(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--host needs a value")))?,
+                );
+            }
+            "--events" => {
+                index += 1;
+                parsed.events.push(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--events needs a value")))?,
+                );
+            }
+            "--revoke" => parsed.revoke = true,
+            "--props" => {
+                index += 1;
+                parsed.props = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--props needs a value")))?,
+                );
+            }
+            "--place" => {
+                index += 1;
+                parsed.place = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--place needs a value")))?,
+                );
+            }
+            other if other.starts_with('-') => anyhow::bail!(t1("unknown option: {}", other)),
+            other => parsed.targets.push(other.to_string()),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn mods_config(args: &ModsArgs) -> hc_tui::config::Config {
+    hc_tui::config::Config::load(args.config.clone())
+}
+
+fn mods_do(config: &hc_tui::config::Config, command: &str, args: serde_json::Value) -> Result<()> {
+    let answer = hc_tui::control::call(
+        config,
+        serde_json::json!({"method": "do", "command": command, "args": args}),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&answer)?);
+    Ok(())
+}
+
 fn mods_command(args: &[String]) -> Result<()> {
     let Some(sub) = args.first().map(String::as_str) else {
-        anyhow::bail!(t("usage: hc-tui mods check <path|id> [--config <path>]"))
+        anyhow::bail!(t(
+            "usage: hc-tui mods list|check|test|build|install|update|uninstall|link|unlink|log|open|close|reload|grant|enable|disable"
+        ))
     };
+    let parsed = parse_mods_args(&args[1..])?;
+    let config = mods_config(&parsed);
     match sub {
-        "check" => {
-            let mut targets: Vec<String> = Vec::new();
-            let mut path = None;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--config" => {
-                        index += 1;
-                        path = Some(std::path::PathBuf::from(
-                            args.get(index)
-                                .cloned()
-                                .ok_or_else(|| anyhow::anyhow!(t("--config needs a value")))?,
-                        ));
-                    }
-                    other if other.starts_with('-') => {
-                        anyhow::bail!(t1("unknown option: {}", other))
-                    }
-                    other => targets.push(other.to_string()),
-                }
-                index += 1;
+        "list" => {
+            let records = hc_tui::store::Store::open(config.mods_state_dir()).list();
+            if parsed.json {
+                println!("{}", serde_json::to_string_pretty(&records)?);
+                return Ok(());
             }
-            if targets.is_empty() {
+            if records.is_empty() {
+                println!("{}", t("no mods installed"));
+                return Ok(());
+            }
+            for record in records {
+                let version = record
+                    .app
+                    .as_ref()
+                    .and_then(|app| app.get("version"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-");
+                println!(
+                    "{:<24} {:<9} gen {:<3} {:<8} {}",
+                    record.id,
+                    record.source.as_str(),
+                    record.generation,
+                    if record.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    version
+                );
+            }
+            Ok(())
+        }
+        "check" => {
+            if parsed.targets.is_empty() {
                 anyhow::bail!(t("usage: hc-tui mods check <path|id>..."));
             }
-            let config = hc_tui::config::Config::load(path);
-            for target in &targets {
+            for target in &parsed.targets {
                 let report =
                     hc_tui::mods::check::check(&config, target).map_err(anyhow::Error::msg)?;
                 println!("{} {}", report.id, t("ok"));
@@ -167,8 +278,215 @@ fn mods_command(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
+        "test" | "build" => {
+            let target = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods test|build <path|id>")))?;
+            let dir =
+                hc_tui::mods::check::resolve_dir(&config, target).map_err(anyhow::Error::msg)?;
+            let mut command = std::process::Command::new("nsh");
+            command.arg(sub);
+            if sub == "build" {
+                command.arg("-o").arg(dir.join("dist"));
+            }
+            let status = command
+                .arg(&dir)
+                .status()
+                .map_err(|error| anyhow::anyhow!(t2("nsh {}: {}", sub, error)))?;
+            if !status.success() {
+                anyhow::bail!(t1("nsh {} failed", sub));
+            }
+            Ok(())
+        }
+        "install" => {
+            let target = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods install <dir|.nshpkg>")))?
+                .clone();
+            install_or_update(&config, &parsed, &target, None)
+        }
+        "update" => {
+            let (id, target) = match parsed.targets.as_slice() {
+                [id, target] => (Some(id.clone()), target.clone()),
+                [target] => (None, target.clone()),
+                _ => anyhow::bail!(t("usage: hc-tui mods update <id> <dir|.nshpkg>")),
+            };
+            install_or_update(&config, &parsed, &target, id.as_deref())
+        }
+        "uninstall" => {
+            let id = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods uninstall <id>")))?;
+            hc_tui::mods::store::uninstall(&config, id).map_err(anyhow::Error::msg)?;
+            println!("{}", t1("uninstalled {}", id));
+            Ok(())
+        }
+        "link" => {
+            let dir = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods link <dir>")))?;
+            let record = hc_tui::mods::store::link(&config, std::path::Path::new(dir))
+                .map_err(anyhow::Error::msg)?;
+            println!("{}", t2("linked {} at {}", record.id, dir));
+            Ok(())
+        }
+        "unlink" => {
+            let id = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods unlink <id>")))?;
+            hc_tui::mods::store::unlink(&config, id).map_err(anyhow::Error::msg)?;
+            println!("{}", t1("unlinked {}", id));
+            Ok(())
+        }
+        "log" => {
+            let id = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods log <id> [-n 100]")))?;
+            let store = hc_tui::store::Store::open(config.mods_state_dir());
+            match store.log_tail(id, parsed.lines) {
+                Ok(text) => println!("{text}"),
+                Err(error) => println!("{}", t2("no log for {}: {}", id, error)),
+            }
+            Ok(())
+        }
+        "open" | "close" | "reload" => {
+            let mut payload = serde_json::Map::new();
+            if let Some(name) = parsed.targets.first() {
+                payload.insert("name".into(), serde_json::json!(name));
+            }
+            if let Some(place) = &parsed.place {
+                payload.insert("place".into(), serde_json::json!(place));
+            }
+            if let Some(props) = &parsed.props {
+                payload.insert(
+                    "props".into(),
+                    serde_json::from_str(props)
+                        .map_err(|error| anyhow::anyhow!(t1("--props: {}", error)))?,
+                );
+            }
+            if sub == "close" {
+                payload.remove("props");
+                payload.remove("place");
+            }
+            let command = match sub {
+                "open" => "mods.open",
+                "close" => "mods.close",
+                _ => "mods.reload",
+            };
+            mods_do(&config, command, serde_json::Value::Object(payload))
+        }
+        "grant" => {
+            let id = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods grant <id> --host ...")))?;
+            let mut names = parsed.host.clone();
+            names.extend(parsed.events.clone());
+            if names.is_empty() {
+                anyhow::bail!(t("pass --host or --events"));
+            }
+            let args = serde_json::json!({
+                "name": id,
+                "host": parsed.host,
+                "events": parsed.events,
+                "revoke": parsed.revoke,
+            });
+            if mods_do(&config, "mods.grant", args).is_ok() {
+                return Ok(());
+            }
+            // 没有运行中的窗口：直接写持久化授予。
+            let mut grants = hc_tui::mods::store::load_grants(&config, id);
+            if parsed.revoke {
+                grants.retain(|name| !names.contains(name));
+            } else {
+                for name in names {
+                    if !grants.contains(&name) {
+                        grants.push(name);
+                    }
+                }
+                grants.sort();
+            }
+            hc_tui::mods::store::save_grants(&config, id, &grants).map_err(anyhow::Error::msg)?;
+            println!("{}", t2("grants for {}: {}", id, grants.join(", ")));
+            Ok(())
+        }
+        "enable" | "disable" => {
+            let id = parsed
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods enable|disable <id>")))?;
+            let enable = sub == "enable";
+            let args = serde_json::json!({"name": id});
+            if mods_do(&config, &format!("mods.{sub}"), args).is_ok() {
+                return Ok(());
+            }
+            hc_tui::mods::store::set_enabled(&config, id, enable).map_err(anyhow::Error::msg)?;
+            println!(
+                "{}",
+                t1("{} {id}", if enable { "enabled" } else { "disabled" })
+            );
+            Ok(())
+        }
         other => anyhow::bail!(t1("unknown mods command: {}", other)),
     }
+}
+
+fn install_or_update(
+    config: &hc_tui::config::Config,
+    parsed: &ModsArgs,
+    target: &str,
+    id: Option<&str>,
+) -> Result<()> {
+    let path = std::path::Path::new(target);
+    let preview = if path.is_dir() {
+        hc_tui::mods::store::preview_local(path).map_err(anyhow::Error::msg)?
+    } else {
+        hc_tui::mods::store::verify_package(config, path)
+            .map_err(anyhow::Error::msg)?
+            .0
+    };
+    println!(
+        "{}",
+        t3("mod {} ({} {})", preview.id, preview.name, preview.version)
+    );
+    println!("{}", t1("  source {}", preview.source.as_str()));
+    if !preview.grants.is_empty() {
+        println!("{}", t1("  grants {}", preview.grants.join(", ")));
+    }
+    println!("{}", t1("  files {}", preview.files));
+    for warning in &preview.warnings {
+        println!("{}", t1("  warning: {}", warning));
+    }
+    if !parsed.yes {
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            print!("{} [y/N] ", t("install?"));
+            use std::io::Write as _;
+            std::io::stdout().flush()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                anyhow::bail!(t("cancelled"));
+            }
+        } else {
+            anyhow::bail!(t("pass --yes to install without a terminal"));
+        }
+    }
+    let record = if id.is_some() || path.is_dir() {
+        hc_tui::mods::store::update(config, id, path).map_err(anyhow::Error::msg)?
+    } else {
+        hc_tui::mods::store::install_package(config, path).map_err(anyhow::Error::msg)?
+    };
+    println!(
+        "{}",
+        t2("installed {} generation {}", record.id, record.generation)
+    );
+    Ok(())
 }
 
 /// 先读 `--config`，再让文件里的值成为基线，最后应用命令行覆盖。

@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [配置](configuration.md) · [命令](commands.md) · [插件](plugins.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
 版本：v0.4（2026-11-06）
-状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地，示例见 `examples/mods/`；安装分发（§10、§13 其余 CLI）随 M5。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
+状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地；安装、代际、签名包与 `mods` CLI（§10、§12、§13）随 M5 落地，示例见 `examples/mods/`。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
 取代：本文 v0.3。
 运行时基线：nsh 提交 `951556dc1af6f5acf593cfd28640a0fd467b71e3`（`crates/nsh-platform-tui`、`crates/nsh-tui-host`）；发行版 0.4.0 尚无 TUI 后端。宿主侧 ratatui 0.30.2、crossterm 0.29。
 
@@ -97,9 +97,11 @@ ui/                             仓库内的默认模块源码
   store/<id>/<generation>/     安装的代码与 dist/
   current/<id> -> store/<id>/<generation>
   records/<id>.json            来源、清单哈希、启用状态、代际
+  grants/<id>.json             无窗口时写入的授予
   data/<id>/                   AppOptions.data_dir，包级持久状态
   local/<id>/<surface>/        StorageBackend，实例级持久状态
-  logs/<id>/                   引擎日志与错误
+  logs/<id>/                   引擎日志与错误（两份各 1 MiB）
+  trust/nsh-trust.json         已接受的撤销序列与每个 app 的最高构建号
 ```
 
 ### `hctui.toml`
@@ -402,6 +404,8 @@ stateDiagram-v2
 | `state.json` 的 `mods_chrome` | 外框树 |
 | `state.json` 的 `mods_windows` | `window` 覆盖层位置与 `key` |
 | `state.json` 的 `mods_grants` | 已批准的能力、宿主方法与事件 |
+| `mods/grants/<id>.json` | 无窗口时由 `hc-tui mods grant` 写入的授予，启动时并入 |
+| `trust/nsh-trust.json` | 信任根状态：已接受的撤销序列与每个 app 的最高构建号 |
 
 `state.json` 升到 schema 4；缺失字段按空处理。运行中的表面记录其代际，代际在最后一个引用的表面关闭后回收。
 
@@ -442,7 +446,7 @@ hc-tui mods grant <id> [--host ...] [--events ...] [--revoke ...]
 hc-tui mods enable|disable <id>
 ```
 
-`list`、`check`、`test`、`build`、`log`、`install`、`update`、`grant` 不依赖运行中的窗口；`open`、`close`、`reload`、`enable`、`disable` 经本地控制 socket 转发。`check` 在 `TestBackend` 上完成首帧渲染，不触碰真实终端。
+`list`、`check`、`test`、`build`、`log`、`install`、`update`、`uninstall`、`link`、`unlink`、`grant` 与 `enable`/`disable` 的持久化部分不依赖运行中的窗口；`open`、`close`、`reload`、`grant`、`enable`、`disable` 先经本地控制 socket 转发给运行中的 TUI，socket 不可用时 `grant`/`enable`/`disable` 写入 `mods/grants/<id>.json` 与 records。`check` 在 `TestBackend` 上完成首帧渲染，不触碰真实终端。`install` 显示预览后要求终端确认或 `--yes`；签名包校验失败、撤销、构建号回退与 `min_runtime` 不满足都会在安装前拒绝并说明。
 
 ## 14. 与插件、脚本面板的分工
 

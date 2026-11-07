@@ -14,7 +14,7 @@ use ratatui_core::layout::Rect;
 use serde_json::{json, Value};
 
 use super::App;
-use crate::i18n::{t, t1};
+use crate::i18n::{t, t1, t2};
 use crate::mods::host::{self, ModHost, ParamsContext, PendingCall};
 use crate::mods::{ModRuntime, SurfacePlace, SurfaceState, WindowPos};
 
@@ -743,12 +743,13 @@ impl App {
         // 首次加载：按 `hctui.toml` 的声明批准本地可信模块的授予；已批准的
         // 记录以 state.json 为准，模块不能自己扩大范围。
         if !self.mods.grants.contains_key(mod_id) {
-            let declared = ModRuntime::manifest_grants(
-                &self.config.mods_dir().join(mod_id).join("hctui.toml"),
-            );
+            let declared = crate::mods::store::module_root(&self.config, mod_id)
+                .map(|root| ModRuntime::manifest_grants(&root.join("hctui.toml")))
+                .unwrap_or_default();
             if !declared.is_empty() {
                 self.mods.approve_grants(mod_id, &declared);
                 self.seen_dirty = true;
+                self.persist_mod_grants(mod_id);
             }
         }
         let bundle = self.load_mod_bundle(mod_id)?;
@@ -806,12 +807,14 @@ impl App {
         });
         view.load(bundle).map_err(|error| error.to_string())?;
         let area = self.initial_surface_area(place, size, at, key.as_deref());
+        let store_generation = self.mod_store_generation(mod_id);
         let surface = self
             .mods
             .open_surface(id.clone(), mod_id, place, view, key, host);
         surface.area = area;
         surface.errors = errors;
         surface.state = SurfaceState::Running;
+        surface.store_generation = store_generation;
         self.focus_mod_surface(Some(id.clone()));
         self.dirty = true;
         Ok(id)
@@ -827,10 +830,12 @@ impl App {
             .map(|surface| (surface.id.clone(), surface.mod_id.clone(), surface.place))
             .collect();
         let mut closed = false;
+        let mut closed_mods: Vec<String> = Vec::new();
         for (id, mod_id, place) in targets {
             self.remember_mod_window(&id);
             if self.mods.close(&id) {
                 closed = true;
+                closed_mods.push(mod_id.clone());
                 // 关闭停靠区表面同时解除外框绑定，区域不留空占位。
                 if place == SurfacePlace::Region && self.chrome.undock(&mod_id) {
                     self.seen_dirty = true;
@@ -847,8 +852,36 @@ impl App {
             }
             self.dirty = true;
             self.bump_mod_revision();
+            for mod_id in closed_mods {
+                self.prune_mod_generations(&mod_id);
+            }
         }
         closed
+    }
+
+    /// 当前安装代际；未安装的模块返回 `None`。
+    fn mod_store_generation(&self, mod_id: &str) -> Option<u64> {
+        crate::store::Store::open(self.config.mods_state_dir())
+            .record(mod_id)
+            .map(|record| record.generation)
+    }
+
+    /// 回收没有表面引用的旧代际；当前代际总保留。
+    fn prune_mod_generations(&self, mod_id: &str) {
+        let live: Vec<u64> = self
+            .mods
+            .surfaces
+            .iter()
+            .filter(|surface| surface.mod_id == mod_id)
+            .filter_map(|surface| surface.store_generation)
+            .collect();
+        crate::store::Store::open(self.config.mods_state_dir()).prune(mod_id, &live);
+    }
+
+    /// 授予写回持久化文件，供 CLI 与下次启动使用。
+    pub fn persist_mod_grants(&self, mod_id: &str) {
+        let grants = self.mods.grants_for(mod_id);
+        let _ = crate::mods::store::save_grants(&self.config, mod_id, &grants);
     }
 
     /// staging 重载：新实例加载成功并完成离屏首帧后原子替换。
@@ -898,6 +931,7 @@ impl App {
             *generation += 1;
             *generation
         };
+        let store_generation = self.mod_store_generation(mod_id);
         let Some(surface) = self.mods.surface_mut(&surface_id) else {
             return Err(t1("mod {} has no surface", mod_id));
         };
@@ -907,16 +941,18 @@ impl App {
         surface.state = SurfaceState::Running;
         surface.fails = 0;
         surface.last_error = None;
+        surface.store_generation = store_generation;
         self.dirty = true;
         Ok(())
     }
 
     fn load_mod_bundle(&self, mod_id: &str) -> Result<nsh_platform_tui::Bundle, String> {
-        let dist = self.config.mods_dir().join(mod_id).join("dist");
-        let bundle_path = dist.join("bundle.js");
+        let root = crate::mods::store::module_root(&self.config, mod_id)
+            .unwrap_or_else(|| self.config.mods_dir().join(mod_id));
+        let bundle_path = root.join("dist").join("bundle.js");
         if !bundle_path.exists() {
             return Err(t1(
-                "mod {} has no dist bundle; run `nsh build` in its directory",
+                "mod {} has no dist bundle; run `nsh build -o dist` in its directory",
                 mod_id,
             ));
         }
@@ -1383,6 +1419,7 @@ impl App {
         if !added.is_empty() {
             let grants = self.mods.grants_for(mod_id);
             self.send_mod_event(mod_id, "grant.changed", &json!({"grants": grants}));
+            self.persist_mod_grants(mod_id);
             self.seen_dirty = true;
             self.bump_mod_revision();
         }
@@ -1408,6 +1445,22 @@ impl App {
             self.mods_reload(&mod_id)?;
         }
         Ok(())
+    }
+
+    /// 记录运行期异常：写 `logs/<id>/engine.log` 并计数；连续三次进入 Failed。
+    pub fn record_mod_errors(&mut self, surface_id: &str, mod_id: &str, errors: Vec<String>) {
+        let store = crate::store::Store::open(self.config.mods_state_dir());
+        for error in &errors {
+            let line = format!("[{}] {error}", crate::store::now_unix());
+            let _ = store.append_log(mod_id, &line);
+            eprintln!("{}", t2("mod {}: {}", mod_id, error));
+        }
+        if let Some(surface) = self.mods.surface_mut(surface_id) {
+            for error in errors {
+                surface.record_failure(error);
+            }
+        }
+        self.dirty = true;
     }
 
     /// 终端事件转发：只发模块声明的事件名，并递增 revision。
@@ -1761,6 +1814,85 @@ mount(() => <View><Text>{result()}</Text></View>);
                 rows: 8
             })
         );
+    }
+
+    fn module_source(app: &App, marker: &str) -> PathBuf {
+        let dir = app
+            .config
+            .state_path
+            .parent()
+            .unwrap()
+            .join(format!("mod-source-{marker}"));
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(
+            dir.join("hctui.toml"),
+            "[mod]\nid = \"storeprobe\"\nhost_api = 1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("nsh.json"), "{\"name\":\"Store Probe\"}").unwrap();
+        let tsx = format!(
+            "import {{ mount, Text, View }} from \"nsh\";\nmount(() => <View><Text>{marker}</Text></View>);"
+        );
+        let code = nsh_bundler::compile_module("App.tsx", &tsx, &[]).unwrap();
+        std::fs::write(dir.join("dist").join("bundle.js"), code).unwrap();
+        dir
+    }
+
+    #[test]
+    fn linked_module_reloads_source_changes() {
+        let mut app = app();
+        let source = module_source(&app, "link-one");
+        crate::mods::store::link(&app.config, &source).unwrap();
+        app.mods_open(
+            "storeprobe",
+            SurfacePlace::Dialog,
+            json!({}),
+            Some((60, 10)),
+            None,
+            None,
+        )
+        .unwrap();
+        let screen = frames(&mut app, 30);
+        assert!(screen.contains("link-one"), "screen: {screen}");
+
+        let tsx =
+            "import { mount, Text, View } from \"nsh\";\nmount(() => <View><Text>link-two</Text></View>);";
+        let code = nsh_bundler::compile_module("App.tsx", tsx, &[]).unwrap();
+        std::fs::write(source.join("dist").join("bundle.js"), code).unwrap();
+        app.mods_reload("storeprobe").unwrap();
+        let screen = frames(&mut app, 30);
+        assert!(screen.contains("link-two"), "screen: {screen}");
+    }
+
+    #[test]
+    fn installed_module_loads_from_store_and_reload_takes_new_generation() {
+        let mut app = app();
+        let source = module_source(&app, "gen-one");
+        crate::mods::store::install_local(&app.config, &source).unwrap();
+        let surface = app
+            .mods_open(
+                "storeprobe",
+                SurfacePlace::Dialog,
+                json!({}),
+                Some((60, 10)),
+                None,
+                None,
+            )
+            .unwrap();
+        let screen = frames(&mut app, 30);
+        assert!(screen.contains("gen-one"), "screen: {screen}");
+
+        let source = module_source(&app, "gen-two");
+        crate::mods::store::update(&app.config, Some("storeprobe"), &source).unwrap();
+        app.mods_reload("storeprobe").unwrap();
+        let screen = frames(&mut app, 30);
+        assert!(screen.contains("gen-two"), "screen: {screen}");
+
+        let store = crate::store::Store::open(app.config.mods_state_dir());
+        assert!(store.generation_dir("storeprobe", 1).exists());
+        assert!(app.mods_close(&surface));
+        assert!(!store.generation_dir("storeprobe", 1).exists());
+        assert!(store.generation_dir("storeprobe", 2).exists());
     }
 
     #[test]

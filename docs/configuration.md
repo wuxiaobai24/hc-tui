@@ -16,10 +16,25 @@ session 可通过 `--session`、`[session] session` 或 HC_SESSION 指定；CLI 
 | 配置目录中的 panels/*.json | 克隆的脚本面板，下次加载配置时读取 |
 | 配置目录中的 layouts/*.json | 个人 Pane 布局，通过 layout.switch 选择 |
 | `$XDG_STATE_HOME/hc-tui/state.json`（默认 ~/.local/state/...） | 本地已读与分组折叠；schema 4 起含外框树 `mods_chrome`、窗口覆盖层位置 `mods_windows` 与已批准的模块授予 `mods_grants` |
+| `$XDG_STATE_HOME/hc-tui/mods/` | 安装的模块：`store/<id>/<generation>/`、`current/<id>`、`records/<id>.json`、`grants/<id>.json`、`logs/<id>/`、`trust/` |
 | 同一 state 目录的 control-*.sock | session 对应的本地命令 socket，Unix 用户权限 0600 |
 | core 中的 herdr-app / hctui-layout-v1 文档 | 共享结构 / TUI 屏幕布局，不在 config.toml 中 |
 
-自定义 --config 会改变面板和布局文件的父目录；state/socket 仍由 XDG_STATE_HOME 决定。
+自定义 --config 会改变面板、布局、模块开发目录与撤销列表的父目录；state、安装存储与 socket 仍由 XDG_STATE_HOME 决定。
+
+## 模块与签名包
+
+```toml
+[mods]
+# 签名包信任根：base64 Ed25519 公钥，或 nsh keygen 生成的 .pub 文件路径。
+trust_roots = ["~/.config/hc-tui/release.pub"]
+# 撤销列表；默认读配置目录的 mods-revocations.json。
+revocations = "/etc/hc-tui/mods-revocations.json"
+```
+
+`mods install` 对 `.nshpkg` 先做证书链、包签名、文件哈希、撤销列表、构建号回退与
+`min_runtime` 校验；全部通过才写入新代际。`trust/nsh-trust.json` 保存已接受的撤销序列
+与每个 app 的最高构建号。
 
 ## 默认配置参考
 

@@ -20,12 +20,16 @@
 
 ## 界面模块运行时（nsh）
 
-M2 起以 git 依赖引入，构建时编译进二进制图（M3/M4 接线后才实际链接进发行体积）：
+M2 起以 git 依赖引入，M4 接线运行时、M5 接线安装分发后进入发行体积：
 
 - **nsh**（`nsh-platform-tui` / `nsh-engine` / `nsh-core` 等，`Cargo.toml` 固定 commit）
   - 上游：https://github.com/longbridge/nsh
   - 固定 commit：`951556dc1af6f5acf593cfd28640a0fd467b71e3`
   - 许可：**Apache-2.0**
+- **nsh-package**（`nsh-package`，签名包、证书链与信任存储；同一固定 commit）
+  - 许可：**Apache-2.0**
+- **ed25519-dalek / sha2**（签名校验与哈希，nsh-package 的依赖）
+  - 许可：**BSD-3-Clause** / **MIT OR Apache-2.0**
 - **QuickJS**（`quickjs-jit` / `quickjs-jit-core` / `quickjs-jit-sys`，nsh 的 JS 引擎）
   - 许可：**MIT**（Rust 封装与 QuickJS 引擎本身均为 MIT）
 

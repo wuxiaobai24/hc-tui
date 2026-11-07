@@ -781,6 +781,7 @@ impl App {
                 }
                 let grants = self.mods.grants_for(&name);
                 self.send_mod_event(&name, "grant.changed", &json!({ "grants": grants }));
+                self.persist_mod_grants(&name);
                 self.seen_dirty = true;
                 self.bump_mod_revision();
             }
@@ -788,6 +789,8 @@ impl App {
                 let enable = name == "mods.enable";
                 let mod_id = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
                 self.mods.enabled.insert(mod_id.clone(), enable);
+                crate::mods::store::set_enabled(&self.config, &mod_id, enable)
+                    .map_err(anyhow::Error::msg)?;
                 if !enable {
                     self.mods_close(&mod_id);
                 }

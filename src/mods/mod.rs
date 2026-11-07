@@ -8,6 +8,23 @@ pub mod chrome;
 pub mod host;
 pub mod input;
 pub mod render;
+pub mod store;
+
+/// 宿主 → 模块的事件名；签名包按这份清单授予事件。
+pub const EVENTS: &[&str] = &[
+    "state.changed",
+    "terminal.status",
+    "terminal.turn",
+    "terminal.title",
+    "terminal.finished",
+    "focus.changed",
+    "theme.changed",
+    "props.changed",
+    "command",
+    "grant.changed",
+    "action.finished",
+    "app.ready",
+];
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -100,6 +117,8 @@ pub struct ModSurface {
     pub place: SurfacePlace,
     /// 所属代际；staging 成功后原子切换。
     pub generation: u64,
+    /// 安装存储里的代际；用于表面关闭后回收旧代际。
+    pub store_generation: Option<u64>,
     /// 表面视图。
     pub view: AppView,
     /// 当前矩形；region 表面每帧由外框布局给出。
@@ -442,6 +461,7 @@ impl ModRuntime {
             mod_id: mod_id.to_string(),
             place,
             generation,
+            store_generation: None,
             view,
             area: Rect::ZERO,
             focused: false,

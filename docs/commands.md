@@ -149,6 +149,31 @@ files.open 与 mod.open files 是不同入口：前者一次性只读浮层，�
 外框树决定侧栏、Tab 栏、内容区、模式行与模块区域的排列，保存在本地 state 的 `mods_chrome`，
 `--no-mods` 回到内置外框；详细结构见 [界面模块](mods.md#4-外框与表面)。
 
+安装与分发走 `hc-tui mods`：
+
+```sh
+hc-tui mods list [--json]
+hc-tui mods check <path|id>...
+hc-tui mods test <path|id>
+hc-tui mods build <path|id>
+hc-tui mods install <目录或 .nshpkg> [--yes]
+hc-tui mods update <id> <目录或 .nshpkg> [--yes]
+hc-tui mods uninstall <id>
+hc-tui mods link <目录>
+hc-tui mods unlink <id>
+hc-tui mods log <id> [-n 100]
+hc-tui mods open <name> [--place dialog] [--props JSON]
+hc-tui mods close <name>
+hc-tui mods reload [name]
+hc-tui mods grant <id> [--host state] [--events state.changed] [--revoke]
+hc-tui mods enable|disable <id>
+```
+
+安装写入 `$XDG_STATE_HOME/hc-tui/mods/store/<id>/<generation>/`，`current/<id>` 原子切换；
+运行中的表面继续使用已加载的代际，关闭后回收旧代际。`link` 不拷贝，`current` 直接
+指向源目录，改动后 `mods reload` 生效。签名包需要 `config.toml` 的 `[mods] trust_roots`，
+撤销列表默认读配置目录的 `mods-revocations.json`。
+
 ## Layout、外观与应用
 
 | 动作 | 参数与结果 |

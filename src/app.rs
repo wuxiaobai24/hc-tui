@@ -630,6 +630,13 @@ impl App {
             config,
         };
         app.load_local_state();
+        crate::mods::store::apply_enabled(&app.config, &mut app.mods);
+        for record in crate::store::Store::open(app.config.mods_state_dir()).list() {
+            let grants = crate::mods::store::load_grants(&app.config, &record.id);
+            if !grants.is_empty() {
+                app.mods.approve_grants(&record.id, &grants);
+            }
+        }
         if !app.restore_pending {
             app.ensure_layout();
         }

@@ -63,6 +63,7 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
             }
             continue;
         }
+        let mod_id = surface.mod_id.clone();
         let started = Instant::now();
         surface.view.render(frame, rect);
         let elapsed = started.elapsed();
@@ -74,13 +75,13 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
                 .unwrap_or_else(|error| error.into_inner());
             std::mem::take(&mut *errors)
         };
-        for error in errors {
-            surface.record_failure(error);
-        }
         spent += elapsed;
         if elapsed > SURFACE_BUDGET {
             // 记账：超出预算的这一帧未刷新的提交保留到下一帧。
             surface.last_error = Some(format!("frame budget {elapsed:?}"));
+        }
+        if !errors.is_empty() {
+            app.record_mod_errors(&id, &mod_id, errors);
         }
     }
 }

@@ -714,6 +714,10 @@ pub struct Config {
     pub restore: bool,
     /// 关闭界面模块运行时：使用内置外框，不加载任何模块（`--no-mods`）。
     pub no_mods: bool,
+    /// 模块签名包的信任根：base64 Ed25519 公钥或 `.pub` 文件路径。
+    pub mods_trust_roots: Vec<String>,
+    /// 签名包撤销列表 JSON；`None` 时读配置目录的 mods-revocations.json。
+    pub mods_revocations: Option<String>,
     /// 新建 Tab 时先问名字。
     pub prompt_new_tab: bool,
     /// 新建工作区时先问名字。
@@ -745,12 +749,33 @@ fn xdg_dir(variable: &str, fallback: &str) -> PathBuf {
 }
 
 impl Config {
-    /// 界面模块目录：linked / local 来源都放在配置目录的 mods/ 下。
+    /// 开发中的模块目录：`mods link` 与本地构建的模块放在配置目录的 mods/ 下。
     pub fn mods_dir(&self) -> std::path::PathBuf {
         self.config_path
             .parent()
             .map(|parent| parent.join("mods"))
             .unwrap_or_else(|| std::path::PathBuf::from("mods"))
+    }
+
+    /// 模块代际存储根：`<state>/mods/`。
+    pub fn mods_state_dir(&self) -> std::path::PathBuf {
+        self.state_path
+            .parent()
+            .map(|parent| parent.join("mods"))
+            .unwrap_or_else(|| std::path::PathBuf::from("mods"))
+    }
+
+    /// 撤销列表路径。
+    pub fn mods_revocations_path(&self) -> std::path::PathBuf {
+        self.mods_revocations
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                self.config_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("mods-revocations.json")
+            })
     }
 }
 
@@ -794,6 +819,8 @@ impl Default for Config {
             sound_request_path: None,
             restore: true,
             no_mods: false,
+            mods_trust_roots: Vec::new(),
+            mods_revocations: None,
             prompt_new_tab: true,
             prompt_new_workspace: false,
             tab_bar_right: Vec::new(),
@@ -1092,6 +1119,14 @@ impl Config {
                     self.restore = value.boolean(&mut warnings, path).unwrap_or(self.restore)
                 }
                 "session.session" => self.session = value.text().map(str::to_string),
+                "mods.trust_roots" => match value.strings() {
+                    Some(list) => self.mods_trust_roots = list,
+                    None => warnings.push(format!("{path}: 需要字符串数组")),
+                },
+                "mods.revocations" => match value.text() {
+                    Some(text) => self.mods_revocations = Some(text.to_string()),
+                    None => warnings.push(format!("{path}: 需要字符串")),
+                },
                 _ => {
                     if let Some(name) = path.strip_prefix("keys.") {
                         if let Some(text) = value.text() {
@@ -1423,6 +1458,11 @@ pub fn default_config_text() -> String {
             .join(", "),
     );
     out.push('\n');
+    out.push_str("\n[mods]\n");
+    out.push_str("# 签名包信任根：base64 Ed25519 公钥或 .pub 文件路径。\n");
+    out.push_str("trust_roots = []\n");
+    out.push_str("# 撤销列表 JSON；默认读配置目录的 mods-revocations.json。\n");
+    out.push_str("# revocations = \"/path/to/mods-revocations.json\"\n");
     out
 }
 
@@ -1673,6 +1713,26 @@ mod tests {
         let document = parse_toml(&default_config_text()).unwrap();
         config.apply(&document);
         assert!(!config.zellij_keys);
+    }
+
+    #[test]
+    fn parses_mods_trust_roots_and_revocations() {
+        let mut config = Config::default();
+        let document = parse_toml(
+            "[mods]\ntrust_roots = [\"abc\", \"/tmp/root.pub\"]\nrevocations = \"/tmp/revocations.json\"\n",
+        )
+        .unwrap();
+        config.apply(&document);
+        assert_eq!(config.mods_trust_roots, vec!["abc", "/tmp/root.pub"]);
+        assert_eq!(
+            config.mods_revocations.as_deref(),
+            Some("/tmp/revocations.json")
+        );
+        assert_eq!(
+            config.mods_revocations_path(),
+            std::path::PathBuf::from("/tmp/revocations.json")
+        );
+        assert!(config.mods_state_dir().ends_with("mods"));
     }
 
     #[test]

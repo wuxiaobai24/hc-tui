@@ -27,19 +27,19 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-/// 把 CLI 参数解析成模块目录：存在的路径优先，否则按 ID 查配置目录。
+/// 把 CLI 参数解析成模块目录：存在的路径优先，其次安装存储，最后配置目录。
 pub fn resolve_dir(config: &Config, target: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(target);
     if path.is_dir() {
         return Ok(path);
     }
-    let path = config.mods_dir().join(target);
-    if path.is_dir() {
-        return Ok(path);
+    if let Some(dir) = crate::mods::store::module_root(config, target) {
+        return Ok(dir);
     }
     Err(format!(
-        "no mod at {target} or {}",
-        config.mods_dir().join(target).display()
+        "no mod at {target}, {}, or {}",
+        config.mods_dir().join(target).display(),
+        config.mods_state_dir().join("store").join(target).display()
     ))
 }
 
@@ -108,8 +108,11 @@ pub fn check(config: &Config, target: &str) -> Result<Report, String> {
         return Err("the mod requested exit during its first frame".to_string());
     }
     drop(view);
-    if let Err(error) = run_nsh_check(&path) {
-        warnings.push(error);
+    // 安装后的代际只有 dist；源码检查只在开发目录上有意义。
+    if path.join("App.tsx").exists() {
+        if let Err(error) = run_nsh_check(&path) {
+            warnings.push(error);
+        }
     }
     Ok(Report {
         path,

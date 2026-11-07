@@ -24,6 +24,8 @@ pub mod ui;
 
 pub mod shared;
 
+pub mod store;
+
 pub mod control;
 
 pub mod update;
