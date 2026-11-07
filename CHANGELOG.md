@@ -1,5 +1,13 @@
 # 变更记录
 
+## 未发布
+
+扩展机制开发计划（docs/plan-extensions.md）前三项已交付：
+
+- M1 渲染基线：升级 ratatui 0.30.2 与 crossterm 0.29，导入全部迁到 ratatui-core / ratatui-widgets / ratatui-crossterm 子 crate；80×24 与 120×40 帧快照升级前后逐格一致，单元、nvim 字节回放、图片遮挡、E2E 与 ui-smoke 全部通过。
+- M2 nsh 探针：以 git 依赖固定 longbridge/nsh `951556dc`，引入 `nsh-platform-tui` 与 `nsh-engine`（js）；探针测试在 TestBackend 的 Pane 矩形内加载最小 TSX bundle，验证按键、鼠标、粘贴、resize、唤醒、退出与干净停止；musl 双目标冷构建基线与 nsh/QuickJS 第三方声明写入 docs/release.md。
+- M3 外框与表面：新增 `src/mods/chrome.rs` 外框树，界面布局改由树驱动，默认帧与升级前逐格一致；侧栏可换到右侧、Tab 栏换到下方；本地 state 升到 schema 4（`mods_chrome` / `mods_windows`）；新增 `mods.dock` / `mods.undock` / `mods.chrome` 动作与 `--no-mods`；Kitty 图片按模块区域遮挡、关闭后重传；`pane.go` 焦点循环为模块区域预留扩展点。
+
 ## 0.4.3 — 2026-11-06
 
 - Mac 系统截图 PNG 直接从剪贴板读取，无需额外安装 pngpaste；仍先上传到目标机器，成功后才插入远端路径。
