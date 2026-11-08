@@ -131,6 +131,16 @@ fn region_props(app: &App, builtin: &str) -> serde_json::Value {
                     crate::config::Indicators::Symbols => "symbols",
                     crate::config::Indicators::Dots => "dots",
                 },
+                "spaces": {
+                    // 机器组的折叠状态与内置实现同源（`folded_agent_groups` 里的
+                    // `machine:<name>`）；模块据此换箭头并收起该组的 Space 行。
+                    "folded": app
+                        .folded_agent_groups
+                        .iter()
+                        .filter(|group| group.starts_with("machine:"))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                },
                 "agents": {
                     "rows": rows,
                     "folded": app.folded_agent_groups.iter().cloned().collect::<Vec<_>>(),

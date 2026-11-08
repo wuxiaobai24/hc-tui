@@ -162,7 +162,7 @@ const iconIndex = (identity: string): number => {
 };
 
 const snapshot = signal<Snapshot>({});
-const folded = signal<Record<string, boolean>>({});
+// 折叠状态不在 `state` 里：宿主把机器组与 Agents 分组折叠后作为 props 推过来。
 const size = signal({ cells: 0, rows: 0 });
 // 启动参数里的 props 只是首份；宿主用 `props.changed` 推最新的 Agents 分组。
 const pushed = signal<Record<string, any>>({});
@@ -217,13 +217,13 @@ function spaceRow(space: Space, active: boolean, inner: number): Row {
   };
 }
 
-function machineRow(machine: string, connected: boolean, inner: number): Row {
+function machineRow(machine: string, connected: boolean, inner: number, folded: boolean): Row {
   const name = truncate(
     machine === "local" ? tr("This computer", "本机") : machine,
     Math.max(inner - 7, 0),
   );
   const indent = Math.max(inner - width(name) - 6, 0);
-  const chevron = "▾";
+  const chevron = folded ? "▸" : "▾";
   return {
     left: [
       { text: ` ${chevron} ${name}${pad(indent)}`, token: DIM },
@@ -301,15 +301,16 @@ function rowsFor(snapshotValue: Snapshot, propsValue: any, inner: number, height
     return a < b ? -1 : a > b ? 1 : 0;
   });
 
+  const foldedMachines: string[] = propsValue.spaces?.folded ?? [];
   const rows: Row[] = [navTitle(tr(" Spaces", " 工作区"), "+ "), blank()];
   const spaceRows: Row[] = [];
   for (const machine of unique) {
     if (spaceRows.length > 0) spaceRows.push(blank());
     const group = `machine:${machine}`;
-    const isFolded = folded()[group] === true;
+    const isFolded = foldedMachines.includes(group);
     const connected = machine === "local";
     const here = spaces.filter((space) => (space.machine ?? "local") === machine);
-    spaceRows.push(machineRow(machine, connected, inner));
+    spaceRows.push(machineRow(machine, connected, inner, isFolded));
     if (isFolded) continue;
     if (here.length === 0) {
       spaceRows.push({

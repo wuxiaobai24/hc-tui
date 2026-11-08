@@ -160,6 +160,17 @@ fn app_with_regions() -> (App, PathBuf) {
     (app, root)
 }
 
+/// 画到模块把 `props.changed` 应用完：连续几帧后取最后一帧。
+fn screen_settled(app: &mut App, width: u16, height: u16) -> String {
+    let mut frame = String::new();
+    for _ in 0..30 {
+        frame = screen(app, width, height);
+        app.pump_mods();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    frame
+}
+
 fn screen(app: &mut App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal.draw(|frame| ui::draw(frame, app)).expect("draw");
@@ -235,6 +246,10 @@ fn sidebar_selection_follows_prefix_and_workspace_picker() {
 fn sidebar_rows_answer_mouse_clicks() {
     let (mut app, root) = app_with_regions();
     let before = screen(&mut app, 80, 24);
+    assert!(
+        app.mod_regions.iter().any(|region| region.id == "sidebar"),
+        "the sidebar pixels must come from the module"
+    );
     assert!(before.lines().any(|line| line.contains("This computer")));
     assert_eq!(app.active_ws, 0);
 
@@ -245,8 +260,33 @@ fn sidebar_rows_answer_mouse_clicks() {
         "groups: {:?}",
         app.folded_agent_groups
     );
+    // 像素也要跟着变：组头换 ▸，该组的 Space 行收起（模块由 props.changed 收到折叠态）。
+    let folded = screen_settled(&mut app, 80, 24);
+    assert!(
+        folded.lines().any(|line| line.contains("▸ This computer")),
+        "folded sidebar: {folded}"
+    );
+    assert!(
+        !folded
+            .lines()
+            .any(|line| line.contains(" one") || line.contains(" two")),
+        "folded sidebar must hide the space rows: {folded}"
+    );
+
     click(&mut app, 2, 2);
     assert!(!app.folded_agent_groups.contains("machine:local"));
+    let unfolded = screen_settled(&mut app, 80, 24);
+    assert!(
+        unfolded
+            .lines()
+            .any(|line| line.contains("▾ This computer")),
+        "unfolded sidebar: {unfolded}"
+    );
+    assert!(
+        unfolded.lines().any(|line| line.contains(" one"))
+            && unfolded.lines().any(|line| line.contains(" two")),
+        "unfolded sidebar must show the space rows: {unfolded}"
+    );
 
     // 第二个 Space 的行：点击切过去。
     click(&mut app, 4, 4);

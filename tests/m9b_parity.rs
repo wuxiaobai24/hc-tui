@@ -128,16 +128,18 @@ fn install_module(config: &Config, module: &RegionMod, capabilities: &str) {
     std::fs::remove_dir_all(staging).ok();
 }
 
-/// 侧栏的三种状态：无 Agent、两条 Agent terminal、Tab 栏在底部。
+/// 侧栏的状态格：无 Agent、两条 Agent terminal、Tab 栏在底部、机器组折叠。
 #[derive(Clone, Copy)]
 struct Fixture {
     agents: bool,
     bottom_tabs: bool,
+    folded_group: bool,
 }
 
 const PLAIN: Fixture = Fixture {
     agents: false,
     bottom_tabs: false,
+    folded_group: false,
 };
 
 /// 固定状态：一个本机 Space、两个 Tab，可选两条不带本地 Pane 的 Agent terminal。
@@ -154,6 +156,10 @@ fn fixture_state(app: &mut App, fixture: Fixture) {
         active: 0,
     }];
     app.active_ws = 0;
+    if fixture.folded_group {
+        // 与鼠标点机器组头同源：内置侧栏据此换成 ▸ 并收起该组的 Space 行。
+        app.folded_agent_groups.insert("machine:local".to_string());
+    }
     if fixture.agents {
         app.terminals = vec![
             terminal("local/t1", "claude", "working", 2),
@@ -364,6 +370,7 @@ fn regions_match_builtin_with_agent_terminals() {
     let fixture = Fixture {
         agents: true,
         bottom_tabs: false,
+        folded_group: false,
     };
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         for theme in parity_themes() {
@@ -389,6 +396,7 @@ fn regions_match_builtin_with_bottom_tab_bar() {
     let fixture = Fixture {
         agents: true,
         bottom_tabs: true,
+        folded_group: false,
     };
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         for theme in parity_themes() {
@@ -402,6 +410,32 @@ fn regions_match_builtin_with_bottom_tab_bar() {
                 assert_eq!(
                     differences, 0,
                     "{module} bottom-tabs parity at {width}x{height} {name}"
+                );
+            }
+        }
+    }
+}
+
+/// 机器组折叠：组头换 `▸`、该组的 Space 行收起，与内置实现逐格相同。
+#[test]
+fn regions_match_builtin_with_folded_machine_group() {
+    let fixture = Fixture {
+        agents: true,
+        bottom_tabs: false,
+        folded_group: true,
+    };
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        for theme in parity_themes() {
+            let name = theme.name.clone();
+            for (module, differences, total) in
+                region_differences(width, height, theme, &name, fixture)
+            {
+                println!(
+                    "{module} folded {width}x{height} {name}: {differences} of {total} cells differ"
+                );
+                assert_eq!(
+                    differences, 0,
+                    "{module} folded-group parity at {width}x{height} {name}"
                 );
             }
         }
