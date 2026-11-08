@@ -568,6 +568,13 @@ impl App {
         Self::with_network(config, Some(net), events)
     }
 
+    /// 测试用离屏构造：不启动 `hc connect`，不碰任何 session。
+    #[cfg(test)]
+    pub(crate) fn offline(config: Config) -> Result<Self> {
+        let (_, events) = std::sync::mpsc::channel();
+        Self::with_network(config, None, events)
+    }
+
     fn with_network(
         config: Config,
         net: Option<NetHandle>,
