@@ -1,4 +1,5 @@
-//! `hc-tui notify` 的命令行契约：没有窗口时退出码 3 并说明，非法参数退出码 1。
+//! `hc-tui notify` 的命令行契约：没有窗口时退出码 3 并带 `core_unavailable`，
+//! 非法参数按用法错误退出 2（见 docs/cli-errors.md）。
 //! 整段在隔离的 XDG 下跑，不碰真实配置与状态。
 
 use std::path::{Path, PathBuf};
@@ -37,19 +38,20 @@ fn no_window_exits_three_and_says_why() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     println!("exit={:?} stderr={stderr:?}", output.status.code());
     assert_eq!(output.status.code(), Some(3));
+    assert!(stderr.contains("notification not delivered"), "{stderr:?}");
     assert!(
-        stderr.contains("notification not delivered (exit 3)"),
+        stderr.contains("no place to keep the notification"),
         "{stderr:?}"
     );
     assert!(
-        stderr.contains("no place to keep the notification"),
+        stderr.trim_end().ends_with("(code: core_unavailable)"),
         "{stderr:?}"
     );
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn bad_input_exits_one() {
+fn bad_input_is_a_usage_error() {
     let root = root("bad-input");
     for (args, expected) in [
         (vec!["notify", "x", "--level", "fatal"], "unknown level"),
@@ -60,7 +62,7 @@ fn bad_input_exits_one() {
         let output = run(&root, &args);
         let stderr = String::from_utf8_lossy(&output.stderr);
         println!("{args:?} exit={:?} stderr={stderr:?}", output.status.code());
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert!(stderr.contains(expected), "{args:?}: {stderr:?}");
     }
     std::fs::remove_dir_all(root).ok();

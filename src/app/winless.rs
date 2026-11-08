@@ -127,13 +127,26 @@ fn prompt_text(prompt: &Prompt, args: &Value) -> Option<String> {
     args.get("name").and_then(Value::as_str).map(str::to_string)
 }
 
-fn refuse(command: &str, kind: &str, error: String) -> i32 {
-    println!(
-        "{}",
-        json!({"error": error, "error_kind": kind, "method": command})
-    );
-    let _ = std::io::stdout().flush();
-    1
+/// 无窗口动作的拒绝：CLI 用它换稳定错误码与退出码，形状由调用方决定。
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    /// 拒绝原因：`needs_window` / `no_core` / `no_layout` / `action_failed` /
+    /// `needs_input` / `layout_error`。
+    pub kind: &'static str,
+    /// 人类可读说明，回显用户输入的动作名。
+    pub message: String,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+fn refuse(kind: &'static str, message: String) -> anyhow::Error {
+    anyhow::Error::new(Refusal { kind, message })
 }
 
 /// 等布局副本可写：连接就绪、布局已读、`restore_pending` 已清。
@@ -207,18 +220,14 @@ pub fn sync_services(config: &Config, trigger: super::services::Trigger) -> Vec<
     issues
 }
 
-/// `hc-tui do` 的无窗口路径。返回进程退出码。
-pub fn run(config: &Config, command: &str, args: &Value) -> Result<i32> {
+/// `hc-tui do` 的无窗口路径：成功时把应答对象写到 stdout，拒绝时返回
+/// [`Refusal`]，退出码与错误形状交给 CLI 统一处理。
+pub fn run(config: &Config, command: &str, args: &Value) -> Result<()> {
     if needs_window(command) {
-        return Ok(refuse(
-            command,
-            "needs_window",
-            t1("{} needs a TUI window", command),
-        ));
+        return Err(refuse("needs_window", t1("{} needs a TUI window", command)));
     }
     if !core_alive(config) {
-        return Ok(refuse(
-            command,
+        return Err(refuse(
             "no_core",
             t1("no core for session {}", session_name(config)),
         ));
@@ -231,8 +240,7 @@ pub fn run(config: &Config, command: &str, args: &Value) -> Result<i32> {
     wait_ready(&mut app);
     if !app.doc_loaded {
         app.shutdown();
-        return Ok(refuse(
-            command,
+        return Err(refuse(
             "no_layout",
             t1(
                 "cannot read layout for session {}",
@@ -242,15 +250,14 @@ pub fn run(config: &Config, command: &str, args: &Value) -> Result<i32> {
     }
     if let Err(error) = app.execute_action(command, args.clone()) {
         app.shutdown();
-        return Ok(refuse(command, "action_failed", error.to_string()));
+        return Err(refuse("action_failed", error.to_string()));
     }
     // 动作要一行输入时，argv 里能拿到的就当场提交；拿不到就明确拒绝，
     // 不能报 `confirmation_pending: true` 再把 prompt 丢掉。
     if let Some(prompt) = app.prompt.take() {
         let Some(text) = prompt_text(&prompt, args) else {
             app.shutdown();
-            return Ok(refuse(
-                command,
+            return Err(refuse(
                 "needs_input",
                 t1("{} needs input; pass it in the arguments", command),
             ));
@@ -275,12 +282,12 @@ pub fn run(config: &Config, command: &str, args: &Value) -> Result<i32> {
             t("layout write did not settle before the timeout")
         };
         app.shutdown();
-        return Ok(refuse(command, "layout_error", reason.to_string()));
+        return Err(refuse("layout_error", reason.to_string()));
     }
     app.shutdown();
     println!("{response}");
     let _ = std::io::stdout().flush();
-    Ok(0)
+    Ok(())
 }
 
 #[cfg(test)]

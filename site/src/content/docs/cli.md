@@ -78,3 +78,17 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 `packages list` 一行一个包，在启用状态后打出能力徽章：`A` 动作、`T` 终端入口、`M` 界面模块；有服务时再跟 `s:在跑/总数`。
 
 出处：`docs/plugins.md` · 9. 安装、更新与卸载。
+
+## 失败与退出码
+
+失败输出是稳定契约：`--json` 时 stderr 一个对象 `{"error":{"code","message"},"id":"cli:<动词>"}`，人类形态末行固定 `(code: <码>)`，`message` 回显用户输入的 token（包 id、pane、终端、路径、选项名）。`0` 成功、`1` 操作失败、`2` 用法错误、`3` core 不可用。码表、退出码表与 reload 类命令的 `{status, diagnostics}` 形状见 `docs/cli-errors.md`。
+
+```console
+$ hc-tui packages update --check no.such.pkg
+no.such.pkg is not installed
+(code: package_not_found)
+```
+
+每个子命令的 `--help` 在用法行之后固定给出人类形态、`--json` 形状、退出码与常见错误；`--json` 只在该子命令声明支持时成立，传了不支持的子命令是用法错误。
+
+出处：`docs/cli-errors.md`。

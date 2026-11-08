@@ -7,18 +7,18 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use hc_tui::config::Config;
+use hc_tui::error::{reported, usage, ErrorCode, Exit};
 
 use crate::wants_help;
 
 /// 用法行；`--help` 与未知选项共用。
-fn usage() -> &'static str {
+fn usage_line() -> &'static str {
     "usage: hc-tui doctor [--config <path>]"
 }
 
 pub fn run(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| wants_help(arg)) {
-        println!("{}", usage());
-        return Ok(());
+        return crate::print_help("doctor");
     }
     let mut path = None;
     let mut index = 0;
@@ -28,18 +28,22 @@ pub fn run(args: &[String]) -> Result<()> {
                 index += 1;
                 path = Some(PathBuf::from(
                     args.get(index)
-                        .ok_or_else(|| anyhow::anyhow!("--config needs a value"))?,
+                        .ok_or_else(|| usage("--config needs a value"))?,
                 ));
             }
-            other => anyhow::bail!("{} (unknown: {})", usage(), other),
+            other => return Err(usage(format!("{} (unknown: {})", usage_line(), other))),
         }
         index += 1;
     }
 
     let config = Config::load(path.clone());
-    let mut failed = 0;
-    failed += config_section(&config, path.as_deref());
-    failed += store_section(&config);
+    let mut code = None;
+    if config_section(&config, path.as_deref()) > 0 {
+        code = Some(ErrorCode::ConfigInvalid);
+    }
+    if store_section(&config) > 0 {
+        code = code.or(Some(ErrorCode::ManifestInvalid));
+    }
     core_section(&config);
     println!("[LOGGER]: {}", hc_tui::diag::log_path().display());
     println!(
@@ -47,8 +51,10 @@ pub fn run(args: &[String]) -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         env!("HC_TUI_TARGET")
     );
-    if failed > 0 {
-        std::process::exit(1);
+    if let Some(code) = code {
+        // 分节报告在 stdout，码也写在 stdout，保证「末行是码」在单一流里成立。
+        println!("(code: {})", code.as_str());
+        return Err(reported(Exit::Failure));
     }
     Ok(())
 }
