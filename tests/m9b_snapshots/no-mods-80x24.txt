@@ -1,0 +1,48 @@
+row00 | Spaces                + │   1      2      +                             menu   |
+sty00 |7xReset/Reset/BOLD;21xReset/Reset/NONE;7xReset/Rgb(0, 200, 200)/BOLD;45xReset/Reset/NONE|
+row01 |                         │ starting                                             |
+sty01 |80xReset/Reset/NONE|
+row02 | ▾ This computer      ●  │                                                      |
+sty02 |80xReset/Reset/NONE|
+row03 |  W  work                │                                                      |
+sty03 |1xReset/Rgb(43, 76, 140)/NONE;3xReset/Rgb(58, 166, 106)/BOLD;5xReset/Rgb(43, 76, 140)/BOLD;16xReset/Rgb(43, 76, 140)/NONE;55xReset/Reset/NONE|
+row04 |                         │                                                      |
+sty04 |80xReset/Reset/NONE|
+row05 | new              ● menu │                                                      |
+sty05 |4xReset/Reset/BOLD;14xReset/Reset/NONE;1xReset/Reset/BOLD;61xReset/Reset/NONE|
+row06 |─────────────────────────│                                                      |
+sty06 |80xReset/Reset/NONE|
+row07 | Agents           grouped│                                                      |
+sty07 |7xReset/Reset/BOLD;73xReset/Reset/NONE|
+row08 |  (no agents)            │                                                      |
+sty08 |80xReset/Reset/NONE|
+row09 |                         │                                                      |
+sty09 |80xReset/Reset/NONE|
+row10 |                         │                                                      |
+sty10 |80xReset/Reset/NONE|
+row11 |                         │                                                      |
+sty11 |80xReset/Reset/NONE|
+row12 |                         │                                                      |
+sty12 |80xReset/Reset/NONE|
+row13 |                         │                                                      |
+sty13 |80xReset/Reset/NONE|
+row14 |                         │                                                      |
+sty14 |80xReset/Reset/NONE|
+row15 |                         │                                                      |
+sty15 |80xReset/Reset/NONE|
+row16 |                         │                                                      |
+sty16 |80xReset/Reset/NONE|
+row17 |                         │                                                      |
+sty17 |80xReset/Reset/NONE|
+row18 |                         │                                                      |
+sty18 |80xReset/Reset/NONE|
+row19 |                         │                                                      |
+sty19 |80xReset/Reset/NONE|
+row20 |                         │                                                      |
+sty20 |80xReset/Reset/NONE|
+row21 |                         │                                                      |
+sty21 |80xReset/Reset/NONE|
+row22 |                         │                                                      |
+sty22 |80xReset/Reset/NONE|
+row23 |                         │  connecting                               connecting |
+sty23 |80xReset/Reset/NONE|

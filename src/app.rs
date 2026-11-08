@@ -431,6 +431,12 @@ pub struct App {
     pub mod_confirm: Option<(String, String)>,
     /// `run` 发起后仍在飞的 core RPC：tag → (request, 模块)。
     pub mod_action_rpc: std::collections::BTreeMap<String, (String, String)>,
+    /// 默认区域尝试绑定过的模块；装载失败过就不再每帧重试。
+    pub region_mods_attempted: std::collections::BTreeSet<String>,
+    /// 上次尝试绑定时插件注册表的代际；变化后重新尝试。
+    pub region_mods_revision: u64,
+    /// 区域模块已经拿到的 props 版本；变化时用 `props.changed` 推新的一份。
+    pub region_mods_props: BTreeMap<String, String>,
     /// 插件注册表：配置目录与安装存储的当前代际。
     pub plugins: crate::plugin::registry::Registry,
     /// 服务作业台账：写进布局文档 `services` 段，旧读者忽略。
@@ -671,6 +677,9 @@ impl App {
             mod_templates: Vec::new(),
             mod_confirm: None,
             mod_action_rpc: std::collections::BTreeMap::new(),
+            region_mods_attempted: std::collections::BTreeSet::new(),
+            region_mods_revision: u64::MAX,
+            region_mods_props: BTreeMap::new(),
             mods_dirty: false,
             mod_agent_order: None,
             pending_mod_rpc: std::collections::HashMap::new(),
@@ -1249,6 +1258,50 @@ impl App {
     }
 
     /// 按当前 Tab 的树算出每个 Pane 的矩形，并让本地 VT 跟上尺寸。
+    /// 确保默认区域模块有一条运行中的区域表面；装不上或停用时返回 `false`，
+    /// 该区域由内置实现渲染。
+    ///
+    /// 只在第一次绑定与插件代际变化时尝试打开：每帧重试会把包解析放到绘制路径上。
+    pub fn ensure_region_module(&mut self, mod_id: &str, props: serde_json::Value) -> bool {
+        if self.config.no_mods {
+            return false;
+        }
+        if let Some(surface) = self.mods.surfaces.iter().find(|surface| {
+            surface.mod_id == mod_id && matches!(surface.place, crate::mods::SurfacePlace::Region)
+        }) {
+            return surface.state == crate::mods::SurfaceState::Running;
+        }
+        if self.region_mods_revision != self.plugin_revision {
+            self.region_mods_attempted.clear();
+            self.region_mods_revision = self.plugin_revision;
+        }
+        if self.region_mods_attempted.contains(mod_id) {
+            return false;
+        }
+        // 区域模块只负责绘制，不接管键盘焦点。
+        let focused = self.focused_mod.clone();
+        let digest = props.to_string();
+        let opened = self.mods_open(
+            mod_id,
+            crate::mods::SurfacePlace::Region,
+            props,
+            None,
+            None,
+            None,
+        );
+        self.focus_mod_surface(focused);
+        match opened {
+            Ok(_) => {
+                self.region_mods_props.insert(mod_id.to_string(), digest);
+                true
+            }
+            Err(_) => {
+                self.region_mods_attempted.insert(mod_id.to_string());
+                false
+            }
+        }
+    }
+
     pub fn reflow(&mut self, content: Rect) {
         self.content = content;
         self.slots.clear();
@@ -1791,7 +1844,14 @@ impl App {
             return;
         }
 
-        if self.route_mouse_to_mod(mouse) {
+        // 三块内置区域默认由模块绘制，但输入仍走内置实现：这些区域内的鼠标
+        // 不转给模块表面，后面的命中域照旧生效。
+        let region_module = self.mod_regions.iter().any(|region| {
+            !region.folded
+                && crate::ui::mods_bind::is_region_module(&region.id)
+                && contains(region.rect, mouse.column, mouse.row)
+        });
+        if !region_module && self.route_mouse_to_mod(mouse) {
             return;
         }
 

@@ -277,13 +277,13 @@ fn toast_rect(app: &App) -> Rect {
 fn draw_region(region: Region, app: &mut App, frame: &mut Frame, rect: Rect, theme: &Theme) {
     let mut targets: Vec<(PointerTarget, Rect)> = Vec::new();
     match region {
-        Region::Sidebar => render_sidebar(frame, app, rect, theme),
-        Region::Tabs => render_tab_bar(frame, app, rect, theme),
+        Region::Sidebar => render_sidebar(frame.buffer_mut(), app, rect, theme),
+        Region::Tabs => render_tab_bar(frame.buffer_mut(), app, rect, theme),
         Region::Status => {
             let line = app
                 .mode_line()
                 .unwrap_or_else(|| (String::new(), String::new()));
-            render_mode_line(frame, app, rect, &line, theme);
+            render_mode_line(frame.buffer_mut(), app, rect, &line, theme);
         }
         Region::Picker => {
             if let Some(chooser) = app.chooser.as_ref() {

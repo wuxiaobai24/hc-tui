@@ -1,0 +1,11 @@
+[mod]
+id = "status"
+title = "Status"
+place = "none"
+size = 1
+focusable = false
+host_api = 1
+
+[grants]
+host = ["state"]
+events = ["state.changed", "focus.changed", "app.ready"]
