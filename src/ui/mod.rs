@@ -33,6 +33,8 @@ use crate::theme::Theme;
 use crate::app::interaction::PointerTarget;
 
 mod chat;
+#[cfg(test)]
+mod m9;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
