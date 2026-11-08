@@ -76,7 +76,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.mod_regions = plan.layout.mods.clone();
     app.mod_toasts = plan.layout.toasts;
 
-    mods_bind::paint(frame, app, &plan, RegionLayer::Chrome, &theme, &mode_line);
+    // 模块接管区域但还没落笔时，内置帧要在模块表面之后盖回同一矩形。
+    let chrome_backdrops =
+        mods_bind::paint(frame, app, &plan, RegionLayer::Chrome, &theme, &mode_line);
 
     app.reflow(plan.layout.body);
     let slots = app.slots.clone();
@@ -85,11 +87,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     // 模块表面按 z 序绘制：region/pane 在下，dialog、popup、window 在上。
     crate::mods::render::draw_surfaces(app, frame);
+    // 区域模块落笔之前像素归内置实现：把同一矩形的内置帧盖回模块帧上，
+    // 首帧到首份 props 之间不会露出空白或半份内容。
+    mods_bind::cover(frame, chrome_backdrops);
     render_overlays(frame, app, &theme);
     if app.chat.is_some() {
         chat::render(frame, app, plan.layout.body, &theme);
     }
-    mods_bind::paint(frame, app, &plan, RegionLayer::Overlay, &theme, &mode_line);
+    let overlay_backdrops =
+        mods_bind::paint(frame, app, &plan, RegionLayer::Overlay, &theme, &mode_line);
+    // 模式行压在被覆盖的内容区之上；未落笔时同一层盖回内置帧。
+    mods_bind::cover(frame, overlay_backdrops);
     render_modals(frame, app, area, &theme);
 }
 

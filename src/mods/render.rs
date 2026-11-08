@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::style::Style;
 use ratatui_core::terminal::Frame;
@@ -17,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::i18n::{t, t1};
 
-use super::{ModSurface, SurfacePlace, SurfaceState};
+use super::{ModSurface, PaintedCell, SurfacePlace, SurfaceState};
 
 /// 单表面一帧的预算。
 pub const SURFACE_BUDGET: Duration = Duration::from_millis(8);
@@ -88,9 +89,26 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
             continue;
         }
         let mod_id = surface.mod_id.clone();
+        // 首帧：模块在首份 props 与 state 到齐之前一行都不画，所以同一帧里
+        // 矩形的格子变了就是它落的笔。之后的 props 更新要看与上一帧的内容
+        // 差：模块每帧都重画一遍，同一帧的前后对比分不出是不是新 props。
+        let first = surface.painted_revision.is_none();
+        let before = first.then(|| painted_cells(frame.buffer_mut(), rect));
         let started = Instant::now();
         surface.view.render(frame, rect);
+        surface.frames_drawn += 1;
         let elapsed = started.elapsed();
+        if !surface.ready() {
+            let after = painted_cells(frame.buffer_mut(), rect);
+            let changed = match &before {
+                Some(before) => &after != before,
+                None => surface.painted_cells.as_ref() != Some(&after),
+            };
+            if changed {
+                surface.painted_revision = Some(surface.props_revision);
+            }
+            surface.painted_cells = Some(after);
+        }
         // 引擎回调收集的异常在本帧之后计数；region 首次、其它表面连续三次进入 Failed。
         let errors: Vec<super::ModError> = {
             let mut errors = surface
@@ -155,6 +173,18 @@ fn draw_error_box(
 
 fn z_order(place: SurfacePlace) -> u8 {
     super::wiring::behavior(place).z
+}
+
+/// 矩形里的可见内容：判模块这一帧有没有落笔用。
+fn painted_cells(buffer: &Buffer, rect: Rect) -> Vec<PaintedCell> {
+    let mut cells = Vec::with_capacity(usize::from(rect.width) * usize::from(rect.height));
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let cell = &buffer[(x, y)];
+            cells.push((cell.symbol().to_string(), cell.fg, cell.bg, cell.modifier));
+        }
+    }
+    cells
 }
 
 /// 表面本帧的矩形；region 用外框布局，pane 用槽位，覆盖层用自身位置。

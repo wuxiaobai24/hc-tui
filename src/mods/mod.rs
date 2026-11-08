@@ -121,6 +121,14 @@ pub enum SurfaceState {
     Failed,
 }
 
+/// 矩形里一格的可见内容：符号、前景、背景、修饰；判模块这一帧有没有落笔用。
+pub type PaintedCell = (
+    String,
+    ratatui_core::style::Color,
+    ratatui_core::style::Color,
+    ratatui_core::style::Modifier,
+);
+
 /// 一条模块表面：一个 `AppView` 与它的矩形、代际与状态。
 pub struct ModSurface {
     /// 稳定表面 ID（`s1`、`s2`…），引用于 `mods.close`、`focus`、`overlay`。
@@ -153,6 +161,14 @@ pub struct ModSurface {
     pub key: Option<String>,
     /// 打开时的 props 副本；`setProps` 热更新。
     pub props: Value,
+    /// 宿主已交付的 props 修订号；每次 `props.changed` 加一。
+    pub props_revision: u64,
+    /// 模块落笔时生效的 props 修订号；`None` 表示还没画出过内容。
+    pub painted_revision: Option<u64>,
+    /// 上一帧画完时矩形里的可见内容；props 更新后判模块有没有重画用。
+    pub painted_cells: Option<Vec<PaintedCell>>,
+    /// 实际画过的帧数；帧预算耗尽时本帧会被跳过，对拍据此确认这一帧真画到了。
+    pub frames_drawn: u64,
     /// `modal` / `autofocus` / `onEsc` / `clickThrough` 的打开参数。
     pub modal: bool,
     /// 打开后是否索取键盘焦点。
@@ -183,6 +199,12 @@ impl ModSurface {
     /// 引擎是否还能接收输入。
     pub fn interactive(&self) -> bool {
         matches!(self.state, SurfaceState::Running | SurfaceState::Loading)
+    }
+
+    /// 模块是否已按宿主交付的 props 画出内容：首帧到首份 props 之间为 `false`，
+    /// 区域据此保持内置渲染。
+    pub fn ready(&self) -> bool {
+        self.painted_revision == Some(self.props_revision)
     }
 
     /// 记录一次运行期错误；region 首次即进入 `Failed`，其它表面连续 3 次。
@@ -512,6 +534,10 @@ impl ModRuntime {
             last_host_method: None,
             key,
             props: Value::Null,
+            props_revision: 0,
+            painted_revision: None,
+            painted_cells: None,
+            frames_drawn: 0,
             modal: true,
             autofocus: true,
             esc_to_host: true,

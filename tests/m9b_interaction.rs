@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod support;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use hc_tui::app::App;
 use hc_tui::config::Config;
@@ -52,10 +54,9 @@ fn parity_theme() -> Theme {
 }
 
 fn unique_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
+    // 序号来自原子计数：并发用例不会在同一纳秒拿到同一个目录。
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
         "hctui-m9b-keys-{tag}-{}-{unique}",
         std::process::id()
@@ -157,18 +158,23 @@ fn app_with_regions() -> (App, PathBuf) {
         app.tick();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    support::pump_until_ready(&mut app, &mut terminal, &["sidebar", "tabs", "status"]);
     (app, root)
 }
 
-/// 画到模块把 `props.changed` 应用完：连续几帧后取最后一帧。
+/// 画到侧栏模块把最新 props 画进区域（点击折叠后宿主会推一份新 props）。
 fn screen_settled(app: &mut App, width: u16, height: u16) -> String {
-    let mut frame = String::new();
-    for _ in 0..30 {
-        frame = screen(app, width, height);
-        app.pump_mods();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    frame
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    support::pump_until_ready(app, &mut terminal, &["sidebar"]);
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                + "\n"
+        })
+        .collect()
 }
 
 fn screen(app: &mut App, width: u16, height: u16) -> String {

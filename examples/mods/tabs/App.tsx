@@ -83,12 +83,15 @@ const truncate = (text: string, max: number): string => {
 
 const snapshot = signal<Snapshot>({});
 const size = signal({ cells: 0, rows: 0 });
+// 首份 state 到手前一段都不画：Tab 标签与选中态未定时画出来的是半份 Tab 栏。
+const ready = signal(false);
 
 async function refresh() {
   try {
     snapshot.set(
       await host.call<Snapshot>("state", { domains: ["tabs", "focused"] }),
     );
+    ready.set(true);
   } catch (_error) {
     // 授予未到位时保持上一帧。
   }
@@ -159,7 +162,7 @@ function GroupView(props: { group: Group }) {
 function layoutBar(): { bar: Group[]; menuCells: number } {
   const current = size();
   const cells = current.cells;
-  if (cells <= 0) return { bar: [], menuCells: 0 };
+  if (!ready() || cells <= 0) return { bar: [], menuCells: 0 };
   const menuCells = Math.min(8, cells);
   return { bar: tabGroups(snapshot(), cells - menuCells), menuCells };
 }
@@ -185,17 +188,20 @@ function App() {
           overflow: "hidden",
         }}
       >
-        <Each of={layoutBar().bar}>{(group: any) => <GroupView group={group()} />}</Each>
+        <Each of={layoutBar().bar}>
+          {(group: any) => <GroupView group={group()} />}
+        </Each>
       </View>
       <View
         style={{
           flexDirection: "row",
           width: menuWorld() * cellW,
-          backgroundColor: ground(ACCENT),
+          // 首帧之前连菜单块的底色都不画：区域整体归内置实现。
+          backgroundColor: ready() ? ground(ACCENT) : undefined,
         }}
       >
         <Text style={{ color: color(ACTIVE_FG), whiteSpace: "nowrap" }}>
-          {tr(" menu ", " 菜单 ")}
+          {ready() ? tr(" menu ", " 菜单 ") : ""}
         </Text>
       </View>
     </View>

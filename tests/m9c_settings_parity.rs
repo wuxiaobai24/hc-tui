@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod support;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use hc_tui::app::{App, SettingsOverlay};
 use hc_tui::config::{Config, Delivery, Indicators};
@@ -46,10 +48,9 @@ mount(App);
 "#;
 
 fn unique_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
+    // 序号来自原子计数：并发用例不会在同一纳秒拿到同一个目录。
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("hctui-m9c-{tag}-{}-{unique}", std::process::id()))
 }
 
@@ -124,14 +125,7 @@ fn settings_selected(config: &Config, section: usize) -> usize {
 }
 
 fn region_text(buffer: &Buffer, area: Rect) -> String {
-    (area.y..area.bottom())
-        .map(|y| {
-            (area.x..area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-                + "\n"
-        })
-        .collect()
+    support::region_text(buffer, area)
 }
 
 /// 内置浮层的帧：打开设置、停在指定段。
@@ -152,38 +146,17 @@ fn builtin_frame(config: Config, width: u16, height: u16, section: usize) -> (Bu
     (terminal.backend().buffer().clone(), content)
 }
 
-/// 让模块表面出帧，直到内容区连续几帧不再变化且出现 `needle`。
-fn pump_until_stable(
-    app: &mut App,
-    terminal: &mut Terminal<TestBackend>,
-    content: Rect,
-    needle: &str,
-) {
-    let mut previous = String::new();
-    let mut stable = 0;
-    for round in 0..600 {
-        terminal.draw(|frame| ui::draw(frame, app)).expect("draw");
-        app.pump_mods();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let text = region_text(terminal.backend().buffer(), content);
-        stable = if text == previous { stable + 1 } else { 0 };
-        previous = text.clone();
-        if round > 20 && stable >= 4 && text.contains(needle) {
-            return;
-        }
-    }
-}
-
+/// 按键：投递后画到模块画出新内容；关闭类按键把整块矩形换掉了也算落地。
 fn key(app: &mut App, terminal: &mut Terminal<TestBackend>, content: Rect, code: KeyCode) {
+    let before = region_text(terminal.backend().buffer(), content);
     app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
-    pump_until_stable(app, terminal, content, "Settings");
+    support::pump_until_repainted(app, terminal, content, &before);
 }
 
 /// `prefix+s`：`keys.settings` 命名绑定，与 `app.settings` 动作同一入口。
-fn prefix_settings(app: &mut App, terminal: &mut Terminal<TestBackend>, content: Rect) {
+fn prefix_settings(app: &mut App) {
     app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
     app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-    pump_until_stable(app, terminal, content, "Settings");
 }
 
 /// 模块浮层的帧：真实入口打开，按键切到指定段。
@@ -195,7 +168,7 @@ fn module_frame(config: Config, width: u16, height: u16, section: usize) -> (Buf
         .expect("draw");
     let content = app.content;
     app.open_settings();
-    pump_until_stable(&mut app, &mut terminal, content, "Settings");
+    support::pump_until_ready(&mut app, &mut terminal, &["settings"]);
     assert!(
         app.settings.is_none(),
         "settings module took the entry; note={:?}",
@@ -303,7 +276,7 @@ fn keyboard_goes_through_the_module() {
         .expect("draw");
     let content = app.content;
     app.open_settings();
-    pump_until_stable(&mut app, &mut terminal, content, "Settings");
+    support::pump_until_ready(&mut app, &mut terminal, &["settings"]);
     assert!(app.settings.is_none(), "module took the entry");
 
     key(&mut app, &mut terminal, content, KeyCode::Tab);
@@ -334,7 +307,8 @@ fn keyboard_goes_through_the_module() {
         "Esc closed the module overlay"
     );
 
-    prefix_settings(&mut app, &mut terminal, content);
+    prefix_settings(&mut app);
+    support::pump_until_ready(&mut app, &mut terminal, &["settings"]);
     assert!(
         app.settings.is_none() && !app.mods.surfaces.is_empty(),
         "keys.settings opened the module overlay"
@@ -361,7 +335,7 @@ fn mouse_goes_through_the_module() {
         .expect("draw");
     let content = app.content;
     app.open_settings();
-    pump_until_stable(&mut app, &mut terminal, content, "Settings");
+    support::pump_until_ready(&mut app, &mut terminal, &["settings"]);
 
     let before = region_text(terminal.backend().buffer(), content);
     let (x, y) = find_cell(&before, content, "toasts").expect("toasts tab is drawn");
@@ -395,19 +369,31 @@ fn find_cell(text: &str, content: Rect, needle: &str) -> Option<(u16, u16)> {
     None
 }
 
+/// 鼠标点击：按下与抬起连着投（中间不插帧，插帧会让引擎的提交换掉按下时
+/// 的节点）。nsh 的按下/抬起命中在并发提交下偶发丢事件，这里最多重投三次；
+/// 点击真的不生效时照样失败。
 fn click(app: &mut App, terminal: &mut Terminal<TestBackend>, content: Rect, x: u16, y: u16) {
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-    ] {
-        app.on_mouse(MouseEvent {
-            kind,
-            column: x,
-            row: y,
-            modifiers: KeyModifiers::NONE,
-        });
-        pump_until_stable(app, terminal, content, "Settings");
+    let before = region_text(terminal.backend().buffer(), content);
+    for _ in 0..3 {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        if support::pump_until_repainted_within(app, terminal, content, &before, 200) {
+            return;
+        }
     }
+    panic!(
+        "click at ({x},{y}) never changed the panel; frame now:\n{}",
+        region_text(terminal.backend().buffer(), content)
+    );
 }
 
 /// `--no-mods` 与未安装时回落到内置浮层。
@@ -427,7 +413,7 @@ fn no_mods_falls_back_to_the_builtin_panel() {
     let _ = app.execute_action("app.settings", serde_json::json!({}));
     assert!(app.settings.is_some(), "builtin overlay under --no-mods");
     assert!(app.mods.surfaces.is_empty(), "no module surface opened");
-    prefix_settings(&mut app, &mut terminal, content);
+    prefix_settings(&mut app);
     terminal
         .draw(|frame| ui::draw(frame, &mut app))
         .expect("draw");
@@ -475,17 +461,12 @@ fn theme_changed_reaches_modules() {
     )
     .expect("probe opens");
     let content = app.content;
-    pump_until_stable(&mut app, &mut terminal, content, "waiting");
+    support::pump_until_ready(&mut app, &mut terminal, &["theme-probe"]);
 
+    let before = region_text(terminal.backend().buffer(), content);
     app.execute_action("app.theme", serde_json::json!({ "name": "nord" }))
         .expect("theme applies");
-    for _ in 0..40 {
-        terminal
-            .draw(|frame| ui::draw(frame, &mut app))
-            .expect("draw");
-        app.pump_mods();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    support::pump_until_repainted(&mut app, &mut terminal, content, &before);
     let text = region_text(terminal.backend().buffer(), content);
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         println!("probe frame: {}", line.trim_end());
@@ -519,7 +500,7 @@ fn keep_config_after_module_theme_change() {
         .expect("draw");
     let content = app.content;
     app.open_settings();
-    pump_until_stable(&mut app, &mut terminal, content, "Settings");
+    support::pump_until_ready(&mut app, &mut terminal, &["settings"]);
     key(&mut app, &mut terminal, content, KeyCode::Char('j'));
     key(&mut app, &mut terminal, content, KeyCode::Enter);
     println!("config_path={}", config_path.display());

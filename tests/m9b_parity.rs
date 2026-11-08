@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+mod support;
+
 use hc_tui::app::App;
 use hc_tui::config::Config;
 use hc_tui::model::{Tab, Workspace};
@@ -90,10 +92,9 @@ fn parity_themes() -> Vec<Theme> {
 }
 
 fn unique_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
+    // 序号来自原子计数：并发用例不会在同一纳秒拿到同一个目录。
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("hctui-m9b-{tag}-{}-{unique}", std::process::id()))
 }
 
@@ -227,37 +228,15 @@ fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
-/// 模块表面异步出帧：画到给定的几块矩形连续两帧相同为止。
-fn draw_module_until_stable(app: &mut App, width: u16, height: u16, areas: &[Rect]) -> Buffer {
+/// 模块表面异步出帧：画到三块区域都按宿主交付的 props 落笔。
+fn draw_module_when_ready(app: &mut App, width: u16, height: u16, modules: &[&str]) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-    let mut previous = String::new();
-    for round in 0..300 {
-        terminal.draw(|frame| ui::draw(frame, app)).expect("draw");
-        // 只泵模块通道，不处理连接事件：连接状态在两种渲染之间保持同一份。
-        app.pump_mods();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let text: String = areas
-            .iter()
-            .map(|area| region_text(terminal.backend().buffer(), *area))
-            .collect();
-        // 前 40 帧留给宿主应答 `state`：早于它稳定下来的帧只是空壳。
-        if round >= 40 && text == previous && text.contains("│") {
-            return terminal.backend().buffer().clone();
-        }
-        previous = text;
-    }
+    support::pump_until_ready(app, &mut terminal, modules);
     terminal.backend().buffer().clone()
 }
 
 fn region_text(buffer: &Buffer, area: Rect) -> String {
-    (area.y..area.bottom())
-        .map(|y| {
-            (area.x..area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-                + "\n"
-        })
-        .collect()
+    support::region_text(buffer, area)
 }
 
 fn color_name(color: Color) -> String {
@@ -319,11 +298,7 @@ fn region_differences(
         install_module(&config, module, "{\"host\":[\"state\"]}");
     }
     let mut app = app_in(config, fixture);
-    let areas: Vec<Rect> = [sidebar, tab_bar, status]
-        .into_iter()
-        .map(|area| area.expect("region area"))
-        .collect();
-    let frame = draw_module_until_stable(&mut app, width, height, &areas);
+    let frame = draw_module_when_ready(&mut app, width, height, &["sidebar", "tabs", "status"]);
     let mut out = Vec::new();
     for (module, area) in [
         ("sidebar", sidebar.unwrap()),
@@ -455,6 +430,178 @@ fn default_theme_color_gap_is_measurable() {
             println!("{module} {width}x{height} default: {differences} of {total} cells differ");
         }
     }
+}
+
+/// 首份 props 延迟 500 ms 才生效的侧栏：在这之前一行都不画。
+const DELAYED_PROPS_TSX: &str = r##"
+import { host, mount, signal, Text, View } from "nsh";
+const params: any = (host as any).params ?? {};
+const props = signal<any>({});
+const ready = signal(false);
+// 首份 props 迟到 500 ms：等到了才落笔。
+setTimeout(() => {
+  props.set(params.props ?? {});
+  ready.set(true);
+}, 500);
+mount(() => (
+  <View style={{ flex: 1 }}>
+    {ready() ? <Text>{`late props ${props().indicators}`}</Text> : null}
+  </View>
+));
+"##;
+
+/// 启动期的每一帧只能是两种画面：完整的内置渲染，或完整的模块渲染。
+#[test]
+fn startup_frames_never_show_a_partial_region() {
+    let (width, height) = (80u16, 24u16);
+    let theme = parity_themes().remove(0);
+    let root = unique_dir("startup-frames");
+    // 内置基线：同一份状态的完整侧栏。
+    let mut baseline = app_in(config_in(&root, theme.clone(), PLAIN), PLAIN);
+    let builtin_frame = draw(&mut baseline, width, height);
+    let sidebar = builtin_areas(&baseline, width, height)
+        .0
+        .expect("sidebar area");
+    let builtin = region_text(&builtin_frame, sidebar);
+
+    // 模块终态：同一份状态、同一个矩形，等它按首份 props 与 state 落笔。
+    let config = config_in(&root, theme, PLAIN);
+    for module in &REGION_MODS {
+        install_module(&config, module, "{\"host\":[\"state\"]}");
+    }
+    let mut settled = app_in(config.clone(), PLAIN);
+    let settled_frame = draw_module_when_ready(&mut settled, width, height, &["sidebar"]);
+    let module = region_text(&settled_frame, sidebar);
+    let same = builtin == module;
+
+    // 从头再跑一次启动：中途任何一帧都必须是上面两种画面之一。
+    let mut app = app_in(config, PLAIN);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    let (mut frames, mut builtin_frames, mut module_frames) = (0, 0, 0);
+    let mut takeover: Option<usize> = None;
+    for round in 0..1200 {
+        // 这一帧由谁画像素：帧开始时的就绪状态决定（就绪前会盖回内置帧）。
+        let authority = if app.region_ready("sidebar") {
+            "module"
+        } else {
+            "builtin"
+        };
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .expect("draw");
+        app.pump_mods();
+        let shown = region_text(terminal.backend().buffer(), sidebar);
+        if shown != builtin && shown != module {
+            panic!("frame {round} is neither the builtin nor the module render:\n{shown}");
+        }
+        if authority == "module" {
+            module_frames += 1;
+        } else {
+            builtin_frames += 1;
+        }
+        println!(
+            "frame {round:02} authority={authority} complete {:?}",
+            shown.lines().nth(2).unwrap_or("")
+        );
+        frames += 1;
+        if takeover.is_none() && app.mod_ready("sidebar") {
+            takeover = Some(round);
+        }
+        // 交接之后再记两帧模块自己的像素，序列能看出切换。
+        if takeover.is_some_and(|at| round >= at + 2) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    println!(
+        "{frames} frames: builtin {builtin_frames}, module {module_frames}, builtin {} module",
+        if same { "==" } else { "!=" }
+    );
+    assert!(
+        builtin_frames > 0,
+        "the startup must begin on the builtin render"
+    );
+    assert!(module_frames > 0, "the module must take the region over");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// 首份 props 迟到 500 ms：这段时间区域逐格显示内置内容，不是空白或半份。
+#[test]
+fn delayed_first_props_keeps_the_builtin_region() {
+    let (width, height) = (80u16, 24u16);
+    let theme = parity_themes().remove(0);
+    let root = unique_dir("late-props");
+    // 基线：同一份状态、同一个矩形的内置帧。
+    let mut baseline = app_in(config_in(&root, theme.clone(), PLAIN), PLAIN);
+    let builtin = draw(&mut baseline, width, height);
+    let sidebar = builtin_areas(&baseline, width, height)
+        .0
+        .expect("sidebar area");
+    let expected = region_text(&builtin, sidebar);
+
+    let config = config_in(&root, theme, PLAIN);
+    install_module(
+        &config,
+        &RegionMod {
+            id: "sidebar",
+            tsx: DELAYED_PROPS_TSX,
+            manifest: SIDEBAR_MANIFEST,
+            nsh: SIDEBAR_NSH,
+        },
+        "{\"host\":[\"state\"]}",
+    );
+    let mut app = app_in(config, PLAIN);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    // 首份 props 到达之前每画一帧都必须是内置内容。
+    let started = std::time::Instant::now();
+    let deadline = std::time::Duration::from_millis(400);
+    let mut frames = 0;
+    while started.elapsed() < deadline {
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .expect("draw");
+        app.pump_mods();
+        let shown = region_text(terminal.backend().buffer(), sidebar);
+        println!(
+            "frame {frames:02} builtin={} {:?}",
+            shown == expected,
+            shown.lines().nth(2).unwrap_or("")
+        );
+        assert_eq!(
+            shown, expected,
+            "frame {frames}: region left the builtin render"
+        );
+        frames += 1;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        frames > 5,
+        "the delay window must cover several frames, got {frames}"
+    );
+    // 500 ms 之后模块落笔，区域换成模块自己的内容。
+    support::pump_until_ready(&mut app, &mut terminal, &["sidebar"]);
+    for round in 0..3 {
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .expect("draw");
+        app.pump_mods();
+        let shown = region_text(terminal.backend().buffer(), sidebar);
+        println!(
+            "frame take{round} builtin={} {:?}",
+            shown == expected,
+            shown.lines().next().unwrap_or("")
+        );
+    }
+    let late = region_text(terminal.backend().buffer(), sidebar);
+    assert!(
+        late.contains("late props"),
+        "the module must take the region over:\n{late}"
+    );
+    assert_ne!(
+        late, expected,
+        "the module content must replace the builtin"
+    );
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// 回退帧的快照：`--no-mods` 下三块仍由内置实现绘制，帧与迁移前一致。

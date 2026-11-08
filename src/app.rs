@@ -1282,6 +1282,45 @@ impl App {
     }
 
     /// 按当前 Tab 的树算出每个 Pane 的矩形，并让本地 VT 跟上尺寸。
+    /// 该模块是否已按宿主交付的 props 画出内容；首帧到首份 props 之间为 `false`，
+    /// 该区域此时保持内置渲染。
+    pub fn mod_ready(&self, mod_id: &str) -> bool {
+        self.mods
+            .surfaces
+            .iter()
+            .any(|surface| surface.mod_id == mod_id && surface.ready())
+    }
+
+    /// 区域表面的像素是否已经归模块：按交付的 props 落过笔，或者已进失败占位
+    /// （占位盒由 `mods::render` 画，不能再盖回内置帧）。首帧到首份 props 之间
+    /// 为 `false`，该区域此时保持内置渲染。
+    pub fn region_ready(&self, mod_id: &str) -> bool {
+        self.mods.surfaces.iter().any(|surface| {
+            surface.mod_id == mod_id
+                && surface.place == crate::mods::SurfacePlace::Region
+                && (surface.ready() || surface.state == crate::mods::SurfaceState::Failed)
+        })
+    }
+
+    /// 该模块的 (已交付 props 修订号, 已落笔修订号)；对拍等待失败时写进报错。
+    pub fn mod_paint_revisions(&self, mod_id: &str) -> Option<(u64, Option<u64>)> {
+        self.mods
+            .surfaces
+            .iter()
+            .find(|surface| surface.mod_id == mod_id)
+            .map(|surface| (surface.props_revision, surface.painted_revision))
+    }
+
+    /// 该模块的表面一共画过多少帧；帧预算把某一帧的后面几个表面跳掉时不变。
+    pub fn mod_frames_drawn(&self, mod_id: &str) -> u64 {
+        self.mods
+            .surfaces
+            .iter()
+            .filter(|surface| surface.mod_id == mod_id)
+            .map(|surface| surface.frames_drawn)
+            .sum()
+    }
+
     pub fn reflow(&mut self, content: Rect) {
         self.content = content;
         self.slots.clear();

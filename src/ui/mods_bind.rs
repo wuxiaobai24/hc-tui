@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::terminal::Frame;
 
@@ -99,7 +100,9 @@ fn params(app: &App, area: Rect) -> LayoutParams<'_> {
 /// 按 [`RegionLayer`] 绘制区域：可见时画内置实现，模块接管时只登记命中域。
 ///
 /// 内置绘制在模块接管时仍要跑一遍（画到临时 Buffer），因为命中域、Tab 角标
-/// 这些输入用的矩形由内置实现登记；像素最终被模块表面覆盖。
+/// 这些输入用的矩形由内置实现登记；像素最终被模块表面覆盖。返回本层里
+/// 「模块已接管但还没按首份 props 落笔」的内置帧，由 [`cover`] 在模块表面
+/// 之后盖回去。
 pub fn paint(
     frame: &mut Frame,
     app: &mut App,
@@ -107,11 +110,13 @@ pub fn paint(
     layer: RegionLayer,
     theme: &Theme,
     mode_line: &Option<(String, String)>,
-) {
+) -> Vec<(Rect, Buffer)> {
+    let mut backdrops = Vec::new();
     for region in &wiring::REGIONS {
         if region.layer != layer {
             continue;
         }
+        let pending = needs_backdrop(app, plan, region.name);
         match region.name {
             "spaces" => match (plan.layout.sidebar, plan.layout.rail) {
                 (Some(rail), _) => crate::ui::render_sidebar(frame.buffer_mut(), app, rail, theme),
@@ -120,8 +125,11 @@ pub fn paint(
                     app.workspace_hits.clear();
                     app.agent_hits.clear();
                     if let Some(rect) = plan.hits(region.name) {
-                        let mut scratch = ratatui_core::buffer::Buffer::empty(frame.area());
+                        let mut scratch = Buffer::empty(frame.area());
                         crate::ui::render_sidebar(&mut scratch, app, rect, theme);
+                        if pending {
+                            backdrops.push((rect, scratch));
+                        }
                     }
                 }
             },
@@ -129,8 +137,11 @@ pub fn paint(
                 if let Some(rect) = plan.layout.tab_bar {
                     crate::ui::render_tab_bar(frame.buffer_mut(), app, rect, theme);
                 } else if let Some(rect) = plan.hits(region.name) {
-                    let mut scratch = ratatui_core::buffer::Buffer::empty(frame.area());
+                    let mut scratch = Buffer::empty(frame.area());
                     crate::ui::render_tab_bar(&mut scratch, app, rect, theme);
+                    if pending {
+                        backdrops.push((rect, scratch));
+                    }
                 } else {
                     let corner = Rect::new(plan.layout.column.x, plan.layout.column.y, 0, 0);
                     app.tab_bar = corner;
@@ -141,9 +152,37 @@ pub fn paint(
             "status" => {
                 if let (Some(status), Some(line)) = (plan.layout.status, mode_line.as_ref()) {
                     crate::ui::render_mode_line(frame.buffer_mut(), app, status, line, theme);
+                } else if let (Some(rect), Some(line)) =
+                    (plan.hits(region.name), mode_line.as_ref())
+                {
+                    let mut scratch = Buffer::empty(frame.area());
+                    crate::ui::render_mode_line(&mut scratch, app, rect, line, theme);
+                    if pending {
+                        backdrops.push((rect, scratch));
+                    }
                 }
             }
             _ => {}
+        }
+    }
+    backdrops
+}
+
+/// 该区域这一帧是不是「模块已接管，但还没按首份 props 落笔」。
+fn needs_backdrop(app: &App, plan: &Plan, region: &str) -> bool {
+    let Some(module) = app.plugins.regions.get(region).cloned() else {
+        return false;
+    };
+    plan.hits(region).is_some() && !app.region_ready(&module)
+}
+
+/// 把内置帧盖回模块帧上：模块落笔之前，该区域的像素归内置实现。
+pub fn cover(frame: &mut Frame, backdrops: Vec<(Rect, Buffer)>) {
+    for (rect, builtin) in backdrops {
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                frame.buffer_mut()[(x, y)] = builtin[(x, y)].clone();
+            }
         }
     }
 }
@@ -161,6 +200,15 @@ fn refresh_props(app: &mut App, module: &str, props: &serde_json::Value) {
             "props.changed",
             &serde_json::json!({ "props": props }),
         );
+        // 新一份 props 落笔前区域照旧归内置实现。
+        for surface in app
+            .mods
+            .surfaces
+            .iter_mut()
+            .filter(|surface| surface.mod_id == module)
+        {
+            surface.props_revision += 1;
+        }
     }
     app.region_mods_props.insert(module.to_string(), digest);
 }

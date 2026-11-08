@@ -39,12 +39,15 @@ const color = (token: string | undefined): string | undefined => {
 
 const snapshot = signal<Snapshot>({});
 const size = signal({ cells: 0 });
+// 首份 state 到手前一行都不画：连接状态未定时画出来的是半份模式行。
+const ready = signal(false);
 
 async function refresh() {
   try {
     snapshot.set(
       await host.call<Snapshot>("state", { domains: ["focused"] }),
     );
+    ready.set(true);
   } catch (_error) {
     // 授予未到位时保持上一帧。
   }
@@ -86,6 +89,7 @@ function segStyle(segment: Segment) {
 }
 
 function layoutLine(): Segment[] {
+  if (!ready()) return [];
   const connection = snapshot().connection ?? "offline";
   const text = connectionLabel(connection);
   return [
@@ -110,7 +114,7 @@ function App() {
         </Each>
       </View>
       <Text style={{ color: color(WORKING), whiteSpace: "nowrap" }}>
-        {rightLabel(size().cells) ? `${rightLabel(size().cells)} ` : ""}
+        {ready() && rightLabel(size().cells) ? `${rightLabel(size().cells)} ` : ""}
       </Text>
     </View>
   );
