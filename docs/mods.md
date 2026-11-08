@@ -202,7 +202,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 3. 绘制内容区 Pane（现有路径不变）。
 4. 绘制提示表面：与 region/pane 同层但排在它们之后，仍低于 dialog/popup/window。
 5. 按 z 序绘制覆盖层表面。
-5. 显示光标：取焦点表面的 `cursor_style()`，在对应矩形内定位。
+6. 显示光标：取焦点表面的 `cursor_style()`，在对应矩形内定位。
 
 `graphics.draw` 在字符帧之后输出 Kitty 图片，必须把模块区域与覆盖层并入遮挡计算：与遮挡矩形相交的图片不输出，覆盖层关闭后重新上传；裁剪按 Pane 与表面矩形的交集计算。遗漏这一步会让终端图片盖住 dialog。
 
