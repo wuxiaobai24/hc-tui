@@ -38,12 +38,14 @@ impl Trigger {
 
 impl App {
     /// 对账一次：状态的唯一来源是 core 的终端清单，不是本地台账。
+    ///
+    /// 要 `all`：已结束的终端记录是「不自动重启」的依据。
     pub(crate) fn services_reconcile(&mut self, trigger: Trigger) {
         self.service_trigger = trigger;
         if self.inflight.contains_key("svc:list") {
             return;
         }
-        self.call_rpc("svc:list", "terminal.list", json!({}));
+        self.call_rpc("svc:list", "terminal.list", json!({"all": true}));
     }
 
     /// `svc:` 标签的 RPC 回复。
@@ -81,14 +83,21 @@ impl App {
                 return;
             }
         };
-        // core 的终端名与标签 → 地址；已结束的终端不在清单里。
+        // core 的终端名与标签 → 地址；已结束的终端单独记，保留台账、不再拉起。
         let mut live: BTreeMap<String, String> = BTreeMap::new();
-        let mut addresses: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut live_addresses: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut finished_addresses: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for terminal in &terminals {
             let Some(address) = terminal.get("address").and_then(Value::as_str) else {
                 continue;
             };
-            addresses.insert(address.to_string());
+            if terminal.get("state").and_then(Value::as_str) == Some("finished") {
+                finished_addresses.insert(address.to_string());
+                continue;
+            }
+            live_addresses.insert(address.to_string());
             if let Some(name) = terminal.get("name").and_then(Value::as_str) {
                 live.insert(name.to_string(), address.to_string());
             }
@@ -115,8 +124,9 @@ impl App {
                 None => true,
                 Some(generation) => generation != entry.generation,
             };
-            let live = addresses.contains(&entry.terminal);
-            if !stale && live {
+            let live = live_addresses.contains(&entry.terminal);
+            if !stale && (live || finished_addresses.contains(&entry.terminal)) {
+                // 活着的认领；已结束的保留台账，这正是「不自动重启」。
                 kept.push(entry);
                 continue;
             }

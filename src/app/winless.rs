@@ -111,7 +111,8 @@ fn socket_in(runtime: &std::path::Path, session: &str) -> std::path::PathBuf {
     runtime.join("herdr-core").join(format!("{session}.sock"))
 }
 
-fn core_alive(config: &Config) -> bool {
+/// 本会话已经有一个可连的 core；不按需拉起。
+pub fn core_alive(config: &Config) -> bool {
     core_socket(config).is_some_and(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
 }
 

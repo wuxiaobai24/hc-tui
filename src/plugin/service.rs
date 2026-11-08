@@ -22,6 +22,20 @@ pub const MISSING_PROGRAM: &str = "missing_program";
 /// 声明与文件系统不一致（cwd 缺失等）。
 pub const UNAVAILABLE: &str = "unavailable";
 
+/// 终端活着，程序还没起来（core 的 `spawn_pending`）。
+pub const STARTING: &str = "starting";
+/// 终端活着，程序在跑。
+pub const RUNNING: &str = "running";
+/// 程序自己结束了（正常退出或被杀），不自动重启。
+pub const EXITED: &str = "exited";
+/// 起不来：`argv` 程序缺失，或启动后 [`FAILURE_WINDOW_MS`] 内非 0 退出。
+pub const FAILED: &str = "failed";
+/// 没有终端记录：未启动、包已停用，或 core 不在。
+pub const STOPPED: &str = "stopped";
+
+/// 启动后这么快就以非 0 结束，说明它根本没起来。
+pub const FAILURE_WINDOW_MS: u64 = 1000;
+
 /// 规划或探测失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanError {
@@ -59,6 +73,38 @@ pub struct Plan {
     pub env: BTreeMap<String, String>,
     /// 日志文件的绝对路径。
     pub log: Option<PathBuf>,
+}
+
+/// `packages list` 里一条服务的运行状态；唯一来源是 core 的 `terminal.list`。
+///
+/// 没有本地 PID 探测：`pid` 只是 core 记录里的字段，用于展示。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ServiceStatus {
+    /// `<package>.<service>`。
+    pub id: String,
+    /// [`STARTING`] / [`RUNNING`] / [`EXITED`] / [`FAILED`] / [`STOPPED`]。
+    pub state: &'static str,
+    /// core 的终端地址；没有终端记录时为 `null`。
+    pub terminal: Option<String>,
+    /// 活终端的进程号。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u64>,
+    /// 失败或结束的原因。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ServiceStatus {
+    /// 已停用包的服务：不跑，也不去探测程序。
+    pub fn stopped(info: &ServiceInfo) -> Self {
+        Self {
+            id: info.name.clone(),
+            state: STOPPED,
+            terminal: None,
+            pid: None,
+            reason: None,
+        }
+    }
 }
 
 /// 当前时间的毫秒；台账的 `started_ms`。
@@ -156,10 +202,7 @@ pub fn plan(info: &ServiceInfo, data_root: &Path) -> Result<Plan, PlanError> {
         }
         None => Some(info.root.display().to_string()),
     };
-    let log = info
-        .log
-        .as_ref()
-        .map(|log| data_dir(data_root, &info.package).join(log));
+    let log = log_path(info, data_root);
     if let Some(path) = &log {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| PlanError {
@@ -215,6 +258,142 @@ pub fn run_params(plan: &Plan) -> Value {
 pub fn missing_program(info: &ServiceInfo) -> Option<PlanError> {
     let first = info.argv.first()?;
     resolve_program(first, &info.root).err()
+}
+
+/// 服务的日志绝对路径；没有声明 `log` 时为 `None`。
+pub fn log_path(info: &ServiceInfo, state_root: &Path) -> Option<PathBuf> {
+    info.log
+        .as_ref()
+        .map(|log| data_dir(state_root, &info.package).join(log))
+}
+
+/// 日志文件的最后 `lines` 行。
+pub fn log_tail(path: &Path, lines: usize) -> std::io::Result<String> {
+    let text = std::fs::read_to_string(path)?;
+    let all: Vec<&str> = text.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    Ok(all[start..].join("\n"))
+}
+
+/// 一条服务的状态：core 的终端记录优先，没有记录才看声明的程序在不在。
+pub fn status(info: &ServiceInfo, terminals: &[Value]) -> ServiceStatus {
+    let name = terminal_name(&info.package, &info.service);
+    let matches = |terminal: &&Value| {
+        terminal.get("name").and_then(Value::as_str) == Some(name.as_str())
+            || terminal
+                .pointer("/labels/hctui.service")
+                .and_then(Value::as_str)
+                == Some(info.name.as_str())
+    };
+    let finished =
+        |terminal: &&Value| terminal.get("state").and_then(Value::as_str) == Some("finished");
+    let newest = |wanted_finished: bool| {
+        terminals
+            .iter()
+            .filter(&matches)
+            .filter(|terminal| finished(terminal) == wanted_finished)
+            .max_by_key(|terminal| {
+                terminal
+                    .get("created_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            })
+    };
+    if let Some(record) = newest(false) {
+        let pending = record.get("reason").and_then(Value::as_str) == Some("spawn_pending");
+        let pid = record.get("pid").and_then(Value::as_u64);
+        return ServiceStatus {
+            id: info.name.clone(),
+            state: if pending || pid.is_none() {
+                STARTING
+            } else {
+                RUNNING
+            },
+            terminal: record
+                .get("address")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            pid,
+            reason: pending.then(|| "spawn pending".to_string()),
+        };
+    }
+    if let Some(record) = newest(true) {
+        return ServiceStatus {
+            id: info.name.clone(),
+            state: if failed_at_once(record) {
+                FAILED
+            } else {
+                EXITED
+            },
+            terminal: record
+                .get("address")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            pid: None,
+            reason: Some(finish_reason(record)),
+        };
+    }
+    let failure = if info.argv.is_empty() {
+        Some(PlanError {
+            kind: UNAVAILABLE,
+            message: "service argv is empty".to_string(),
+        })
+    } else {
+        missing_program(info)
+    };
+    match failure {
+        Some(error) => ServiceStatus {
+            id: info.name.clone(),
+            state: FAILED,
+            terminal: None,
+            pid: None,
+            reason: Some(error.to_string()),
+        },
+        None => ServiceStatus::stopped(info),
+    }
+}
+
+/// 启动后 [`FAILURE_WINDOW_MS`] 内以非 0 退出：这条服务没起来。被杀不算失败。
+fn failed_at_once(record: &Value) -> bool {
+    if record.get("reason").and_then(Value::as_str) == Some("killed") {
+        return false;
+    }
+    let code = record.get("exit_code").and_then(Value::as_i64);
+    if code.is_none_or(|code| code == 0) {
+        return false;
+    }
+    let created = record.get("created_ms").and_then(Value::as_u64);
+    let finished = record.get("finished_ms").and_then(Value::as_u64);
+    match (created, finished) {
+        (Some(created), Some(finished)) => finished.saturating_sub(created) <= FAILURE_WINDOW_MS,
+        _ => false,
+    }
+}
+
+/// core 的结束信息压成一行：`exit 3 after 0.2s`、`killed`、`signal 9`。
+fn finish_reason(record: &Value) -> String {
+    let core = record
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("exited");
+    let mut text = if core == "killed" {
+        core.to_string()
+    } else if let Some(code) = record.get("exit_code").and_then(Value::as_i64) {
+        format!("exit {code}")
+    } else if let Some(signal) = record.get("signal").and_then(Value::as_i64) {
+        format!("signal {signal}")
+    } else {
+        core.to_string()
+    };
+    let created = record.get("created_ms").and_then(Value::as_u64);
+    let finished = record.get("finished_ms").and_then(Value::as_u64);
+    if let (Some(created), Some(finished)) = (created, finished) {
+        text.push_str(&format!(
+            " after {:.1}s",
+            finished.saturating_sub(created) as f64 / 1000.0
+        ));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -316,6 +495,81 @@ mod tests {
         spec.cwd = Some("gone".into());
         let error = plan(&spec, &dir).unwrap_err();
         assert_eq!(error.kind, UNAVAILABLE);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn service_states_follow_the_core_terminal_records() {
+        use serde_json::json;
+        let dir = temp_dir("state");
+        std::fs::write(dir.join("watch.sh"), "#!/bin/sh\n").unwrap();
+        let spec = info(dir.clone(), &["./watch.sh"], Some("services/watch.log"));
+        let label = || json!({"hctui.service": "dev.example.svc.watch"});
+
+        let running = json!({
+            "address": "t2",
+            "name": terminal_name("dev.example.svc", "watch"),
+            "state": "live", "pid": 4242, "created_ms": 1000,
+            "labels": label(),
+        });
+        let status = super::status(&spec, &[running]);
+        assert_eq!(status.state, RUNNING);
+        assert_eq!(status.terminal.as_deref(), Some("t2"));
+        assert_eq!(status.pid, Some(4242));
+        assert_eq!(status.reason, None);
+
+        // 启动不到 1 秒就非 0 退出：failed，带原因。
+        let crash = json!({
+            "address": "t3", "name": "hcsvc-crash", "state": "finished",
+            "reason": "exited", "exit_code": 3,
+            "created_ms": 2000, "finished_ms": 2200, "labels": label(),
+        });
+        let status = super::status(&spec, &[crash]);
+        assert_eq!(status.state, FAILED);
+        assert_eq!(status.terminal.as_deref(), Some("t3"));
+        let reason = status.reason.unwrap();
+        assert!(reason.contains("exit 3"), "{reason}");
+        assert!(reason.contains("0.2s"), "{reason}");
+
+        // 跑久了才退出：exited，不是 failed。
+        let late = json!({
+            "address": "t4", "state": "finished", "reason": "exited", "exit_code": 1,
+            "created_ms": 1000, "finished_ms": 5000, "labels": label(),
+        });
+        assert_eq!(super::status(&spec, &[late]).state, EXITED);
+
+        // 被 kill：exited，原因保留。
+        let killed = json!({
+            "address": "t5", "state": "finished", "reason": "killed",
+            "created_ms": 1000, "finished_ms": 2000, "labels": label(),
+        });
+        let status = super::status(&spec, &[killed]);
+        assert_eq!(status.state, EXITED);
+        assert_eq!(status.reason.as_deref(), Some("killed after 1.0s"));
+
+        // 没有记录：stopped。
+        assert_eq!(super::status(&spec, &[]).state, STOPPED);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_missing_program_is_a_failed_service_without_a_terminal() {
+        let dir = temp_dir("failed-state");
+        let spec = info(dir.clone(), &["definitely-missing-hctui-svc"], None);
+        let status = super::status(&spec, &[]);
+        assert_eq!(status.state, FAILED);
+        assert_eq!(status.terminal, None);
+        assert!(status.reason.unwrap().contains("not on PATH"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_log_tail_reads_only_the_last_lines() {
+        let dir = temp_dir("tail");
+        let path = dir.join("watch.log");
+        std::fs::write(&path, "1\n2\n3\n").unwrap();
+        assert_eq!(log_tail(&path, 2).unwrap(), "2\n3");
+        assert_eq!(log_tail(&path, 9).unwrap(), "1\n2\n3");
         std::fs::remove_dir_all(dir).ok();
     }
 }
