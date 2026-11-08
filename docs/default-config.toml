@@ -1,0 +1,168 @@
+# hc-tui 默认配置
+# 由 `hc-tui config dump --defaults` 生成，与代码同源；勿手改。
+# 重新生成：HC_UPDATE_DEFAULT_CONFIG=1 cargo test -- config_default_file_is_current
+# 放到 ~/.config/hc-tui/config.toml 或用 `hc-tui config init` 写入。
+
+[ui]
+# 界面、布局与输入。布尔项写 true / false；宽度单位是列。
+# 侧栏是否显示，默认 true
+sidebar = true
+# 侧栏初始宽度（列），实际值夹在 min..=max 之间，默认 26
+sidebar_width = 26
+# 侧栏最小宽度（列），默认 18
+sidebar_min_width = 18
+# 侧栏最大宽度（列），默认 36
+sidebar_max_width = 36
+# 终端宽度不超过此值时进入手机单列布局（0 关闭），默认 64
+mobile_width_threshold = 64
+# 界面语言（auto / en / zh），默认 "auto"
+lang = "auto"
+# Tab 栏位置（top / bottom），默认 "top"
+tab_bar_position = "top"
+# Pane 边框策略（auto / always / titles / off），默认 "auto"
+pane_borders = "auto"
+# Pane 之间留空隙，默认 true
+pane_gaps = true
+# 沿 Pane 区域外沿画分隔线，默认 true
+pane_outer_borders = true
+# 在焦点 Pane 右缘画滚动条，默认 true
+pane_scrollbars = true
+# 边框上显示检测到的 Agent 名字，默认 false
+show_agent_labels_on_pane_borders = false
+# 只有一个 Tab 时隐藏 Tab 栏，默认 false
+hide_tab_bar_when_single_tab = false
+# 宿主键盘协议（auto / kitty / legacy），默认 "auto"
+keyboard_protocol = "auto"
+# 捕获鼠标事件，默认 true
+mouse_capture = true
+# 鼠标滚轮一次滚动的行数（至少 1），默认 3
+mouse_scroll_lines = 3
+# 选中即复制，默认 false
+copy_on_select = false
+# 打开 OSC 8 链接前先让用户输入 y 确认，默认 false
+confirm_open_link = false
+# 关闭前确认，默认 true
+confirm_close = true
+# 侧栏折叠形态（compact / hidden），默认 "compact"
+sidebar_collapsed_mode = "compact"
+# 光标绘制方式（native / drawn），默认 "native"
+host_cursor = "native"
+# 状态指示样式（dots / symbols），默认 "dots"
+status_indicators = "dots"
+# Agents 段排序（spaces / priority），默认 "spaces"
+agent_panel_sort = "spaces"
+# 新建 Tab 时先问名字，默认 true
+prompt_new_tab_name = true
+# 新建工作区时先问名字，默认 false
+prompt_new_workspace_name = false
+# 写给宿主终端的窗口标题模板，空字符串表示不改标题，默认 "{hostname}: {workspace}"
+window_title = "{hostname}: {workspace}"
+# Tab 栏右侧显示的 token 列表，默认 []
+tab_bar_right = []
+# 右侧 token 之间的分隔符，默认 " "
+tab_bar_right_separator = " "
+
+[terminal]
+# 新建终端与 scrollback。
+# 新建 Pane 的起始目录（follow / home / current / 固定路径），默认 "follow"
+new_cwd = "follow"
+# 新建 Pane 用的可执行文件，空表示交给 core 的默认 shell，默认 ""
+default_shell = ""
+# 每个终端保留的 scrollback 字节数，默认 8388608
+scrollback_bytes = 8388608
+
+[render]
+# 渲染节流。
+# 渲染帧率上限（1..=240），默认 30
+fps = 30
+
+[theme]
+# 主题。name 是内置主题名，或 auto / omarchy / ghostty 跟随终端主题。
+# 主题名（内置主题名 / auto / omarchy / ghostty），默认 "default"
+name = "default"
+# 跟随来源（auto / ghostty / omarchy / builtin），只在 name = "default" 时生效，默认 "auto"
+source = "auto"
+
+[notifications]
+# 通知投递。sound_path / done_path / request_path 未设置时用内置声音。
+# 投递方式（off / toast / system），默认 "toast"
+delivery = "toast"
+# 提示表面同时保留的条数（1..=20），默认 3
+toast_limit = 3
+# 播放通知声音，默认 false
+sound = false
+
+[session]
+# 启动时的会话行为。
+# 启动时从 core 的 doc 恢复布局，默认 true
+restore = true
+
+[keys]
+# 全部生效绑定：prefix+.. 需要先按前缀键，直接写 ctrl+alt+.. 表示终端模式下生效。
+# 同一按键绑到多个动作会告警，用 `hc-tui config check` 查看。
+# 键位预设（default / zellij），默认 "default"
+preset = "default"
+prefix = "ctrl+b"
+help = "prefix+?"
+settings = "prefix+s"
+detach = "prefix+q"
+reload_config = "prefix+shift+r"
+open_notification_target = "prefix+o"
+goto = "prefix+g"
+new_tab = "prefix+c"
+rename_tab = "prefix+shift+t"
+next_tab = "prefix+n"
+previous_tab = "prefix+p"
+move_tab_previous = ""
+move_tab_next = ""
+close_tab = "prefix+shift+x"
+new_workspace = "prefix+shift+n"
+rename_workspace = "prefix+shift+w"
+close_workspace = "prefix+shift+d"
+workspace_picker = "prefix+w"
+next_workspace = ""
+previous_workspace = ""
+split_vertical = "prefix+v"
+split_horizontal = "prefix+minus"
+focus_pane_left = "prefix+h"
+focus_pane_down = "prefix+j"
+focus_pane_up = "prefix+k"
+focus_pane_right = "prefix+l"
+cycle_pane_next = "prefix+tab"
+cycle_pane_previous = "prefix+backtab"
+last_pane = ""
+zoom = "prefix+z"
+stack_panes = "prefix+t"
+layout_next = "prefix+shift+l"
+layout_previous = "prefix+shift+j"
+float_pane = "prefix+f"
+float_pin = "prefix+shift+f"
+float_hide = "prefix+shift+h"
+close_pane = "prefix+x"
+rename_pane = "prefix+shift+p"
+kill_pane = "prefix+shift+k"
+move_pane = "prefix+m"
+resize_mode = "prefix+r"
+toggle_sidebar = "prefix+b"
+scroll_bottom = ""
+copy_mode = "prefix+leftbracket"
+next_agent = "prefix+a"
+chat = "prefix+shift+a"
+send_text = "prefix+i"
+interrupt = "prefix+shift+c"
+toggle_keep = "prefix+shift+o"
+remove_terminal = "prefix+shift+u"
+open_link = "prefix+u"
+edit_history = "prefix+e"
+read_pane = "prefix+slash"
+send_keys = "prefix+shift+i"
+wait_output = "prefix+shift+w"
+put_file = "prefix+shift+p"
+templates = "prefix+shift+t"
+machines = "prefix+shift+m"
+paste_image = "prefix+shift+v"
+
+[mods]
+# 模块签名。
+# 签名包信任根列表（base64 Ed25519 公钥或 .pub 文件路径），默认 []
+trust_roots = []

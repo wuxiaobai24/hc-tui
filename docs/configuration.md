@@ -107,139 +107,22 @@ fps = 30   # 帧循环上限，默认 30，夹在 1–240
 
 ## 默认配置参考
 
-以下按当前默认配置输出整理；`hc-tui --default-config` 是安装版本的准确参考。
-空字符串键位表示未绑定。默认存在三组重复绑定，覆盖办法见 [使用指南](usage.md#默认绑定冲突)。
+默认配置的唯一副本是仓库里的 [docs/default-config.toml](default-config.toml)，与代码同源：
 
-```toml
-# hc-tui configuration
-# Place at ~/.config/hc-tui/config.toml
-
-[ui]
-sidebar = true
-sidebar_width = 26
-sidebar_min_width = 18
-sidebar_max_width = 36
-mobile_width_threshold = 64   # 宽度 <= 此值走手机单列布局，0 关闭
-sidebar_start_collapsed = false
-lang = "auto"    # auto | en | zh，auto 跟随 locale
-tab_bar_position = "top"   # top | bottom
-pane_borders = "auto"      # auto | always | titles | off
-pane_gaps = true
-pane_outer_borders = true
-pane_scrollbars = true
-show_agent_labels_on_pane_borders = false
-hide_tab_bar_when_single_tab = false
-mouse_capture = true
-keyboard_protocol = "auto"  # auto | kitty | legacy
-mouse_scroll_lines = 3
-copy_on_select = false
-confirm_open_link = false
-confirm_close = true
-sidebar_collapsed_mode = "compact" # compact | hidden
-host_cursor = "native"      # native | drawn
-status_indicators = "dots"   # dots | symbols
-agent_panel_sort = "spaces" # spaces | priority
-prompt_new_tab_name = true
-prompt_new_workspace_name = false
-window_title = "{hostname}: {workspace}"
-tab_bar_right = []
-tab_bar_right_separator = " "
-
-[terminal]
-scrollback_bytes = 8388608
-new_cwd = "follow"   # follow | home | current | 固定路径
-default_shell = ""
-
-[theme]
-name = "default"
-# [theme.custom]
-# accent = "#89b4fa"
-
-[notifications]
-delivery = "toast"   # off | toast | system
-toast_limit = 3      # 提示表面同时保留的条数
-sound = false
-# sound_path = "/path/to/notification.mp3"
-# done_path = "/path/to/done.mp3"
-# request_path = "/path/to/request.mp3"
-
-[session]
-restore = true
-
-[keys]
-preset = "default"   # default | zellij
-prefix = "ctrl+b"
-help = "prefix+?"
-settings = "prefix+s"
-detach = "prefix+q"
-reload_config = "prefix+shift+r"
-open_notification_target = "prefix+o"
-goto = "prefix+g"
-new_tab = "prefix+c"
-rename_tab = "prefix+shift+t"
-next_tab = "prefix+n"
-previous_tab = "prefix+p"
-move_tab_previous = ""
-move_tab_next = ""
-close_tab = "prefix+shift+x"
-new_workspace = "prefix+shift+n"
-rename_workspace = "prefix+shift+w"
-close_workspace = "prefix+shift+d"
-workspace_picker = "prefix+w"
-next_workspace = ""
-previous_workspace = ""
-split_vertical = "prefix+v"
-split_horizontal = "prefix+minus"
-focus_pane_left = "prefix+h"
-focus_pane_down = "prefix+j"
-focus_pane_up = "prefix+k"
-focus_pane_right = "prefix+l"
-cycle_pane_next = "prefix+tab"
-cycle_pane_previous = "prefix+backtab"
-last_pane = ""
-zoom = "prefix+z"
-stack_panes = "prefix+t"
-layout_next = "prefix+shift+l"
-layout_previous = "prefix+shift+j"
-float_pane = "prefix+f"
-float_pin = "prefix+shift+f"
-float_hide = "prefix+shift+h"
-close_pane = "prefix+x"
-rename_pane = "prefix+shift+p"
-kill_pane = "prefix+shift+k"
-move_pane = "prefix+m"
-resize_mode = "prefix+r"
-toggle_sidebar = "prefix+b"
-scroll_bottom = ""
-copy_mode = "prefix+leftbracket"
-next_agent = "prefix+a"
-chat = "prefix+shift+a"
-send_text = "prefix+i"
-interrupt = "prefix+shift+c"
-toggle_keep = "prefix+shift+o"
-remove_terminal = "prefix+shift+u"
-open_link = "prefix+u"
-edit_history = "prefix+e"
-read_pane = "prefix+slash"
-send_keys = "prefix+shift+i"
-wait_output = "prefix+shift+w"
-put_file = "prefix+shift+p"
-templates = "prefix+shift+t"
-machines = "prefix+shift+m"
-paste_image = "prefix+shift+v"
-
-# 自定义命令：key 支持 prefix+... 或 ctrl+alt+...；type 为 shell / pane / popup / action
-# [[keys.command]]
-# key = "prefix+alt+g"
-# type = "popup"
-# command = "lazygit"
-# width = "80%"
-# height = "80%"
-
-# 内置主题：default, catppuccin, catppuccin-latte, tokyo-night, dracula, nord, gruvbox, one-dark, solarized, kanagawa, rose-pine, vesper
-# 主题 token：accent, agent_blocked, agent_done, agent_error, agent_idle, agent_unknown, agent_working, badge_bg, badge_fg, bg, border, border_focused, cursor_bg, cursor_fg, dim, fg, selection_bg, selection_fg, sidebar_bg, sidebar_title, status_bar_bg, status_bar_fg, tab_active_bg, tab_active_fg, tab_bar_bg, tab_bar_fg, toast_bg, toast_fg
-
+```console
+$ hc-tui config dump --defaults | diff - docs/default-config.toml && echo same
+same
 ```
+
+空字符串键位表示未绑定；默认存在三组重复绑定，覆盖办法见
+[使用指南](usage.md#默认绑定冲突)。改动默认值或注释后重新生成：
+
+```console
+$ HC_UPDATE_DEFAULT_CONFIG=1 cargo test -- config_default_file_is_current
+```
+
+`tests/config_dump.rs::config_default_file_is_current` 逐字节比对 `config dump --defaults`
+与仓库文件，文件过期就让测试红。
 
 ## 常用选项的含义
 
@@ -362,7 +245,7 @@ preset = "zellij"  # default | zellij
 
 Zellij 模式键、锁定直通和鼠标替代操作见 [交互操作](interaction.md)。
 
-## 检查与重置
+## 检查、导出与重置
 
 `hc-tui config check [--config <path>]` 解析配置文件并逐条报出问题：错误写成
 `文件:行:列: 原因`，可以直接定位到出错的行。解析通过时列出主题（含来源行）、
@@ -399,3 +282,37 @@ $ hc-tui config reset-keys --config ~/.config/hc-tui/config.toml
 带 `--yes` 时先备份到 `config.toml.bak.<时间戳>`，再只替换 `[keys]` 段；
 其它段（含 `[[keys.command]]`、`[[panels]]`）原样保留。文件里没有 `[keys]` 段时
 不做任何事，也不写备份。
+
+## 导出与初始化
+
+`hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]`
+把整份配置按固定顺序写成 TOML：段顺序固定，每段和每个键带注释与默认值提示，
+运行时字段（配置文件路径、状态路径、加载期警告与错误）不写盘。
+
+- `--effective`（默认）：当前生效的配置，包含 `[keys]` 的全部生效绑定。
+- `--defaults`：内置默认值，与 [docs/default-config.toml](default-config.toml) 逐字节相同。
+- `--minimal`：只输出与默认值不同的键，用来管理自己的差异。
+
+```console
+$ hc-tui config dump --out /tmp/c.toml
+已写入 /tmp/c.toml（生效配置）
+$ hc-tui config check --config /tmp/c.toml >/dev/null; echo $?
+0
+```
+
+导出的文件可以原样当配置用：`config check` 通过，再用 `--config` 导出一次与第一次
+逐字节相同。`--out` 的父目录不存在时报错，不自动建目录。配置文件有错误时 `dump`
+直接拒绝，先跑 `config check` 修掉。
+
+`hc-tui config init [--path <path>] [--force]` 把 `dump --defaults` 的内容写到用户
+配置路径（默认 `~/.config/hc-tui/config.toml`，按 `XDG_CONFIG_HOME` 解析）：
+
+```console
+$ hc-tui config init
+已写入 /home/me/.config/hc-tui/config.toml
+$ hc-tui config init
+exit 1: /home/me/.config/hc-tui/config.toml 已存在；加 --force 覆盖（覆盖前会备份成 .bak.<时间戳>）
+```
+
+目标已存在时拒绝覆盖；加 `--force` 时先把它备份成 `config.toml.bak.<时间戳>`
+再写入。

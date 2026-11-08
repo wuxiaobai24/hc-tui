@@ -4,6 +4,7 @@ use hc_tui::i18n::{t, t1, t2, t3};
 mod cli {
     pub mod completion;
     pub mod config;
+    pub mod config_dump;
 }
 
 fn main() -> Result<()> {
@@ -151,6 +152,10 @@ fn usage() {
     );
     println!("       hc-tui completion zsh|bash|fish");
     println!("       hc-tui config check|reset-keys [--config <path>] [--yes]");
+    println!(
+        "       hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]"
+    );
+    println!("       hc-tui config init [--path <path>] [--force]");
     println!(
         "{}",
         t("       hc-tui notify <text> [--level info|warn|error] [--action <name>] [--target <terminal|pane>]")
