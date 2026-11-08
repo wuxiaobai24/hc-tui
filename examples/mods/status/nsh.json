@@ -1,0 +1,9 @@
+{
+  "name": "Status",
+  "id": "dev.hctui.mods.status",
+  "version": "1.0.0",
+  "build": 1,
+  "capabilities": {
+    "host": ["state"]
+  }
+}

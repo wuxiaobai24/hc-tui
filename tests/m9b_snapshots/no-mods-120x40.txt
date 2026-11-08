@@ -1,0 +1,80 @@
+row00 | Spaces                + │   1      2      +                                                                     menu   |
+sty00 |7xReset/Reset/BOLD;21xReset/Reset/NONE;7xReset/Rgb(0, 200, 200)/BOLD;85xReset/Reset/NONE|
+row01 |                         │ starting                                                                                     |
+sty01 |120xReset/Reset/NONE|
+row02 | ▾ This computer      ●  │                                                                                              |
+sty02 |120xReset/Reset/NONE|
+row03 |  W  work                │                                                                                              |
+sty03 |1xReset/Rgb(43, 76, 140)/NONE;3xReset/Rgb(58, 166, 106)/BOLD;5xReset/Rgb(43, 76, 140)/BOLD;16xReset/Rgb(43, 76, 140)/NONE;95xReset/Reset/NONE|
+row04 |                         │                                                                                              |
+sty04 |120xReset/Reset/NONE|
+row05 | new              ● menu │                                                                                              |
+sty05 |4xReset/Reset/BOLD;14xReset/Reset/NONE;1xReset/Reset/BOLD;101xReset/Reset/NONE|
+row06 |─────────────────────────│                                                                                              |
+sty06 |120xReset/Reset/NONE|
+row07 | Agents           grouped│                                                                                              |
+sty07 |7xReset/Reset/BOLD;113xReset/Reset/NONE|
+row08 |  (no agents)            │                                                                                              |
+sty08 |120xReset/Reset/NONE|
+row09 |                         │                                                                                              |
+sty09 |120xReset/Reset/NONE|
+row10 |                         │                                                                                              |
+sty10 |120xReset/Reset/NONE|
+row11 |                         │                                                                                              |
+sty11 |120xReset/Reset/NONE|
+row12 |                         │                                                                                              |
+sty12 |120xReset/Reset/NONE|
+row13 |                         │                                                                                              |
+sty13 |120xReset/Reset/NONE|
+row14 |                         │                                                                                              |
+sty14 |120xReset/Reset/NONE|
+row15 |                         │                                                                                              |
+sty15 |120xReset/Reset/NONE|
+row16 |                         │                                                                                              |
+sty16 |120xReset/Reset/NONE|
+row17 |                         │                                                                                              |
+sty17 |120xReset/Reset/NONE|
+row18 |                         │                                                                                              |
+sty18 |120xReset/Reset/NONE|
+row19 |                         │                                                                                              |
+sty19 |120xReset/Reset/NONE|
+row20 |                         │                                                                                              |
+sty20 |120xReset/Reset/NONE|
+row21 |                         │                                                                                              |
+sty21 |120xReset/Reset/NONE|
+row22 |                         │                                                                                              |
+sty22 |120xReset/Reset/NONE|
+row23 |                         │                                                                                              |
+sty23 |120xReset/Reset/NONE|
+row24 |                         │                                                                                              |
+sty24 |120xReset/Reset/NONE|
+row25 |                         │                                                                                              |
+sty25 |120xReset/Reset/NONE|
+row26 |                         │                                                                                              |
+sty26 |120xReset/Reset/NONE|
+row27 |                         │                                                                                              |
+sty27 |120xReset/Reset/NONE|
+row28 |                         │                                                                                              |
+sty28 |120xReset/Reset/NONE|
+row29 |                         │                                                                                              |
+sty29 |120xReset/Reset/NONE|
+row30 |                         │                                                                                              |
+sty30 |120xReset/Reset/NONE|
+row31 |                         │                                                                                              |
+sty31 |120xReset/Reset/NONE|
+row32 |                         │                                                                                              |
+sty32 |120xReset/Reset/NONE|
+row33 |                         │                                                                                              |
+sty33 |120xReset/Reset/NONE|
+row34 |                         │                                                                                              |
+sty34 |120xReset/Reset/NONE|
+row35 |                         │                                                                                              |
+sty35 |120xReset/Reset/NONE|
+row36 |                         │                                                                                              |
+sty36 |120xReset/Reset/NONE|
+row37 |                         │                                                                                              |
+sty37 |120xReset/Reset/NONE|
+row38 |                         │                                                                                              |
+sty38 |120xReset/Reset/NONE|
+row39 |                         │  connecting                                                                       connecting |
+sty39 |120xReset/Reset/NONE|

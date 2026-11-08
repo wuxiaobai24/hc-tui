@@ -19,6 +19,12 @@ const THEMES: &str = include_str!("fixtures/m9b_themes.toml");
 const SIDEBAR_TSX: &str = include_str!("../examples/mods/sidebar/App.tsx");
 const SIDEBAR_MANIFEST: &str = include_str!("../examples/mods/sidebar/hctui.toml");
 const SIDEBAR_NSH: &str = include_str!("../examples/mods/sidebar/nsh.json");
+const TABS_TSX: &str = include_str!("../examples/mods/tabs/App.tsx");
+const TABS_MANIFEST: &str = include_str!("../examples/mods/tabs/hctui.toml");
+const TABS_NSH: &str = include_str!("../examples/mods/tabs/nsh.json");
+const STATUS_TSX: &str = include_str!("../examples/mods/status/App.tsx");
+const STATUS_MANIFEST: &str = include_str!("../examples/mods/status/hctui.toml");
+const STATUS_NSH: &str = include_str!("../examples/mods/status/nsh.json");
 
 #[derive(serde::Deserialize)]
 struct ThemesFile {
@@ -112,9 +118,10 @@ fn fixture_state(app: &mut App) {
     app.active_ws = 0;
 }
 
-fn app_with_sidebar() -> (App, PathBuf) {
+fn app_with_regions() -> (App, PathBuf) {
     let root = unique_dir("app");
-    let config = config_in(&root, parity_theme());
+    let mut config = config_in(&root, parity_theme());
+    config.zellij_keys = true;
     install_module(
         &config,
         "sidebar",
@@ -122,6 +129,22 @@ fn app_with_sidebar() -> (App, PathBuf) {
         SIDEBAR_NSH,
         "{\"host\":[\"state\"]}",
         SIDEBAR_TSX,
+    );
+    install_module(
+        &config,
+        "tabs",
+        TABS_MANIFEST,
+        TABS_NSH,
+        "{\"host\":[\"state\"]}",
+        TABS_TSX,
+    );
+    install_module(
+        &config,
+        "status",
+        STATUS_MANIFEST,
+        STATUS_NSH,
+        "{\"host\":[\"state\"]}",
+        STATUS_TSX,
     );
     let mut app = App::new(config).expect("app builds");
     fixture_state(&mut app);
@@ -175,7 +198,7 @@ fn click(app: &mut App, column: u16, row: u16) {
 
 #[test]
 fn sidebar_selection_follows_prefix_and_workspace_picker() {
-    let (mut app, root) = app_with_sidebar();
+    let (mut app, root) = app_with_regions();
     assert_eq!(app.active_ws, 0);
     let before = screen(&mut app, 80, 24);
     assert!(before.contains("one"), "screen: {before}");
@@ -209,7 +232,7 @@ fn sidebar_selection_follows_prefix_and_workspace_picker() {
 
 #[test]
 fn sidebar_rows_answer_mouse_clicks() {
-    let (mut app, root) = app_with_sidebar();
+    let (mut app, root) = app_with_regions();
     let before = screen(&mut app, 80, 24);
     assert!(before.lines().any(|line| line.contains("This computer")));
     assert_eq!(app.active_ws, 0);
@@ -232,7 +255,7 @@ fn sidebar_rows_answer_mouse_clicks() {
 
 #[test]
 fn tab_bar_switches_and_adds_tabs_by_key() {
-    let (mut app, root) = app_with_sidebar();
+    let (mut app, root) = app_with_regions();
     let tabs = |app: &App| {
         app.workspace()
             .map(|workspace| (workspace.active, workspace.tabs.len()))
@@ -251,23 +274,40 @@ fn tab_bar_switches_and_adds_tabs_by_key() {
         "screen: {frame}"
     );
 
+    // zellij 的 Tab 模式：Ctrl+t 进入，l/h 左右切换，n 新建。
+    ctrl(&mut app, KeyCode::Char('t'));
+    assert_eq!(format!("{:?}", app.keyboard_mode), "Tab");
+    key(&mut app, KeyCode::Char('l'));
+    assert_eq!(tabs(&app).0, 1);
+    key(&mut app, KeyCode::Char('h'));
+    assert_eq!(tabs(&app).0, 0);
+    // 仍在 Tab 模式里：`n` 新建一个 Tab 并退出模式。
+    key(&mut app, KeyCode::Char('n'));
+    assert_eq!(tabs(&app).1, 3);
+    assert_eq!(tabs(&app).0, 2);
+    assert_eq!(format!("{:?}", app.keyboard_mode), "Normal");
+
     // `+` 命中域在 Tab 栏行末尾之前：真实鼠标点击新建一个 Tab。
     let add = app.tab_add;
     assert!(add.width > 0, "tab add hit: {add:?}");
     click(&mut app, add.x, add.y);
-    assert_eq!(tabs(&app).1, 3);
+    assert_eq!(tabs(&app).1, 4);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn status_line_is_read_only() {
-    let (mut app, root) = app_with_sidebar();
+    let (mut app, root) = app_with_regions();
     let status_row = |app: &mut App| {
         let frame = screen(app, 80, 24);
         frame.lines().last().unwrap_or_default().to_string()
     };
     let before = status_row(&mut app);
     assert!(!before.trim().is_empty(), "status row: {before:?}");
+    assert!(
+        app.mod_regions.iter().any(|region| region.id == "status"),
+        "status module must own the mode line"
+    );
     for code in [
         KeyCode::Char('j'),
         KeyCode::Char('k'),

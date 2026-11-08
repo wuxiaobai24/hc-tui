@@ -1,0 +1,11 @@
+[mod]
+id = "tabs"
+title = "Tabs"
+place = "none"
+size = 1
+focusable = false
+host_api = 1
+
+[grants]
+host = ["state"]
+events = ["state.changed", "focus.changed", "app.ready"]
