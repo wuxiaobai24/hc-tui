@@ -228,6 +228,10 @@ hc-tui packages log <package> --service <id> [-n 100]   # 服务 stdout/stderr �
 
 `packages list` 的状态由一次 `terminal.list {all: true}` 推出：活终端是 `running`（`spawn_pending` 或还没有 pid 时是 `starting`），已结束的记录是 `exited`，启动后 1 秒内非 0 退出或 `argv` 程序缺失是 `failed` 并带原因，没有终端记录是 `stopped`。已结束的终端记录不会被自动重起：台账继续指向它，直到声明消失或代际变化。`--json` 每项的服务数组是 `services: [{id, state, terminal, pid?, reason?}]`；没有 core 时状态只按声明推出（缺程序判 `failed`，其余 `stopped`），不会按需拉起 core。
 
+服务出问题要让人从 `issues` 上看得到：有 `failed` 服务时 `issues` 里加一条汇总 `service check failed: <失败数> of <声明的服务数> services`，每包至多一条。明细留在 `services[]` 的 `state` 与 `reason`（例如 `missing_program: ... is not on PATH`）；按包把 N 个服务各写一条会把这个包的 `issues` 刷成服务清单，汇总回答「这个包有没有服务起不来」，具体是哪一条、为什么，看 `services[]`。文本输出与 `--json` 的 `issues`、`services` 都来自同一份状态数组。
+
+服务声明的 `argv` 程序是否存在，按 hc-tui CLI 进程的 `PATH` 判定（`src/plugin/service.rs` 的 `which`），core 所在机器的 `PATH` 不参与。已知偏差：CLI 与 core 同机且两边 `PATH` 一致时这个判定等价；跨机时远端 core 上缺的程序会被报成 `failed`，远端 core 上有、本机 `PATH` 里没有的程序同样报 `failed`。按目标机器探测 `PATH` 属于 `requires_programs` 那套（`[[terminals]]`，`plugins pane open` 时用 `machine.exec`），服务物化暂未接。
+
 ## 6. 多机
 
 | 位置 | 含义 | 插件在哪一侧运行 |
@@ -325,7 +329,7 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 | `packages gc` | 显式回收：删除没有记录指向、也没有任何 pin 的代际 |
 | `packages enable` / `packages disable <id>` | 只改变记录里的启用状态；动作、终端入口与模块表面同时生效 |
 
-`packages list` 一行一个包，在启用状态后打出能力徽章：`A` 动作、`T` 终端入口、`M` 界面模块；有服务时再跟 `s:在跑/总数`，有失败服务时带 `✗`，每个服务另起一行给出状态、终端地址与原因。`packages list --json` 每项包含 `id`、`name`、`version`、`source`、`generation`、`enabled`、`capabilities`、`module`（未声明时为 `null`）、`issues` 与 `services`；记录里没有 `capabilities` 的旧版本会先按清单回填再输出。`packages log <id> --service <service>` 读该服务声明 `log` 的文件尾部，日志还不存在时报 `no log for <包>.<服务>`。
+`packages list` 一行一个包，在启用状态后打出能力徽章：`A` 动作、`T` 终端入口、`M` 界面模块；有服务时再跟 `s:在跑/总数`，有失败服务时带 `✗`，每个服务另起一行给出状态、终端地址与原因。`issues` 里的服务相关条目每包至多一条汇总（`service check failed: 1 of 2 services`），明细看 `services[]`。`packages list --json` 每项包含 `id`、`name`、`version`、`source`、`generation`、`enabled`、`capabilities`、`module`（未声明时为 `null`）、`issues` 与 `services`；记录里没有 `capabilities` 的旧版本会先按清单回填再输出。`packages log <id> --service <service>` 读该服务声明 `log` 的文件尾部，日志还不存在时报 `no log for <包>.<服务>`。
 
 `records/<id>.json` 记录来源、清单哈希、代际、启用状态与安装时间。安装前显示 `id`、版本、`host_api`、平台、动作与终端入口、`requires_programs`；确认后才注册。构建失败不替换旧代际；`current` 指针切换使用临时目录加 rename。
 

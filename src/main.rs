@@ -796,6 +796,10 @@ fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
                 }
             })
             .collect();
+        // 文本与 `--json` 共用这一份 issues：服务汇总从刚填好的 `services` 推出。
+        if let Some(issue) = hc_tui::plugin::service::issue_summary(&entry.services) {
+            entry.issues.push(issue);
+        }
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
