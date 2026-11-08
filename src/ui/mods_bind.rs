@@ -48,10 +48,11 @@ pub fn layout(app: &mut App, area: Rect) -> Plan {
         let Some(rect) = builtin_rect(&builtin, builtin_name) else {
             continue;
         };
-        if !app.ensure_region_module(module) {
+        let props = region_props(app, builtin_name);
+        if !app.ensure_region_module(module, props.clone()) {
             continue;
         }
-        if !bind_block(&mut tree.root, builtin_name, module, rect) {
+        if !bind_block(&mut tree.root, builtin_name, module, rect, props) {
             continue;
         }
         match builtin_name {
@@ -98,13 +99,32 @@ fn builtin_rect(layout: &ChromeLayout, name: &str) -> Option<Rect> {
     }
 }
 
+/// 区域模块随包打开的启动参数；配置项不在 `state` 里，只能随包会话固定。
+fn region_props(app: &App, builtin: &str) -> serde_json::Value {
+    match builtin {
+        "spaces" => serde_json::json!({
+            "sort": match app.config.agent_sort {
+                crate::config::AgentSort::Priority => "priority",
+                crate::config::AgentSort::Spaces => "grouped",
+            },
+        }),
+        _ => serde_json::json!({}),
+    }
+}
+
 /// 把 `builtin` 区域的块换成模块块，尺寸取该区域这一帧的矩形。
-fn bind_block(node: &mut ChromeNode, name: &str, module: &str, rect: Rect) -> bool {
+fn bind_block(
+    node: &mut ChromeNode,
+    name: &str,
+    module: &str,
+    rect: Rect,
+    props: serde_json::Value,
+) -> bool {
     match node {
         ChromeNode::Row { children } | ChromeNode::Column { children } => {
             let mut found = false;
             for child in children.iter_mut() {
-                found |= bind_block(child, name, module, rect);
+                found |= bind_block(child, name, module, rect, props.clone());
             }
             found
         }
@@ -118,7 +138,7 @@ fn bind_block(node: &mut ChromeNode, name: &str, module: &str, rect: Rect) -> bo
             }
             *content = ChromeContent::Mod {
                 r#mod: module.to_string(),
-                props: serde_json::json!({}),
+                props,
             };
             // 主轴方向决定声明哪个尺寸：侧栏在水平分组里，Tab 栏与模式行在垂直分组里。
             *size = Some(if name == "spaces" {

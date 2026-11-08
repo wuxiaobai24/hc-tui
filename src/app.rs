@@ -1259,7 +1259,7 @@ impl App {
     /// 该区域由内置实现渲染。
     ///
     /// 只在第一次绑定与插件代际变化时尝试打开：每帧重试会把包解析放到绘制路径上。
-    pub fn ensure_region_module(&mut self, mod_id: &str) -> bool {
+    pub fn ensure_region_module(&mut self, mod_id: &str, props: serde_json::Value) -> bool {
         if self.config.no_mods {
             return false;
         }
@@ -1280,7 +1280,7 @@ impl App {
         let opened = self.mods_open(
             mod_id,
             crate::mods::SurfacePlace::Region,
-            serde_json::json!({}),
+            props,
             None,
             None,
             None,

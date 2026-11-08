@@ -95,6 +95,7 @@ fn install_module(
 
 fn fixture_state(app: &mut App) {
     app.note.clear();
+    app.connection = hc_tui::app::Connection::Connecting;
     app.workspaces = vec![
         Workspace {
             origin: None,

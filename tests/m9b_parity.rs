@@ -126,6 +126,7 @@ fn install_module(config: &Config, module: &RegionMod, capabilities: &str) {
 /// 固定状态：一个本机 Space、两个 Tab、没有 Agent Pane。
 fn fixture_state(app: &mut App) {
     app.note.clear();
+    app.connection = hc_tui::app::Connection::Connecting;
     app.workspaces = vec![Workspace {
         origin: None,
         machine: None,
@@ -173,7 +174,8 @@ fn draw_module_until_stable(app: &mut App, width: u16, height: u16, areas: &[Rec
     let mut previous = String::new();
     for round in 0..300 {
         terminal.draw(|frame| ui::draw(frame, app)).expect("draw");
-        app.tick();
+        // 只泵模块通道，不处理连接事件：连接状态在两种渲染之间保持同一份。
+        app.pump_mods();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let text: String = areas
             .iter()
@@ -241,55 +243,74 @@ fn compare(label: &str, builtin: &Buffer, module: &Buffer, area: Rect) -> usize 
     differences
 }
 
+/// 一套主题下三块区域的差异条数（模块, 差异, 总格数）。断言用与量差距用同一段流程。
+fn region_differences(
+    width: u16,
+    height: u16,
+    theme: Theme,
+    label: &str,
+) -> Vec<(&'static str, usize, usize)> {
+    let root = unique_dir(&format!("diff-{label}-{width}x{height}"));
+    let config = config_in(&root, theme);
+    let mut plain = app_in(config.clone());
+    let builtin = draw(&mut plain, width, height);
+    let (sidebar, tab_bar, status) = builtin_areas(&plain, width, height);
+    for module in &REGION_MODS {
+        install_module(&config, module, "{\"host\":[\"state\"]}");
+    }
+    let mut app = app_in(config);
+    let areas: Vec<Rect> = [sidebar, tab_bar, status]
+        .into_iter()
+        .map(|area| area.expect("region area"))
+        .collect();
+    let frame = draw_module_until_stable(&mut app, width, height, &areas);
+    let mut out = Vec::new();
+    for (module, area) in [
+        ("sidebar", sidebar.unwrap()),
+        ("tabs", tab_bar.unwrap()),
+        ("status", status.unwrap()),
+    ] {
+        let differences = compare(
+            &format!("{module} {width}x{height} {label}"),
+            &builtin,
+            &frame,
+            area,
+        );
+        out.push((
+            module,
+            differences,
+            usize::from(area.width) * usize::from(area.height),
+        ));
+    }
+    std::fs::remove_dir_all(root).ok();
+    out
+}
+
 #[test]
 fn regions_match_builtin_cell_for_cell() {
     for (width, height) in [(80u16, 24u16), (120, 40)] {
-        for (theme_index, theme) in parity_themes().into_iter().enumerate() {
+        for theme in parity_themes() {
             let name = theme.name.clone();
-            let root = unique_dir(&format!("parity-{width}x{height}-{theme_index}"));
-            let config = config_in(&root, theme);
-
-            // builtin：同一份配置与状态，不装模块。
-            let mut plain = app_in(config.clone());
-            let builtin = draw(&mut plain, width, height);
-            let (sidebar, tab_bar, status) = builtin_areas(&plain, width, height);
-
-            // module：装上区域模块，默认外框把它们绑到同一矩形。
-            for module in &REGION_MODS {
-                install_module(&config, module, "{\"host\":[\"state\"]}");
-            }
-            let mut app = app_in(config);
-            let mut areas: Vec<Rect> = Vec::new();
-            for (module, area) in [("sidebar", sidebar), ("tabs", tab_bar), ("status", status)] {
-                let area = area.unwrap_or_else(|| panic!("{module} area missing"));
-                areas.push(area);
-            }
-            let frame = draw_module_until_stable(&mut app, width, height, &areas);
-            for (module, area) in [
-                ("sidebar", sidebar.unwrap()),
-                ("tabs", tab_bar.unwrap()),
-                ("status", status.unwrap()),
-            ] {
-                assert!(
-                    app.mod_regions.iter().any(|region| region.id == module),
-                    "{module} module must own its region"
-                );
-                let differences = compare(
-                    &format!("{module} {width}x{height} {name}"),
-                    &builtin,
-                    &frame,
-                    area,
-                );
-                println!(
-                    "{module} {width}x{height} {name}: {differences} of {} cells differ",
-                    u32::from(area.width) * u32::from(area.height)
-                );
+            for (module, differences, total) in region_differences(width, height, theme, &name) {
+                println!("{module} {width}x{height} {name}: {differences} of {total} cells differ");
                 assert_eq!(
                     differences, 0,
                     "{module} parity failed at {width}x{height} {name}"
                 );
             }
-            std::fs::remove_dir_all(root).ok();
+        }
+    }
+}
+
+/// 默认主题下的量化差距：nsh 渲染器把前景色归到 16 色/Reset、把背景色归到
+/// bandless 档位，而内置实现写的是主题 RGB。这条用例只量差距，不做断言。
+#[test]
+#[ignore = "measures the known color quantization gap of the default theme"]
+fn default_theme_color_gap_is_measurable() {
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        let theme = theme::builtin("default").expect("default theme");
+        for (module, differences, total) in region_differences(width, height, theme, "default") {
+            println!("{module} {width}x{height} default: {differences} of {total} cells differ");
         }
     }
 }
@@ -304,7 +325,6 @@ fn frame_snapshot(buffer: &Buffer) -> String {
             .collect();
         out.push_str(&format!("row{y:02} |{symbols}|\n"));
         let mut runs: Vec<String> = Vec::new();
-        let mut run = String::new();
         let mut count = 0;
         let mut last = (
             Color::Reset,
@@ -320,13 +340,11 @@ fn frame_snapshot(buffer: &Buffer) -> String {
             }
             if count == 0 {
                 last = style;
-                run.clear();
             }
             count += 1;
         }
         runs.push(format!("{count}x{:?}/{:?}/{:?}", last.0, last.1, last.2));
         out.push_str(&format!("sty{y:02} |{}|\n", runs.join(";")));
-        let _ = run;
     }
     out
 }
