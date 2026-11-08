@@ -407,6 +407,10 @@ pub struct App {
     pub mod_asks: Vec<crate::mods::ModAsk>,
     /// 已登记的通知队列，供 `notifications` 域与 `dismiss` 使用。
     pub mod_notifications: Vec<crate::mods::ModNotification>,
+    /// 内建 toast 当前显示的通知 ID；`dismiss` 按 id 只撤对应条目。
+    pub toast_notification: Option<String>,
+    /// 队列有变化，下一轮把 toast props 推给提示表面。
+    pub mod_toast_dirty: bool,
     /// 最近一次 `templates.list` 的结果缓存。
     pub mod_templates: Vec<serde_json::Value>,
     /// `run` 打开确认或表单时记下的 (request, 模块)。
@@ -455,6 +459,8 @@ pub struct App {
     pub focused_mod: Option<String>,
     /// 本轮绘制记录的模块区域；图形遮挡与焦点循环使用。
     pub mod_regions: Vec<crate::mods::chrome::ModRegion>,
+    /// 本轮布局算出的提示层覆盖区；外框没有 `toasts` 节点时为 `None`。
+    pub mod_toasts: Option<Rect>,
     pub tab_bar: Rect,
     /// Tab 栏右侧 `+` 按钮的区域。
     pub tab_add: Rect,
@@ -616,6 +622,7 @@ impl App {
             content: Rect::new(0, 0, 80, 24),
             chrome: crate::mods::chrome::Chrome::default_tree(&config),
             mod_regions: Vec::new(),
+            mod_toasts: None,
             mods_windows: std::collections::BTreeMap::new(),
             mods: crate::mods::ModRuntime::default(),
             mods_docked: std::collections::BTreeSet::new(),
@@ -642,6 +649,8 @@ impl App {
             mod_all_domains: false,
             mod_asks: Vec::new(),
             mod_notifications: Vec::new(),
+            toast_notification: None,
+            mod_toast_dirty: false,
             mod_templates: Vec::new(),
             mod_confirm: None,
             mod_action_rpc: std::collections::BTreeMap::new(),
@@ -993,6 +1002,7 @@ impl App {
         self.sync_package_modules();
         self.sync_mod_surfaces();
         self.pump_mods();
+        self.expire_mod_notifications(now);
         if self.restore_pending && now.duration_since(self.restore_since) >= RESTORE_TIMEOUT {
             self.restore_pending = false;
             self.ensure_layout();
@@ -1001,6 +1011,7 @@ impl App {
         }
         if self.toast.as_ref().is_some_and(|toast| now >= toast.until) {
             self.toast = None;
+            self.toast_notification = None;
             self.dirty = true;
         }
         // note 变了就重新开始计时；过期后清掉，不给屏幕留固定状态栏。
@@ -6687,13 +6698,16 @@ impl App {
             .unwrap_or_else(|| t1("pane {}", pane));
         let text = format!("{label} · {}", t(after.text()));
         self.last_attention = Some(pane);
+        let level = if after == Badge::Blocked {
+            "warn"
+        } else {
+            "info"
+        };
+        let timeout_ms = TOAST_LIFETIME.as_millis() as u64;
         match self.config.notifications {
             Delivery::Off => {}
             Delivery::Toast => {
-                self.toast = Some(Toast {
-                    text: text.clone(),
-                    until: Instant::now() + TOAST_LIFETIME,
-                });
+                self.register_notification(text, level, timeout_ms, None, None, None, false);
             }
             Delivery::System => {
                 if std::env::var_os("DISPLAY").is_some()
@@ -6706,10 +6720,7 @@ impl App {
                         .stderr(std::process::Stdio::null())
                         .spawn();
                 }
-                self.toast = Some(Toast {
-                    text,
-                    until: Instant::now() + TOAST_LIFETIME,
-                });
+                self.register_notification(text, level, timeout_ms, None, None, None, false);
             }
         }
         self.note = t1("{} needs attention (prefix o)", label);

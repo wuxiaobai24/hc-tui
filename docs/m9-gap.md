@@ -299,6 +299,8 @@
 
 渲染面积最小，宿主侧改动最深：新增表面形态、通知路由、队列、撤销与 z 序。排最后，见 §7。
 
+已由 base2 票解决：新增 `toast` 表面（不抢焦点、不参与 `Esc` 关覆盖层、z 序高于 pane 低于模态）；外框接受 `toasts` 节点并默认绑定；`notify`/宿主提醒进同一条队列，`props.changed` 推 `{ toasts, max }`，`dismiss` 按 id 撤销，超时由宿主计时；没有提示模块时内置 toast 行为不变。
+
 ## 6 通用缺口
 
 **G1 选择与输入的结果回传。** 计划承诺 `overlay.result`（`docs/plan-extensions.md:159`），代码里没有（`src/mods/host.rs:17-33`、`src/mods/mod.rs:14-27`）。模块打开另一个模块的选择器后拿不到选中值，宿主发起的输入也只能靠模块自己 `run` 结束。建议：**新增宿主方法 `ask`**（宿主→模块带 `props` 与超时，模块用 `answer` 回复），并**新增事件 `overlay.result`** 供打开方接收；只扩 props 无法闭环。
@@ -320,6 +322,8 @@
 **G6 提醒通道。** `notify` 丢 `level`（`src/app/mods.rs:285-296`），返回的 id 没登记（`src/app/mods.rs:685-698`），没有撤销方法，宿主自身生成的提醒不进模块（`src/app/mods.rs:691`）。状态行 `note` 也没有模块写入口（`src/app.rs:531`）。建议：**扩 `notify` 参数**（`level`、`action`、`target`、`surface`），**新增 `dismiss {id}`**，并把 `note` 并入 `notify {status: true}`。
 
 已由 base 票解决：`notify` 扩 `level`/`action`/`target`/`surface`/`status`，新增 `dismiss {id}`，宿主自身提示走 `status: true`。
+
+已由 base2 票补齐：宿主自身提醒（`status: true` 与 Agent blocked/done）进提示表面同一队列；`dismiss` 按 id 撤销，不再按文本相等匹配。
 
 **G7 动作覆盖与确认语义。** 补 5 个动作：`terminal.send`、`terminal.keys`、`terminal.wait`、`terminal.put`、`machine.rename`（对照 `src/app.rs:3816-3903` 与 `src/app/actions.rs:6-100`）。`run` 的 `confirmation_pending` 恒 `false`（`src/app/mods.rs:166`），返回即 `done`（`src/app/mods.rs:146-178`），异步失败不回传。建议：**扩 `run` 的语义**（如实置 `confirmation_pending`，异步动作在 `action.finished` 里带终态），不新增方法。
 

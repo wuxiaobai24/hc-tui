@@ -164,6 +164,9 @@ fn base_ticket_live_calls() {
         target: None,
         surface: None,
         created: 1,
+        created_ms: 1_000,
+        timeout_ms: 0,
+        since: std::time::Instant::now(),
     });
     // 第二个 Space：用来验证 `space` 过滤。
     app.new_workspace(Some("second".into()));

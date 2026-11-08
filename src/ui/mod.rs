@@ -78,6 +78,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let layout = app.chrome.layout(params);
     app.mod_regions = layout.mods.clone();
+    app.mod_toasts = layout.toasts;
 
     match (layout.sidebar, layout.rail) {
         (Some(rail), _) => render_sidebar(frame, app, rail, &theme),

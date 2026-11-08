@@ -1,8 +1,9 @@
 //! 外框树：hc-tui 界面的本机区域布局，与共享 Pane 树分开。
 //!
 //! 节点分三类：`row` / `column` 是分组，`block` 是区域。区域内容为内置界面
-//! （`{"builtin":"spaces"|"tabs"|"status"}`）、Pane 内容区（`{"content":"panes"}`，
-//! 恰好一个）或模块表面（`{"mod":"id","props":{}}`）。树保存在本地 state 的
+//! （`{"builtin":"spaces"|"tabs"|"status"|"toasts"}`）、Pane 内容区（`{"content":"panes"}`，
+//! 恰好一个）或模块表面（`{"mod":"id","props":{}}`）。`toasts` 是提示层标记，
+//! 不占布局，只声明模块提示层覆盖内容区。树保存在本地 state 的
 //! `mods_chrome`，不写共享文档。序列化形态见 docs/mods.md §4。
 //!
 //! 内置区域保留运行时动态行为：侧栏折叠成紧凑轨道、单 Tab 隐藏 Tab 栏、
@@ -190,6 +191,8 @@ pub struct ChromeLayout {
     pub status: Option<Rect>,
     /// 模块区域，按外框顺序。
     pub mods: Vec<ModRegion>,
+    /// 模块提示层覆盖区；外框声明了 `toasts` 节点时为内容区矩形，否则不渲染。
+    pub toasts: Option<Rect>,
 }
 
 /// 构造一个 `block` 节点。
@@ -227,6 +230,7 @@ impl Chrome {
         if bottom_tabs {
             column.push(block(TABS_BOTTOM_ID, ChromeSize::rows(1), builtin("tabs")));
         }
+        column.push(block("toasts", None, builtin("toasts")));
         column.push(block(STATUS_ID, ChromeSize::rows(1), builtin("status")));
         Chrome {
             root: ChromeNode::Row {
@@ -307,7 +311,28 @@ impl Chrome {
         if out.column == Rect::ZERO {
             out.column = panes;
         }
+        // 提示层不占布局，覆盖内容区；内置 Rust toast 用同一矩形。
+        if self.has_toasts() {
+            out.toasts = non_empty(panes);
+        }
         out
+    }
+
+    /// 外框是否声明了提示层标记。
+    pub fn has_toasts(&self) -> bool {
+        fn walk(node: &ChromeNode) -> bool {
+            match node {
+                ChromeNode::Row { children } | ChromeNode::Column { children } => {
+                    children.iter().any(walk)
+                }
+                ChromeNode::Block {
+                    content: ChromeContent::Builtin { builtin },
+                    ..
+                } => builtin == "toasts",
+                ChromeNode::Block { .. } => false,
+            }
+        }
+        walk(&self.root)
     }
 
     /// `mods.dock`：把模块绑定到指定位置。同 ID 区域先移除再插入。
@@ -373,6 +398,8 @@ impl Chrome {
                         }
                         None
                     }
+                    // 提示层不占布局，矩形在 `layout` 末尾按内容区补上。
+                    "toasts" => None,
                     _ => None,
                 },
                 ChromeContent::Mod { r#mod, .. } => {
@@ -474,7 +501,7 @@ fn validate_shape(value: &Value) -> Option<()> {
             match content_keys.as_slice() {
                 ["builtin"] => {
                     let name = content_object["builtin"].as_str()?;
-                    matches!(name, "spaces" | "tabs" | "status").then_some(())
+                    matches!(name, "spaces" | "tabs" | "status" | "toasts").then_some(())
                 }
                 ["content"] => (content_object["content"].as_str()? == "panes").then_some(()),
                 ["mod"] | ["mod", "props"] => content_object["mod"].as_str().map(|_| ()),
@@ -538,6 +565,7 @@ fn child_constraint(child: &ChromeNode, params: LayoutParams<'_>) -> Constraint 
             }
             "tabs" => Constraint::Length(u16::from(tabs_visible(params))),
             "status" => Constraint::Length(u16::from(params.mode_line)),
+            "toasts" => Constraint::Length(0),
             _ => Constraint::Length(0),
         },
         ChromeContent::Panes { .. } => Constraint::Min(3),
@@ -853,7 +881,7 @@ mod tests {
         // 未知内置区域名。
         let tree = json!({
             "schema_version": 1,
-            "root": {"type": "block", "content": {"builtin": "toasts"}}
+            "root": {"type": "block", "content": {"builtin": "sidebar"}}
         });
         assert!(Chrome::from_state(Some(&tree)).is_none());
         // 未知尺寸字段。

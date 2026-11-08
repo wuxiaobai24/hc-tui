@@ -630,6 +630,14 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// 当前 Unix 时间毫秒数；平台时间不可用时返回 0。
+pub fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 递归复制目录，跳过构建缓存与版本库。
 pub fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::create_dir_all(to)?;

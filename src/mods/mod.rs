@@ -66,6 +66,8 @@ pub enum SurfacePlace {
     Popup,
     /// 可拖动、记忆位置的窗口。
     Window,
+    /// 内容区之上的提示层，不抢焦点、不参与 `Esc` 关覆盖层。
+    Toast,
 }
 
 impl SurfacePlace {
@@ -77,6 +79,7 @@ impl SurfacePlace {
             "dialog" => Some(SurfacePlace::Dialog),
             "popup" => Some(SurfacePlace::Popup),
             "window" => Some(SurfacePlace::Window),
+            "toast" => Some(SurfacePlace::Toast),
             _ => None,
         }
     }
@@ -89,6 +92,7 @@ impl SurfacePlace {
             SurfacePlace::Dialog => "dialog",
             SurfacePlace::Popup => "popup",
             SurfacePlace::Window => "window",
+            SurfacePlace::Toast => "toast",
         }
     }
 }
@@ -209,10 +213,16 @@ pub struct ModNotification {
     pub action: Option<Value>,
     /// 动作目标 Pane 或终端。
     pub target: Option<String>,
-    /// 归属表面。
+    /// 归属表面：`Some` 为解析后的 toast 表面 ID；`None` 走默认 toast 表面。
     pub surface: Option<String>,
     /// 创建时刻（Unix 秒）。
     pub created: u64,
+    /// 创建时刻（Unix 毫秒），写进 toast props 的 `created_ms`。
+    pub created_ms: u64,
+    /// 自动撤销的毫秒数；0 表示不自动撤。
+    pub timeout_ms: u64,
+    /// 登记时刻，宿主据此计时并撤。
+    pub since: Instant,
 }
 
 /// `window` 覆盖层的位置记忆。

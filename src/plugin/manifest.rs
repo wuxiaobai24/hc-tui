@@ -657,7 +657,7 @@ fn validate_module(path: &Path, source: &str, module: &Module) -> Result<(), Man
                 path,
                 source,
                 place.span(),
-                "module place must be left, right, top, bottom or none",
+                "module place must be left, right, top, bottom, toast or none",
             ));
         }
     }

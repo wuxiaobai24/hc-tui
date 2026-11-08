@@ -25,23 +25,29 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
     if app.config.no_mods || app.mods.surfaces.is_empty() {
         return;
     }
-    let mut order: Vec<(u8, String, Rect)> = Vec::new();
+    let mut order: Vec<(u8, u8, String, Rect)> = Vec::new();
     let mut areas: Vec<(String, Rect)> = Vec::new();
     for surface in &app.mods.surfaces {
         let Some(rect) = surface_rect(app, surface) else {
             continue;
         };
         areas.push((surface.id.clone(), rect));
-        order.push((z_order(surface.place), surface.id.clone(), rect));
+        order.push((
+            z_order(surface.place),
+            u8::from(surface.place == SurfacePlace::Toast),
+            surface.id.clone(),
+            rect,
+        ));
     }
     for (id, rect) in areas {
         if let Some(surface) = app.mods.surface_mut(&id) {
             surface.area = rect;
         }
     }
-    order.sort_by_key(|(z, _, _)| *z);
+    // 提示层与 region/pane 同层，同层内排在最后，仍低于任何模态覆盖层。
+    order.sort_by_key(|(z, layer, _, _)| (*z, *layer));
     let mut spent = Duration::ZERO;
-    for (_, id, rect) in order {
+    for (_, _, id, rect) in order {
         if spent >= FRAME_BUDGET {
             break;
         }
@@ -88,7 +94,7 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
 
 fn z_order(place: SurfacePlace) -> u8 {
     match place {
-        SurfacePlace::Region | SurfacePlace::Pane => 0,
+        SurfacePlace::Region | SurfacePlace::Pane | SurfacePlace::Toast => 0,
         SurfacePlace::Dialog => 1,
         SurfacePlace::Popup => 2,
         SurfacePlace::Window => 3,
@@ -109,6 +115,7 @@ fn surface_rect(app: &crate::app::App, surface: &ModSurface) -> Option<Rect> {
             .find(|slot| Some(&slot.pane.to_string()) == surface.key.as_ref())
             .map(|slot| slot.inner),
         SurfacePlace::Dialog | SurfacePlace::Popup | SurfacePlace::Window => Some(surface.area),
+        SurfacePlace::Toast => app.mod_toasts,
     }?;
     (rect.width > 0 && rect.height > 0).then_some(rect)
 }

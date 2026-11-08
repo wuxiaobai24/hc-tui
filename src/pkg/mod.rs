@@ -28,7 +28,7 @@ pub const PLUGIN_FILE: &str = "plugin.toml";
 /// 模块 bundle 的默认相对路径。
 pub const DEFAULT_BUNDLE: &str = "dist/bundle.js";
 /// 模块停靠位置。
-pub const PLACES: &[&str] = &["left", "right", "top", "bottom", "none"];
+pub const PLACES: &[&str] = &["left", "right", "top", "bottom", "toast", "none"];
 /// 模块浮层的形态。
 pub const OVERLAY_KINDS: &[&str] = &["dialog", "popup", "window"];
 

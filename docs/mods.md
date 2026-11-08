@@ -139,7 +139,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 
 | 字段 | 说明 |
 |---|---|
-| `place` | 默认表面类型与位置；`none` 只由 `mods.open`、外框绑定或其它 mod 打开 |
+| `place` | 默认表面类型与位置：`left`/`right`/`top`/`bottom` 停靠，`toast` 进提示层，`none` 只由 `mods.open`、外框绑定或其它 mod 打开 |
 | `size` | 停靠厚度；小于等于 1 视为占比，否则为像素 |
 | `focusable` | 允许 `pane.go` 把键盘焦点移入该表面 |
 | `host_api` | 宿主通道版本；与内嵌版本不符时拒绝加载 |
@@ -165,6 +165,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
       { "type": "column", "children": [
         { "type": "block", "id": "top", "size": { "rows": 1 }, "content": { "builtin": "tabs" } },
         { "type": "block", "id": "content", "content": { "content": "panes" } },
+        { "type": "block", "id": "toasts", "content": { "builtin": "toasts" } },
         { "type": "block", "id": "bottom", "size": { "rows": 1 }, "content": { "builtin": "status" } }
       ] }
     ]
@@ -172,7 +173,8 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 }
 ```
 
-- 节点类型：`row`、`column`、`block`；`block` 的内容是 `{"builtin":"spaces"|"tabs"|"status"}`、`{"mod":"agents","props":{}}` 或 `{"content":"panes"}`。
+- 节点类型：`row`、`column`、`block`；`block` 的内容是 `{"builtin":"spaces"|"tabs"|"status"|"toasts"}`、`{"mod":"agents","props":{}}` 或 `{"content":"panes"}`。
+- `toasts` 是提示层标记：不占布局、不参与折叠，只声明模块提示层覆盖内容区；去掉它则外框不再渲染模块提示表面，内置 Rust toast 不受影响。默认外框带这个节点，旧树缺它时模块提示层不出现。
 - 恰好一个 `panes` 叶子，终端尺寸只由它决定；不允许两个区域同时竞争同一组终端。
 - 尺寸用字符格或比例；最小宽度与最小高度不足时按现有规则折叠，模块区域在折叠时不渲染。
 - 默认外框绑定内置模块。替换某个区域需要显式绑定：`mods.dock`、配置文件或 `mods.chrome` 动作；模块自身不能声明占据哪个区域。
@@ -184,9 +186,12 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 |---|---|---|
 | `region` | 外框 `mod` 块 | 占该区域，参与折叠与 resize |
 | `pane` | `mods.open --place pane` | 占一个 Pane 位，参与分屏、Stack、浮动与 zoom |
+| `toast` | `[module].place = "toast"` 或 `mods.open --place toast` | 内容区之上的提示层，不抢焦点、不参与 `Esc` 关覆盖层，z 序高于 region/pane、低于任何模态覆盖层 |
 | `overlay` | `[overlay]` 或 `mods.open --place dialog/popup/window` | 内容区之上的独立表面，按 z 序绘制 |
 
 覆盖层：`dialog` 居中并由宿主压暗内容区；`popup` 靠近指针或指定位置；`window` 可拖动、记忆位置，`key` 相同复用同一位置，`keep = true` 下次启动重开。覆盖层不接收内容区的鼠标事件。
+
+提示表面：矩形由外框 `toasts` 节点给出（等于内容区），每帧刷新；打开时形态固定（`modal`/`autofocus`/`onEsc`/`clickThrough` 一律按非聚焦覆盖层处理），`focus` 调用返回 `invalid`，鼠标与 `Esc` 都不路由给它。
 
 ## 5. 渲染与帧循环
 
@@ -195,7 +200,8 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 1. 绘制外框内置区域（侧栏、Tab 栏、模式行）。
 2. 绘制外框中的模块区域：`view.render(frame, rect)`。
 3. 绘制内容区 Pane（现有路径不变）。
-4. 按 z 序绘制覆盖层表面。
+4. 绘制提示表面：与 region/pane 同层但排在它们之后，仍低于 dialog/popup/window。
+5. 按 z 序绘制覆盖层表面。
 5. 显示光标：取焦点表面的 `cursor_style()`，在对应矩形内定位。
 
 `graphics.draw` 在字符帧之后输出 Kitty 图片，必须把模块区域与覆盖层并入遮挡计算：与遮挡矩形相交的图片不输出，覆盖层关闭后重新上传；裁剪按 Pane 与表面矩形的交集计算。遗漏这一步会让终端图片盖住 dialog。
@@ -341,8 +347,8 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `exec` | `exec` | `{ argv, cwd?, on?, env?, timeout_s? }` | `{ code, stdout, stderr, timed_out, truncated }`，30 秒、8 MiB |
 | `readFile` | `files` | `{ path, cwd?, on?, max_bytes? }` | `{ data, truncated }`，1 MiB |
 | `writeFile` | `files` | `{ path, data, cwd?, on?, expected? }` | `{ written }`，1 MiB |
-| `notify` | `notify` | `{ title, body?, level?, timeout?, action?, target?, surface?, status? }` | `{ id }`，`id` 可被 `dismiss` 撤销；`status: true` 走状态行而不是 toast |
-| `dismiss` | `dismiss` | `{ id }` | `{}`，撤销一条已登记的通知 |
+| `notify` | `notify` | `{ title, body?, level?, timeout?, action?, target?, surface?, status? }` | `{ id }`，`id` 可被 `dismiss` 撤销；`timeout` 以秒计（默认 4）；`surface` 指定投递到哪条提示表面（表面 ID 或模块 ID），未指定走默认提示表面；没有提示表面时 `status: true` 走状态行，其余走内置 toast |
+| `dismiss` | `dismiss` | `{ id }` | `{}`，按 `id` 撤销一条已登记的通知；文本只用于显示 |
 | `theme` | `theme` | `{}` | `{ name, tokens, palette }` |
 | `overlay` | `overlay` | `{ mod?, props?, kind, width?, height?, at?, key?, modal?, autofocus?, onEsc?, clickThrough? }` | `{ surface }` |
 | `closeOverlay` | `overlay` | `{ surface }` | `{}` |
@@ -354,6 +360,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `setAgentOrder` | `order` | `{ addresses }` | `{}` |
 | `requestGrants` | 无 | `{ grants }` | `{ granted }`，触发授予流程 |
 
+- 提示表面通过 `props.changed` 收到 `{ toasts, max }`：`toasts` 是 `{ id, level, text, action?, target?, created_ms, timeout_ms }` 数组，按登记顺序排列，只保留最新 `max` 条；`max` 来自配置 `notifications.toast_limit`（默认 3）。宿主自己产生的提醒（Agent 进入 blocked/done、`notify { status: true }`）与模块通知进同一条队列；超时由宿主计时并撤销，模块只负责显示。
 - `ask` 带 `surface` 时把 `props` 交给该表面，带 `mod` 时先按 `kind` 打开一条新表面；两者都不给时打开调用方的覆盖层。回答到达后 `ask` 返回 `{ value }`。
 - `overlay` 与 `mods.open` 的静态参数：`modal`（默认 `true`，`false` 时鼠标事件继续传给下层）、`autofocus`（默认 `true`，`false` 时不抢键盘焦点）、`onEsc`（`host` 默认先关覆盖层，`module` 交给表面自己处理）、`clickThrough`（默认 `false`，`true` 时不参与鼠标命中）。
 - `run` 的 `request` 由宿主生成；`accepted` 只表示动作已被受理。`confirmation_pending` 在动作打开了确认框或表单时为 `true`，此后的终态在用户确认（`done`）、取消（`cancelled`）时经 `action.finished` 投递。发起 core RPC 的动作先返回 `accepted`，应答到达后才投递 `done` 或带 `error` 的 `failed`；`request` 查询读到同一状态。
