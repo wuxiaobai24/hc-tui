@@ -51,6 +51,7 @@ mod panels;
 mod plugin;
 mod renaming;
 mod shared_sync;
+pub mod winless;
 
 /// 分组、已有视图、终端地址、状态和显示名。
 #[derive(Clone, Debug)]

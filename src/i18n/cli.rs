@@ -12,8 +12,8 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "usage: hc-tui [options]" => "用法：hc-tui [选项]",
         "       hc-tui probe [options]" => "       hc-tui probe [选项]",
         "       hc-tui commands | ls [options]" => "       hc-tui commands | ls [选项]",
-        "       hc-tui do <command> [JSON arguments] [options]" => {
-            "       hc-tui do <command> [JSON 参数] [选项]"
+        "       hc-tui do <command> [<terminal>] [JSON arguments] [options]" => {
+            "       hc-tui do <command> [<终端>] [JSON 参数] [选项]"
         }
         "  --session <name>   hc session to connect to (default: HC_SESSION)" => {
             "  --session <name>   要连接的 hc 会话（默认：HC_SESSION）"

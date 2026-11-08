@@ -51,19 +51,29 @@ fn main() -> Result<()> {
             let command = args
                 .get(1)
                 .ok_or_else(|| anyhow::anyhow!(t("do requires a command")))?;
-            let (value, start) = match args.get(2).filter(|s| s.starts_with('{')) {
-                Some(value) => (serde_json::from_str::<serde_json::Value>(value)?, 3),
-                None => (serde_json::json!({}), 2),
+            let (value, start) = match args.get(2) {
+                Some(value) if value.starts_with('{') => {
+                    (serde_json::from_str::<serde_json::Value>(value)?, 3)
+                }
+                // 裸位置参数只对寻址终端的动作成立：`do terminal.park t1`。
+                Some(target) if !target.starts_with('-') && targets_terminal(command) => {
+                    (serde_json::json!({ "terminal": target }), 3)
+                }
+                _ => (serde_json::json!({}), 2),
             };
             let config = parse_options(&args[start..])?;
-            println!(
-                "{}",
-                hc_tui::control::call(
-                    &config,
-                    serde_json::json!({"method":"do","command":command,"args":value})
-                )?
-            );
-            Ok(())
+            let request = serde_json::json!({"method":"do","command":command,"args":value});
+            // 没有窗口时走无窗口路径；有窗口但不应答仍然报错，避免两个写入者。
+            match hc_tui::control::call(&config, request) {
+                Ok(answer) => {
+                    println!("{answer}");
+                    Ok(())
+                }
+                Err(error) if hc_tui::app::winless::window_unavailable(&error) => {
+                    std::process::exit(hc_tui::app::winless::run(&config, command, &value)?)
+                }
+                Err(error) => Err(error),
+            }
         }
         Some("--help" | "-h") => {
             usage();
@@ -84,6 +94,11 @@ fn main() -> Result<()> {
         }
         None => run_tui(parse_options(&args)?),
     }
+}
+
+/// 裸位置参数是终端地址的动作：`hc-tui do terminal.park t1`。
+fn targets_terminal(command: &str) -> bool {
+    command.starts_with("terminal.") || matches!(command, "agent.focus" | "agent.rename")
 }
 
 fn usage() {
@@ -117,7 +132,7 @@ fn usage() {
     );
     println!(
         "{}",
-        t("       hc-tui do <command> [JSON arguments] [options]")
+        t("       hc-tui do <command> [<terminal>] [JSON arguments] [options]")
     );
     println!();
     println!(
