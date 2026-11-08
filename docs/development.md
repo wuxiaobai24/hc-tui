@@ -70,6 +70,8 @@ UI 冒烟使用 tmux 和独立 session；可设 HC_TUI_SMOKE_ROOT 指向新的�
 parity 启动两套隔离 core，验证远端布局、新建、GUI 双向 CAS、未知字段、settle、park/keep/close/quit。
 不要让测试使用默认工作区。真实宿主图像、SSH 实机、macOS/Windows 不因 Linux tmux 测试通过而算已验收。
 
+测试与冒烟会留下隔离 runtime 里的 core：清理方式与判定方法见 [core 泄漏治理](ops-cores.md)（`scripts/reap-cores.sh`，默认干跑）。
+
 ## 安装、升级与回滚
 
 普通用户优先安装 Release 包并用 `hc-tui update`，无需下面的源码工具链。四平台打包统一使用 `scripts/package-release.sh TARGET`，发布门槛见 [发布清单](release.md)。
