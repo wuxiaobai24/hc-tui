@@ -117,7 +117,7 @@ _hc-tui() {
     'probe:probe the core'
     'session-hook:install, remove or inspect the chat hook'
     'completion:print a shell completion script'
-    'config:check the config file or reset the [keys] section'
+    'config:check the config file, reset [keys], dump or init'
   )
   _arguments -C \
     '1:command:->command' \
@@ -130,7 +130,7 @@ _hc-tui() {
         plugins) _hc-tui-plugins ;;
         do) _hc-tui-commands ;;
         completion) _values 'shell' zsh bash fish ;;
-        config) _values 'config subcommand' check reset-keys ;;
+        config) _values 'config subcommand' check reset-keys dump init ;;
       esac
       ;;
   esac
@@ -222,7 +222,7 @@ _hc_tui() {
       ;;
     config)
       if [[ $index -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "check reset-keys" -- "$cur"))
+        COMPREPLY=($(compgen -W "check reset-keys dump init" -- "$cur"))
       fi
       ;;
   esac
@@ -262,7 +262,7 @@ complete -c hc-tui -n '__fish_use_subcommand' -a update -d 'update hc-tui'
 complete -c hc-tui -n '__fish_use_subcommand' -a probe -d 'probe the core'
 complete -c hc-tui -n '__fish_use_subcommand' -a session-hook -d 'install or remove the chat hook'
 complete -c hc-tui -n '__fish_use_subcommand' -a completion -d 'print a shell completion script'
-complete -c hc-tui -n '__fish_use_subcommand' -a config -d 'check the config file or reset the [keys] section'
+complete -c hc-tui -n '__fish_use_subcommand' -a config -d 'check the config file, reset [keys], dump or init'
 
 complete -c hc-tui -f -n '__hc_tui_packages_subcommand' -a list -d 'list installed packages'
 complete -c hc-tui -f -n '__hc_tui_packages_subcommand' -a install -d 'install from a directory, .nshpkg, git url or .tar.gz'
@@ -297,5 +297,5 @@ complete -c hc-tui -f -n '__fish_seen_subcommand_from install link update' -a '(
 complete -c hc-tui -f -n '__fish_seen_subcommand_from info enable disable uninstall unlink' -a '(__hc_tui_package_ids)'
 complete -c hc-tui -f -n '__fish_seen_subcommand_from do' -a '(__hc_tui_command_names)'
 complete -c hc-tui -f -n '__fish_seen_subcommand_from completion' -a 'zsh bash fish'
-complete -c hc-tui -f -n '__fish_seen_subcommand_from config' -a 'check reset-keys'
+complete -c hc-tui -f -n '__fish_seen_subcommand_from config' -a 'check reset-keys dump init'
 "##;

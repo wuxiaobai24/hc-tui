@@ -11,6 +11,7 @@ pub mod app;
 pub mod chat;
 pub mod clipboard;
 pub mod config;
+pub mod config_dump;
 pub mod copy;
 pub mod hc;
 pub mod i18n;

@@ -1,8 +1,9 @@
-//! `hc-tui config check|reset-keys`：配置文件诊断与 `[keys]` 段重置。
+//! `hc-tui config check|reset-keys|dump|init`：配置文件诊断、`[keys]` 段重置、
+//! 整份配置导出与默认配置落盘。
 //!
 //! `check` 只读配置文件，错误带 `文件:行:列`；有错误退出 1，只有警告退出 2，
 //! 干净时退出 0。`reset-keys` 先备份再把 `[keys]` 段换成默认键位，其它段原样
-//! 保留；不带 `--yes` 时只打印计划，不落盘。
+//! 保留；不带 `--yes` 时只打印计划，不落盘。`dump` 与 `init` 见 [`crate::cli::config_dump`]。
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ use hc_tui::i18n::{t, t1};
 
 /// `config` 的用法行；`--help` 与未知子命令共用。
 fn usage() -> &'static str {
-    "usage: hc-tui config check|reset-keys [--config <path>] [--yes]"
+    "usage: hc-tui config check|reset-keys [--config <path>] [--yes]\n       hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]\n       hc-tui config init [--path <path>] [--force]"
 }
 
 pub fn run(args: &[String]) -> Result<()> {
@@ -26,6 +27,8 @@ pub fn run(args: &[String]) -> Result<()> {
     match sub {
         "check" => check(&args[1..]),
         "reset-keys" => reset_keys(&args[1..]),
+        "dump" => crate::cli::config_dump::dump_command(&args[1..]),
+        "init" => crate::cli::config_dump::init_command(&args[1..]),
         other => anyhow::bail!("{} (unknown: {})", usage(), other),
     }
 }
@@ -155,7 +158,7 @@ fn reset_keys(args: &[String]) -> Result<()> {
 }
 
 /// `config.toml.bak.<秒级时间戳>`；同一秒内重复执行时加序号，不覆盖旧备份。
-fn backup_path(path: &Path) -> PathBuf {
+pub(crate) fn backup_path(path: &Path) -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
