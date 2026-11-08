@@ -2530,7 +2530,7 @@ fn hostname() -> String {
         .unwrap_or_default()
 }
 
-fn truncate(text: &str, max_columns: usize) -> String {
+pub(crate) fn truncate(text: &str, max_columns: usize) -> String {
     if text.width() <= max_columns {
         return text.to_string();
     }

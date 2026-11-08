@@ -102,6 +102,7 @@ impl App {
         // 模块撤下/恢复与动作、终端走同一次重载：先对齐外框，再对齐表面。
         self.sync_package_modules();
         self.sync_mod_surfaces();
+        self.recover_region_modules();
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)

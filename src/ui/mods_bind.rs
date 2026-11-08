@@ -48,6 +48,7 @@ pub fn layout(app: &mut App, area: Rect) -> Plan {
         sidebar_hits: None,
         tab_bar_hits: None,
     };
+    let mut bound = false;
     for (builtin_name, module) in REGION_MODULES {
         let Some(rect) = builtin_rect(&builtin, builtin_name) else {
             continue;
@@ -60,13 +61,14 @@ pub fn layout(app: &mut App, area: Rect) -> Plan {
         if !bind_block(&mut tree.root, builtin_name, module, rect, props) {
             continue;
         }
+        bound = true;
         match builtin_name {
             "spaces" => plan.sidebar_hits = Some(rect),
             "tabs" => plan.tab_bar_hits = Some(rect),
             _ => {}
         }
     }
-    if plan.sidebar_hits.is_none() && plan.tab_bar_hits.is_none() {
+    if !bound {
         return fallback;
     }
     plan.layout = tree.layout(params(app, area));

@@ -9,7 +9,13 @@ use std::time::{Duration, Instant};
 use ratatui_core::layout::Rect;
 use ratatui_core::style::Style;
 use ratatui_core::terminal::Frame;
+use ratatui_core::text::{Line, Span};
+use ratatui_widgets::block::Block;
+use ratatui_widgets::borders::Borders;
 use ratatui_widgets::paragraph::Paragraph;
+use unicode_width::UnicodeWidthStr;
+
+use crate::i18n::{t, t1};
 
 use super::{ModSurface, SurfacePlace, SurfaceState};
 
@@ -63,6 +69,13 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
             }
         }
         if !matches!(surface.state, SurfaceState::Loading | SurfaceState::Running) {
+            if surface.state == SurfaceState::Failed {
+                // 失败表面：同一矩形里画错误占位，模块不卸载、不回落内置实现。
+                let mod_id = surface.mod_id.clone();
+                let error = surface.last_error.clone().unwrap_or_default();
+                draw_error_box(frame, rect, &mod_id, &error, &app.config.theme);
+                continue;
+            }
             if let Some(error) = surface.last_error.clone() {
                 let area = Rect::new(rect.x, rect.y, rect.width, rect.height.min(1));
                 frame.render_widget(
@@ -77,8 +90,8 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
         let started = Instant::now();
         surface.view.render(frame, rect);
         let elapsed = started.elapsed();
-        // 引擎回调收集的异常在本帧之后计数；连续三次进入 Failed。
-        let errors: Vec<String> = {
+        // 引擎回调收集的异常在本帧之后计数；region 首次、其它表面连续三次进入 Failed。
+        let errors: Vec<super::ModError> = {
             let mut errors = surface
                 .errors
                 .lock()
@@ -94,6 +107,49 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
             app.record_mod_errors(&id, &mod_id, errors);
         }
     }
+}
+
+/// 失败占位的错误盒：`agent_error` 边框、`<模块> · 渲染失败` 标题、末条异常首行
+/// 与 `r 重载 · ? 详情`。矩形放不下边框加一行正文（模式行这类一行高的区域）时
+/// 退化成单行摘要，标题与提示都在。
+fn draw_error_box(
+    frame: &mut Frame,
+    rect: Rect,
+    mod_id: &str,
+    message: &str,
+    theme: &crate::theme::Theme,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let red = Style::default().fg(theme.color("agent_error"));
+    let title = t1("{} · render failed", mod_id);
+    let hint = t("r reload · ? details");
+    let first = message.lines().next().unwrap_or_default().trim();
+    if rect.height < 3 || rect.width < 12 {
+        // 标题与提示先占位，末尾的错误首行按剩余宽度截断。
+        let prefix = format!(" {title} · ");
+        let hint = format!(" · {hint} ");
+        let room = (rect.width as usize).saturating_sub(prefix.width() + hint.width());
+        let text = if room > 2 {
+            format!("{prefix}{}{hint}", crate::ui::truncate(first, room))
+        } else {
+            crate::ui::truncate(&format!("{prefix}{first}{hint}"), rect.width as usize)
+        };
+        frame.render_widget(Paragraph::new(text).style(red), rect);
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(red)
+        .title(Span::styled(format!(" {title} "), red));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let mut lines = vec![Line::from(crate::ui::truncate(first, inner.width as usize))];
+    if inner.height >= 2 {
+        lines.push(Line::from(crate::ui::truncate(hint, inner.width as usize)));
+    }
+    frame.render_widget(Paragraph::new(lines).style(red), inner);
 }
 
 fn z_order(place: SurfacePlace) -> u8 {

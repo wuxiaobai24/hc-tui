@@ -1282,22 +1282,39 @@ impl App {
     }
 
     /// 按当前 Tab 的树算出每个 Pane 的矩形，并让本地 VT 跟上尺寸。
-    /// 确保默认区域模块有一条运行中的区域表面；装不上或停用时返回 `false`，
-    /// 该区域由内置实现渲染。
+    /// 默认区域模块有一条区域表面时，该区域一直绑在模块块上：运行中画模块，
+    /// 失败后在同一矩形里画错误占位（不抢焦点，命中域仍由内置实现登记）。
+    /// 模块没装或停用时返回 `false`，该区域由内置实现渲染。
     ///
     /// 只在第一次绑定与插件代际变化时尝试打开：每帧重试会把包解析放到绘制路径上。
     pub fn ensure_region_module(&mut self, mod_id: &str, props: serde_json::Value) -> bool {
         if self.config.no_mods {
             return false;
         }
-        if let Some(surface) = self.mods.surfaces.iter().find(|surface| {
-            surface.mod_id == mod_id && matches!(surface.place, crate::mods::SurfacePlace::Region)
-        }) {
-            return surface.state == crate::mods::SurfaceState::Running;
-        }
+        let existing = self
+            .mods
+            .surfaces
+            .iter()
+            .find(|surface| {
+                surface.mod_id == mod_id
+                    && matches!(surface.place, crate::mods::SurfacePlace::Region)
+            })
+            .map(|surface| (surface.id.clone(), surface.state));
         if self.region_mods_revision != self.plugin_revision {
             self.region_mods_attempted.clear();
             self.region_mods_revision = self.plugin_revision;
+        }
+        if let Some((surface_id, state)) = existing {
+            if !self.mods.is_enabled(mod_id) {
+                self.mods_close(&surface_id);
+                return false;
+            }
+            return match state {
+                crate::mods::SurfaceState::Running => true,
+                // 占位阶段仍绑定该区域：矩形与命中域照旧，盒子由 `mods::render` 画。
+                crate::mods::SurfaceState::Failed => true,
+                _ => false,
+            };
         }
         if self.region_mods_attempted.contains(mod_id) {
             return false;
@@ -1625,6 +1642,16 @@ impl App {
             && self.close_top_mod_overlay()
         {
             return;
+        }
+        // 错误占位可见时 `r` / `?` 归宿主：`r` 重载该模块，`?` 把完整异常写进包日志。
+        if key.kind == KeyEventKind::Press
+            && matches!(key.code, KeyCode::Char('r' | '?'))
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            if let Some(surface_id) = self.failed_mod_surface() {
+                self.mod_error_key(&surface_id, &key);
+                return;
+            }
         }
         let keys = &self.config.keys;
         if key.kind == KeyEventKind::Press && keys.prefix.matches_direct(&key) {
