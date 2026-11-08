@@ -299,8 +299,10 @@ hc-tui events --plugin <id> --kinds terminal.status,terminal.turn,terminal.finis
 
 ```sh
 hc-tui packages list [--json]
-hc-tui packages install <目录> [--enable|--disable] [--yes]
-hc-tui packages update [<id>] <目录|.nshpkg>
+hc-tui packages info <id|来源> [--json]
+hc-tui packages install <目录|git 仓库|.tar.gz> [--enable|--disable] [--yes]
+hc-tui packages update [<id>] <目录|git 仓库|.tar.gz|.nshpkg>
+hc-tui packages update --check [<id>] [--json]
 hc-tui packages link <目录> / unlink <id>
 hc-tui packages uninstall <id>
 hc-tui packages enable <id> / disable <id>
@@ -314,6 +316,9 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 |---|---|
 | `packages link <目录>` | 注册为开发来源，代码原地读取，清单变化后重载 |
 | `packages install <目录>` | 预览清单后复制到新代际，`current` 原子切换，默认不启用 |
+| `packages install <git 仓库|.tar.gz>` | 先 `git clone --depth 1` 或 `tar -xzf` 到临时目录，校验清单后同上，临时目录随即删除 |
+| `packages info <id|来源>` | 显示 id、名字、版本、来源、代际、能力、模块、服务、授予、安装时间与来源端版本；来源不是已安装 id 时只读清单，不动 store |
+| `packages update --check [<id>]` | 只读比较本记录版本与来源端版本，不写记录、不装代际；有更新时退出码 0 并带 `"outdated": true` |
 | `packages update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，pin 释放后回收 |
 | `packages unlink <id>` | 移除开发注册，不删除目录 |
 | `packages uninstall <id>` | 只删除记录与 `current` 指针；有 pin 的代际保留（pin 在 `<state>/plugins/pins/`） |
@@ -371,6 +376,34 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 - `integer` 只接受整数，`number` 接受整数与浮点；未知 `type` 在清单期拒绝。
 - 防爆：schema 递归深度上限 8、单层属性上限 64、`items` 只允许 object 或标量 schema，超限在清单期报错；运行期递归深度由清单约束，不会递归到栈溢出。
 - `plugins action list --json` 里的 `args` 原样输出 schema，不注入默认值、不改形状。
+
+### 9.4 来源安装与更新检查
+
+`packages install` / `packages update` 接受三种来源，判据只看用户输入的形态：
+
+| 来源 | 判据 | 落地方式 |
+|---|---|---|
+| 本地目录 | 路径是目录 | 直接复制到新代际 |
+| git 仓库 | `https://`、`http://`、`ssh://`、`file://`、`git://`、`git@` 开头或 `.git` 结尾 | `git clone --depth 1 -- <url>` 到临时目录 |
+| 归档 | `.tar.gz` / `.tgz` 文件 | `tar -xzf` 解到临时目录 |
+
+`.nshpkg` 与其他文件仍走签名包校验。暂存目录里包的根按「有 `hctui.toml` / `plugin.toml` 的那一层」判定：没有清单且只有一个子目录时逐层下行，最多三层。安装流程是「暂存 → 校验清单与 bundle → 预览确认 → 按清单形态发到对应 store → 删除暂存目录」，所以：
+
+- 安装过程不执行包里的任何脚本：只复制文件、读清单；`git` 以 `GIT_TERMINAL_PROMPT=0`、`GIT_LFS_SKIP_SMUDGE=1` 运行，没有凭据立即失败，不在中途等输入。
+- git 地址只来自用户输入，不从清单里读地址再递归拉取。
+- 清单非法、bundle 缺失、id 与命令行给的 `<id>` 不符时在发布代际之前失败：记录与 `current` 指针不变，暂存目录删除。
+- 网络不可用或仓库不存在时报 `clone failed: <git 的原因>` 并以非零退出，不静默退回本地目录。
+- 记录里的 `origin` 保存真实来源（git 地址原样，归档是路径），`packages update --check` 就是按它回读来源端版本。
+- 同一来源重复安装与目录安装同一语义：写入新代际并更新记录，`packages info` 里能看到代际增长。
+
+`packages update --check [<id>]` 比较的是「记录里的版本」与「来源端的版本」：
+
+- 来源端版本都取 `manifest.version`。目录来源读该目录的清单；归档来源解包后读清单；git 来源用 `git ls-remote --symref <url> HEAD` 找到默认分支，再浅取一份提交（`git fetch --depth 1`）只读清单，不 clone 整仓。
+- 文本输出两种状态：`<id> local 0.1.0 → remote 0.2.0` 与 `<id> up to date (0.2.0)`；`--json` 输出数组，每项 `{id, local, remote, outdated}`，有更新时 `outdated` 为 `true`。
+- 两种状态退出码都是 0；来源读不出来（没有记录来源、远端不可达）时按包报错并非零退出。
+- 命令只读：不写记录、不发布代际。
+
+`packages info <id|来源>` 的 `--json` 输出 `id`、`name`、`version`、`source`、`path`、`generation`、`enabled`、`installedAt`、`capabilities`、`module`、`services`、`grants` 与 `remote`；未安装的来源 `generation`/`enabled`/`installedAt`/`remote` 为 `null`。`remote` 是 `{version, outdated}`，来源不可达时是 `{error}`，`info` 本身不因此失败。
 
 ## 10. 信任与权限
 

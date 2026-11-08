@@ -124,7 +124,11 @@ fn usage() {
     );
     println!(
         "{}",
-        t("       hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log ...")
+        t("       hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log|info ...")
+    );
+    println!(
+        "{}",
+        t("       hc-tui packages update --check [<id>] [--json]")
     );
     println!(
         "{}",
@@ -579,7 +583,7 @@ fn wait_for_pane(config: &hc_tui::config::Config, request: &str) -> Result<serde
 fn packages_command(args: &[String]) -> Result<()> {
     let Some(group) = args.first().map(String::as_str) else {
         anyhow::bail!(t(
-            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log"
+            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log|info"
         ))
     };
     packages_manage(group, &args[1..], None)
@@ -592,6 +596,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
     let mut config_path = None;
     let mut json = false;
     let mut yes = false;
+    let mut check = false;
     let mut lines = 100usize;
     let mut service: Option<String> = None;
     let mut policy = hc_tui::plugin::registry::EnablePolicy::Keep;
@@ -608,6 +613,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
                 ));
             }
             "--json" => json = true,
+            "--check" => check = true,
             "--yes" | "-y" => yes = true,
             "--service" => {
                 index += 1;
@@ -635,14 +641,25 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
     if let Some(alias) = alias {
         eprintln!("note: `{alias} {group}` is deprecated, use `packages {group}`");
     }
+    if check && group != "update" {
+        anyhow::bail!(t1("--check only applies to update, not {}", group));
+    }
     let config = hc_tui::config::Config::load(config_path);
     match group {
         "list" => packages_list(&config, json),
+        "info" => {
+            let target = package_target(&targets, "info")?;
+            packages_info(&config, target, json)
+        }
+        "update" if check => packages_check(&config, targets.first().map(String::as_str), json),
         "install" | "update" => {
             let (id, target) = match targets.as_slice() {
                 [id, target] => (Some(id.clone()), target.clone()),
                 [target] => (None, target.clone()),
-                _ => anyhow::bail!(t1("usage: hc-tui packages {} <dir|.nshpkg>", group)),
+                _ => anyhow::bail!(t1(
+                    "usage: hc-tui packages {} <dir|.nshpkg|<git url>|.tar.gz>",
+                    group
+                )),
             };
             let result = packages_install(&config, id.as_deref(), &target, policy, yes);
             if result.is_ok() {
@@ -738,7 +755,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
             Ok(())
         }
         other => anyhow::bail!(t1(
-            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log (unknown: {})",
+            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log|info (unknown: {})",
             other
         )),
     }
@@ -830,6 +847,274 @@ fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
         for issue in &entry.issues {
             println!("    {:<40} issue · {}", "", issue);
         }
+    }
+    Ok(())
+}
+
+/// 已安装包的记录：两个 store 依次查，第一个有的就是这一份。
+fn installed_record(config: &hc_tui::config::Config, id: &str) -> Option<hc_tui::store::Record> {
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        if let Some(record) = hc_tui::store::Store::open(state).record(id) {
+            return Some(record);
+        }
+    }
+    None
+}
+
+/// 一个包声明的服务及其状态；已停用的包不去探测程序，与 `packages list` 一致。
+fn package_services(
+    config: &hc_tui::config::Config,
+    id: &str,
+    enabled: bool,
+) -> Vec<hc_tui::plugin::service::ServiceStatus> {
+    let registry = hc_tui::plugin::registry::Registry::load(config);
+    let terminals = service_terminals(config);
+    registry
+        .services_of(id)
+        .iter()
+        .map(|info| {
+            if enabled {
+                hc_tui::plugin::service::status(info, terminals.as_deref().unwrap_or(&[]))
+            } else {
+                hc_tui::plugin::service::ServiceStatus::stopped(info)
+            }
+        })
+        .collect()
+}
+
+/// `packages info <id|src>`：已安装包读出记录与本代际清单，未安装来源读出清单。
+fn packages_info(config: &hc_tui::config::Config, target: &str, json: bool) -> Result<()> {
+    let record = installed_record(config, target);
+    let mut origin = record.as_ref().and_then(|record| record.origin.clone());
+    let staged = if record.is_none() {
+        let staged = hc_tui::pkg::source::stage(target).map_err(anyhow::Error::msg)?;
+        origin = Some(staged.origin().to_string());
+        Some(staged)
+    } else {
+        None
+    };
+    let root = match &staged {
+        Some(staged) => staged.path().to_path_buf(),
+        None => hc_tui::pkg::resolve(config, target)
+            .map_err(anyhow::Error::msg)?
+            .map(|resolved| resolved.root)
+            .ok_or_else(|| anyhow::anyhow!(t1("{} has no installed generation", target)))?,
+    };
+    let loaded = hc_tui::pkg::load_dir(&root).map_err(anyhow::Error::msg)?;
+    let manifest = &loaded.manifest;
+    let id = manifest.id().to_string();
+    let local = record
+        .as_ref()
+        .and_then(|record| record.app.as_ref())
+        .and_then(|app| app.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| manifest.version().to_string());
+    let capabilities = record
+        .as_ref()
+        .and_then(|record| record.capabilities)
+        .unwrap_or_else(|| manifest.capabilities());
+    let module = record
+        .as_ref()
+        .and_then(|record| record.module.clone())
+        .or_else(|| manifest.module_info());
+    let grants = record
+        .as_ref()
+        .and_then(|record| record.grants.clone())
+        .unwrap_or_else(|| manifest.grants());
+    let enabled = record.as_ref().map(|record| record.enabled).unwrap_or(true);
+    let services = package_services(config, &id, enabled);
+    // 没安装就没有「本地版本」可比，`update` 一栏留空。
+    let remote = match &record {
+        None => serde_json::Value::Null,
+        Some(record) => {
+            let probe = match record.origin.as_deref() {
+                Some(origin) if !origin.is_empty() => hc_tui::pkg::source::remote_version(origin),
+                _ => Err(t("no source recorded").to_string()),
+            };
+            match &probe {
+                Ok(version) => {
+                    serde_json::json!({ "version": version, "outdated": *version != local })
+                }
+                Err(error) => serde_json::json!({ "error": error }),
+            }
+        }
+    };
+    if json {
+        let value = serde_json::json!({
+            "id": id,
+            "name": manifest.name(),
+            "version": local,
+            "source": origin,
+            "path": root.display().to_string(),
+            "generation": record.as_ref().map(|record| record.generation),
+            "enabled": record.as_ref().map(|record| record.enabled),
+            "installedAt": record.as_ref().map(|record| record.installed_at),
+            "capabilities": capabilities,
+            "module": module,
+            "services": services,
+            "grants": grants,
+            "remote": remote,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    println!("{}", t3("{} ({} {})", &id, manifest.name(), &local));
+    println!(
+        "{}",
+        t1("  source       {}", origin.as_deref().unwrap_or("-"))
+    );
+    match &record {
+        Some(record) => println!(
+            "{}",
+            t2(
+                "  generation   {} · {}",
+                record.generation,
+                if record.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            )
+        ),
+        None => println!("{}", t("  generation   not installed")),
+    }
+    println!("{}", t1("  path         {}", root.display()));
+    println!("{}", t1("  capabilities {}", capabilities.badges()));
+    if let Some(module) = &module {
+        println!(
+            "{}",
+            t3(
+                "  module       {} · {} · {}",
+                &module.bundle,
+                &module.place,
+                &module.title
+            )
+        );
+    }
+    println!(
+        "{}",
+        t1(
+            "  grants       {}",
+            if grants.is_empty() {
+                "none".to_string()
+            } else {
+                grants.join(", ")
+            }
+        )
+    );
+    println!(
+        "{}",
+        t1(
+            "  services     {}",
+            if services.is_empty() {
+                "none".to_string()
+            } else {
+                services
+                    .iter()
+                    .map(service_detail)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
+        )
+    );
+    if let Some(record) = &record {
+        println!("{}", t1("  installed    {} (unix)", record.installed_at));
+    }
+    println!("{}", t1("  update       {}", remote_line(&local, &remote)));
+    Ok(())
+}
+
+/// 一条来源端版本的人读形式。
+fn remote_line(local: &str, remote: &serde_json::Value) -> String {
+    if remote.is_null() {
+        return "not installed".to_string();
+    }
+    match (
+        remote.get("version").and_then(serde_json::Value::as_str),
+        remote.get("error").and_then(serde_json::Value::as_str),
+    ) {
+        (Some(version), _) if version == local => format!("up to date ({local})"),
+        (Some(version), _) => format!("local {local} → remote {version}"),
+        (None, Some(error)) => format!("unknown: {error}"),
+        (None, None) => "unknown".to_string(),
+    }
+}
+
+/// 记录里的版本：安装时缓存的清单版本，旧记录回退到代际目录里的清单。
+fn record_version(config: &hc_tui::config::Config, record: &hc_tui::store::Record) -> String {
+    record
+        .app
+        .as_ref()
+        .and_then(|app| app.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            let resolved = hc_tui::pkg::resolve(config, &record.id).ok()??;
+            let loaded = hc_tui::pkg::load_dir(&resolved.root).ok()?;
+            Some(loaded.manifest.version().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// `packages update --check [id]`：比较本地记录的版本与来源端的版本，不改动任何记录。
+fn packages_check(config: &hc_tui::config::Config, id: Option<&str>, json: bool) -> Result<()> {
+    let mut records: Vec<hc_tui::store::Record> = Vec::new();
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        for record in hc_tui::store::Store::open(state).list() {
+            if records.iter().any(|known| known.id == record.id) {
+                continue;
+            }
+            records.push(record);
+        }
+    }
+    if let Some(id) = id {
+        records.retain(|record| record.id == id);
+        if records.is_empty() {
+            anyhow::bail!(t1("{} is not installed", id));
+        }
+    }
+    if records.is_empty() {
+        println!("{}", t("no plugins installed"));
+        return Ok(());
+    }
+    let mut checked: Vec<(String, String, String)> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for record in &records {
+        let local = record_version(config, record);
+        let remote = match record.origin.as_deref() {
+            Some(origin) if !origin.is_empty() => hc_tui::pkg::source::remote_version(origin),
+            _ => Err(t("no source recorded").to_string()),
+        };
+        match remote {
+            Ok(remote) => checked.push((record.id.clone(), local, remote)),
+            Err(error) => failed.push(format!("{}: {error}", record.id)),
+        }
+    }
+    if json {
+        let entries: Vec<serde_json::Value> = checked
+            .iter()
+            .map(|(id, local, remote)| {
+                serde_json::json!({
+                    "id": id,
+                    "local": local,
+                    "remote": remote,
+                    "outdated": remote != local,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        for (id, local, remote) in &checked {
+            if remote == local {
+                println!("{}", t2("{} up to date ({})", id, local));
+            } else {
+                println!("{}", t3("{} local {} → remote {}", id, local, remote));
+            }
+        }
+    }
+    if !failed.is_empty() {
+        anyhow::bail!(failed.join("; "));
     }
     Ok(())
 }
@@ -926,45 +1211,97 @@ fn packages_install(
     yes: bool,
 ) -> Result<()> {
     let path = std::path::Path::new(target);
-    let loaded = if path.is_dir() {
-        Some(hc_tui::pkg::install_ready(path).map_err(anyhow::Error::msg)?)
-    } else {
-        None
-    };
-    match loaded {
-        Some(loaded) if loaded.origin != hc_tui::pkg::Origin::LegacyMod => {
-            let manifest = loaded.manifest;
-            if let Some(id) = id {
-                if manifest.id() != id {
-                    anyhow::bail!(t3(
-                        "{} declares package id {}, not {}",
-                        target,
-                        manifest.id(),
-                        id
-                    ));
-                }
-            }
-            print_package_preview(&manifest);
-            confirm_install(yes)?;
-            let record = hc_tui::plugin::registry::install(config, path, policy)
-                .map_err(anyhow::Error::msg)?;
-            println!(
-                "{}",
-                t3(
-                    "installed {} generation {} ({})",
-                    record.id,
-                    record.generation,
-                    if record.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                )
-            );
-            Ok(())
+    if !path.is_dir() {
+        let from_source = matches!(
+            hc_tui::pkg::source::kind(target),
+            hc_tui::pkg::source::Kind::Git(_) | hc_tui::pkg::source::Kind::Archive(_)
+        );
+        if !from_source {
+            return install_or_update(config, yes, target, id);
         }
-        _ => install_or_update(config, yes, target, id),
+        let staged = hc_tui::pkg::source::stage(target).map_err(anyhow::Error::msg)?;
+        return install_staged(config, id, &staged, policy, yes);
     }
+    let loaded = hc_tui::pkg::install_ready(path).map_err(anyhow::Error::msg)?;
+    if loaded.origin == hc_tui::pkg::Origin::LegacyMod {
+        return install_or_update(config, yes, target, id);
+    }
+    let manifest = loaded.manifest;
+    if let Some(id) = id {
+        if manifest.id() != id {
+            anyhow::bail!(t3(
+                "{} declares package id {}, not {}",
+                target,
+                manifest.id(),
+                id
+            ));
+        }
+    }
+    print_package_preview(&manifest);
+    confirm_install(yes)?;
+    let record =
+        hc_tui::plugin::registry::install(config, path, policy).map_err(anyhow::Error::msg)?;
+    println!(
+        "{}",
+        t3(
+            "installed {} generation {} ({})",
+            record.id,
+            record.generation,
+            if record.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        )
+    );
+    Ok(())
+}
+
+/// 从暂存目录安装：先校验清单与 bundle，再按清单形态发布；任何一步失败都不
+/// 改动原记录与指针，暂存目录随来源一起删除。
+fn install_staged(
+    config: &hc_tui::config::Config,
+    id: Option<&str>,
+    staged: &hc_tui::pkg::source::Staged,
+    policy: hc_tui::plugin::registry::EnablePolicy,
+    yes: bool,
+) -> Result<()> {
+    let loaded = hc_tui::pkg::install_ready(staged.path()).map_err(anyhow::Error::msg)?;
+    if let Some(id) = id {
+        if loaded.manifest.id() != id {
+            anyhow::bail!(t3(
+                "{} declares package id {}, not {}",
+                staged.origin(),
+                loaded.manifest.id(),
+                id
+            ));
+        }
+    }
+    let legacy = loaded.origin == hc_tui::pkg::Origin::LegacyMod;
+    print_package_preview(&loaded.manifest);
+    println!("{}", t1("  source {}", staged.origin()));
+    confirm_install(yes)?;
+    let record = if legacy {
+        hc_tui::mods::store::install_local_from(config, staged.path(), Some(staged.origin()))
+            .map_err(anyhow::Error::msg)?
+    } else {
+        hc_tui::plugin::registry::install_from(config, staged.path(), Some(staged.origin()), policy)
+            .map_err(anyhow::Error::msg)?
+    };
+    println!(
+        "{}",
+        t3(
+            "installed {} generation {} ({})",
+            record.id,
+            record.generation,
+            if record.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        )
+    );
+    Ok(())
 }
 
 fn print_package_preview(manifest: &hc_tui::plugin::manifest::Manifest) {
