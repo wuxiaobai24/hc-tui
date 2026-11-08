@@ -479,6 +479,7 @@ impl LegacyFile {
             description: None,
             actions: Vec::new(),
             terminals: Vec::new(),
+            services: Vec::new(),
             module: Some(Module {
                 title: Some(title),
                 bundle: legacy.bundle,

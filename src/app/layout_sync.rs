@@ -117,6 +117,8 @@ impl App {
             self.adopt_layout(&value, version);
             if initial {
                 self.ensure_layout();
+                // 初次读到文档就对账一次：认领活着的服务终端，回收声明没了的。
+                self.services_reconcile(self.service_trigger);
                 if self.config.restore {
                     self.request_shared("");
                     self.call_rpc("machines.sync", "machine.list", json!({}));

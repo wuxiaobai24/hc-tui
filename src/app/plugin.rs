@@ -509,7 +509,7 @@ impl App {
     }
 
     /// 动作与终端共用的注入变量；`HCTUI_CONTEXT_ID` 由调用方补充。
-    fn plugin_env_base(&self, package: &str, root: &Path) -> BTreeMap<String, String> {
+    pub(super) fn plugin_env_base(&self, package: &str, root: &Path) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();
         env.insert("HCTUI_PLUGIN_ID".into(), package.to_string());
         env.insert("HCTUI_PLUGIN_ROOT".into(), root.display().to_string());

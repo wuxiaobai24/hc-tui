@@ -160,6 +160,41 @@ fn settle(app: &mut App) {
     }
 }
 
+/// 包集合变更后的服务对账：连上已存在的 core 改台账，没有 core 时留到下次窗口。
+///
+/// 返回本次对账发现的问题（`missing_program` 等），调用方负责打印，不静默。
+pub fn sync_services(config: &Config, trigger: super::services::Trigger) -> Vec<String> {
+    if !core_alive(config) {
+        return Vec::new();
+    }
+    let mut config = config.clone();
+    // 台账在文档里：无论窗口怎么配置都要先读文档再写。
+    config.restore = true;
+    config.attach = None;
+    let Ok(mut app) = App::new(config) else {
+        return vec![t("cannot connect to core").to_string()];
+    };
+    app.service_trigger = trigger;
+    wait_ready(&mut app);
+    if !app.doc_loaded {
+        app.shutdown();
+        return vec![t("cannot read layout; services were not reconciled").to_string()];
+    }
+    app.services_reconcile(trigger);
+    let deadline = Instant::now() + LOAD_TIMEOUT;
+    while Instant::now() < deadline {
+        app.pump();
+        if !app.inflight.keys().any(|tag| tag.starts_with("svc:")) {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    settle(&mut app);
+    let issues = app.service_issues.clone();
+    app.shutdown();
+    issues
+}
+
 /// `hc-tui do` 的无窗口路径。返回进程退出码。
 pub fn run(config: &Config, command: &str, args: &Value) -> Result<i32> {
     if needs_window(command) {

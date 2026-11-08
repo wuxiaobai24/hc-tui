@@ -50,6 +50,7 @@ mod package_tests;
 mod panels;
 mod plugin;
 mod renaming;
+pub mod services;
 mod shared_sync;
 pub mod winless;
 
@@ -398,6 +399,14 @@ pub struct App {
     pub mod_chrome_sync: Option<String>,
     /// 插件注册表：配置目录与安装存储的当前代际。
     pub plugins: crate::plugin::registry::Registry,
+    /// 服务作业台账：写进布局文档 `services` 段，旧读者忽略。
+    pub services: Vec<crate::model::SavedService>,
+    /// 本次对账的时机，决定 `on = "install"` 的服务是否拉起。
+    service_trigger: services::Trigger,
+    /// 等 `terminal.run` 回复的服务规划：`<package>.<service>` → (规划, 代际)。
+    service_pending: HashMap<String, (crate::plugin::service::Plan, u64)>,
+    /// 物化失败的服务：`missing_program` 等，`packages list` 与状态行共用。
+    pub service_issues: Vec<String>,
     /// 注册表加载时的磁盘指纹；变化时无需重启即可重新加载。
     pub plugin_revision: u64,
     /// 上一次主动扫描磁盘的时刻。
@@ -586,6 +595,10 @@ impl App {
             mods: crate::mods::ModRuntime::default(),
             mods_docked: std::collections::BTreeSet::new(),
             plugins: crate::plugin::registry::Registry::default(),
+            services: Vec::new(),
+            service_trigger: services::Trigger::default(),
+            service_pending: HashMap::new(),
+            service_issues: Vec::new(),
             plugin_revision: 0,
             plugin_scan_at: None,
             plugin_runner: crate::plugin::runner::Runner::new(""),
@@ -5651,6 +5664,11 @@ impl App {
             }
             return;
         }
+        if tag.starts_with("svc:") {
+            self.service_reply(tag, result);
+            self.dirty = true;
+            return;
+        }
         if tag.starts_with("shared.") {
             self.shared_reply(tag, result);
             return;
@@ -6021,11 +6039,13 @@ impl App {
                 })
                 .collect(),
             panes,
+            services: self.services.clone(),
         }
     }
 
     /// Reconcile saved structure while retaining unchanged VT views and attach streams.
     fn restore(&mut self, state: SavedState) {
+        self.services = state.services.clone();
         let mut previous = std::mem::take(&mut self.panes);
         let old_workspaces = std::mem::take(&mut self.workspaces);
         let mut mapping = BTreeMap::new();

@@ -80,6 +80,35 @@ impl Plugin {
     }
 }
 
+/// 一个已加载的服务声明；运行期由 [`crate::plugin::service`] 物化。
+#[derive(Debug, Clone)]
+pub struct ServiceInfo {
+    /// `<package>.<service>`。
+    pub name: String,
+    /// 包 ID。
+    pub package: String,
+    /// 服务 ID。
+    pub service: String,
+    /// 标题。
+    pub title: String,
+    /// 命令参数。
+    pub argv: Vec<String>,
+    /// 相对代际目录的工作目录。
+    pub cwd: Option<String>,
+    /// 叠加的环境变量。
+    pub env: std::collections::BTreeMap<String, String>,
+    /// `install` 或 `enable`。
+    pub on: String,
+    /// 相对包数据目录的日志文件。
+    pub log: Option<String>,
+    /// 代码根目录。
+    pub root: PathBuf,
+    /// 代际。
+    pub generation: u64,
+    /// 来源。
+    pub source: Source,
+}
+
 /// 一个贡献界面模块的包。
 #[derive(Debug, Clone)]
 pub struct ModuleEntry {
@@ -399,6 +428,31 @@ impl Registry {
         terminals
     }
 
+    /// 已启用包声明的常驻服务。
+    pub fn services(&self) -> Vec<ServiceInfo> {
+        let mut services = Vec::new();
+        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+            for service in plugin.manifest.services() {
+                services.push(ServiceInfo {
+                    name: format!("{}.{}", plugin.id, service.id()),
+                    package: plugin.id.clone(),
+                    service: service.id().to_string(),
+                    title: service.title().to_string(),
+                    argv: service.argv().iter().map(|s| s.to_string()).collect(),
+                    cwd: service.cwd().map(str::to_string),
+                    env: service.env(),
+                    on: service.on().to_string(),
+                    log: service.log().map(str::to_string),
+                    root: plugin.root.clone(),
+                    generation: plugin.generation,
+                    source: plugin.source,
+                });
+            }
+        }
+        services.sort_by(|a, b| a.name.cmp(&b.name));
+        services
+    }
+
     /// 已加载但被停用的包中拥有这个名字动作或终端入口的那个包。
     pub fn disabled_owner(&self, name: &str) -> Option<String> {
         self.plugins
@@ -495,6 +549,20 @@ impl Registry {
             .collect()
     }
 
+    /// 加载问题加上服务物化前能判定的缺失程序：`packages list` 不静默。
+    fn service_issues(&self, id: &str) -> Vec<String> {
+        let mut issues = self.issues_for(id);
+        for info in self.services().iter().filter(|info| info.package == id) {
+            if let Some(error) = super::service::missing_program(info) {
+                issues.push(format!(
+                    "service {}: {}: {}",
+                    info.name, error.kind, error.message
+                ));
+            }
+        }
+        issues
+    }
+
     /// `packages list` 的数据：两个 store 的记录按 id 合并，能力恒有。
     ///
     /// 旧记录没有 `capabilities` 字段时按清单回填，不进 `issues`。
@@ -539,7 +607,7 @@ impl Registry {
                     enabled: record.enabled,
                     capabilities,
                     module,
-                    issues: self.issues_for(&record.id),
+                    issues: self.service_issues(&record.id),
                 }
             })
             .collect()

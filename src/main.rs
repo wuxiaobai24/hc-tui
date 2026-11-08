@@ -635,7 +635,11 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
                 [target] => (None, target.clone()),
                 _ => anyhow::bail!(t1("usage: hc-tui packages {} <dir|.nshpkg>", group)),
             };
-            packages_install(&config, id.as_deref(), &target, policy, yes)
+            let result = packages_install(&config, id.as_deref(), &target, policy, yes);
+            if result.is_ok() {
+                sync_services(&config, hc_tui::app::services::Trigger::Install);
+            }
+            result
         }
         "uninstall" => {
             let id = package_target(&targets, "uninstall")?;
@@ -645,11 +649,16 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
                 hc_tui::mods::store::uninstall(&config, id).map_err(anyhow::Error::msg)?;
             }
             println!("{}", t1("uninstalled {}", id));
+            sync_services(&config, hc_tui::app::services::Trigger::Enable);
             Ok(())
         }
         "link" => {
             let dir = package_target(&targets, "link")?;
-            packages_link(&config, dir, policy)
+            let result = packages_link(&config, dir, policy);
+            if result.is_ok() {
+                sync_services(&config, hc_tui::app::services::Trigger::Install);
+            }
+            result
         }
         "unlink" => {
             let id = package_target(&targets, "unlink")?;
@@ -663,6 +672,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
                     .map_err(anyhow::Error::msg)?,
             }
             println!("{}", t1("unlinked {}", id));
+            sync_services(&config, hc_tui::app::services::Trigger::Enable);
             Ok(())
         }
         "enable" | "disable" => {
@@ -673,6 +683,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
                 "{}",
                 t2("{} {}", if enabled { "enabled" } else { "disabled" }, id)
             );
+            sync_services(&config, hc_tui::app::services::Trigger::Enable);
             Ok(())
         }
         "gc" => {
@@ -718,6 +729,13 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
             "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log (unknown: {})",
             other
         )),
+    }
+}
+
+/// 包集合变了就对账服务；core 不在时留给下一次窗口，问题打到 stderr 不静默。
+fn sync_services(config: &hc_tui::config::Config, trigger: hc_tui::app::services::Trigger) {
+    for issue in hc_tui::app::winless::sync_services(config, trigger) {
+        eprintln!("{issue}");
     }
 }
 

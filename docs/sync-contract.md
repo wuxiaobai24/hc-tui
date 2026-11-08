@@ -9,6 +9,7 @@
 | 当前 Space/Tab/Pane、焦点、zoom | 否 | 客户端屏幕状态，不回写共享结构 |
 | settle | 否，遵循当前 App 语义 | App 类型声明与行为说明明确是“put away on this screen”；TUI 存在自己的恢复文档。跨端同步需先改变 App 契约，不能单方添加假字段 |
 | 主题、快捷键、命令面板、侧栏折叠与滚动 | 否 | 本机配置/屏幕状态 |
+| 服务作业台账 | 否 | `hctui-layout-v1` 的可选 `services` 段（`{id, package, service, generation, terminal, started_ms}`）；不存在即没有服务，旧读者忽略，`schema_version` 仍是 3 |
 | Pi JSONL 正文 | 不写共享文档 | session label 提供路径，正文在该终端所在机器读取；标明本机映射/推断、远端映射/失败 |
 
 App 的未知字段可随往返保留，但不代表 TUI 承诺理解或操作它们。屏幕改变不应为了“同步”改写 App 的选中项、主题和 settle。

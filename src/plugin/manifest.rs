@@ -23,6 +23,8 @@ pub const PLATFORMS: &[&str] = &["linux", "macos"];
 pub const CONTEXTS: &[&str] = &["global", "space", "pane"];
 /// 终端入口的放置方式。
 pub const PLACEMENTS: &[&str] = &["tab", "right", "down", "float", "popup", "zoomed"];
+/// 服务在什么时候被物化。
+pub const SERVICE_TRIGGERS: &[&str] = &["install", "enable"];
 
 /// 一条清单错误，带文件、行、列。
 #[derive(Debug, Clone)]
@@ -104,6 +106,9 @@ pub struct Manifest {
     /// 终端入口；M6 只校验与展示，执行在 M7。
     #[serde(default)]
     pub terminals: Vec<Terminal>,
+    /// 常驻服务：物化成 core 的 keep 终端。
+    #[serde(default)]
+    pub services: Vec<Service>,
     /// 界面模块；有这一段才算贡献界面。
     #[serde(default)]
     pub module: Option<Module>,
@@ -251,6 +256,91 @@ impl Terminal {
     }
 }
 
+/// `[[services]]`：一条常驻入口，物化成 core 的 keep 终端。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Service {
+    /// 服务 ID，限 `[a-z0-9_-]{1,32}`，包内唯一。
+    pub id: toml::Spanned<String>,
+    /// 显示名。
+    pub title: toml::Spanned<String>,
+    /// 命令参数；`./` 开头相对代际目录。
+    pub argv: toml::Spanned<Vec<toml::Spanned<String>>>,
+    /// 工作目录；相对代际目录，缺省代际根。
+    #[serde(default)]
+    pub cwd: Option<toml::Spanned<String>>,
+    /// 叠加在 core 环境之上的变量。
+    #[serde(default)]
+    pub env: Option<toml::Spanned<toml::value::Table>>,
+    /// `install` 或 `enable`；缺省 `enable`。
+    #[serde(default)]
+    pub on: Option<toml::Spanned<String>>,
+    /// 日志文件；相对包数据目录，缺省不落文件。
+    #[serde(default)]
+    pub log: Option<toml::Spanned<String>>,
+}
+
+impl Service {
+    /// 服务 ID。
+    pub fn id(&self) -> &str {
+        self.id.get_ref()
+    }
+
+    /// 标题。
+    pub fn title(&self) -> &str {
+        self.title.get_ref()
+    }
+
+    /// 命令参数。
+    pub fn argv(&self) -> Vec<&str> {
+        self.argv
+            .get_ref()
+            .iter()
+            .map(|value| value.get_ref().as_str())
+            .collect()
+    }
+
+    /// 工作目录；相对代际目录。
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd
+            .as_ref()
+            .map(|value| value.get_ref().as_str())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// 叠加的环境变量。
+    pub fn env(&self) -> std::collections::BTreeMap<String, String> {
+        self.env
+            .as_ref()
+            .map(|table| {
+                table
+                    .get_ref()
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 物化时机；缺省 `enable`。
+    pub fn on(&self) -> &str {
+        self.on
+            .as_ref()
+            .map(|value| value.get_ref().as_str())
+            .unwrap_or("enable")
+    }
+
+    /// 日志文件；相对包数据目录。
+    pub fn log(&self) -> Option<&str> {
+        self.log
+            .as_ref()
+            .map(|value| value.get_ref().as_str())
+            .filter(|value| !value.is_empty())
+    }
+}
+
 impl Manifest {
     /// 包 ID。
     pub fn id(&self) -> &str {
@@ -322,6 +412,11 @@ impl Manifest {
     /// 模块 bundle 的包内相对路径。
     pub fn bundle(&self) -> Option<&str> {
         self.module.as_ref().map(Module::bundle)
+    }
+
+    /// 声明的常驻服务；没有这一段时为空。
+    pub fn services(&self) -> &[Service] {
+        &self.services
     }
 }
 
@@ -446,6 +541,65 @@ impl Manifest {
             }
             if let Some(args) = &action.args {
                 validate_schema(path, source, args.span(), args.get_ref())?;
+            }
+        }
+        let mut service_ids = std::collections::BTreeSet::new();
+        for service in &self.services {
+            check(
+                service.id.span(),
+                valid_element_id(service.id()),
+                "service id must match [a-z0-9_-]{1,32}",
+            )?;
+            check(
+                service.id.span(),
+                service_ids.insert(service.id().to_string()),
+                &format!("duplicate service id `{}`", service.id()),
+            )?;
+            check(
+                service.title.span(),
+                !service.title().trim().is_empty(),
+                "service title must not be empty",
+            )?;
+            check(
+                service.argv.span(),
+                !service.argv().is_empty(),
+                "service argv must not be empty",
+            )?;
+            check(
+                service.argv.span(),
+                service
+                    .argv()
+                    .first()
+                    .is_some_and(|program| !program.is_empty()),
+                "service argv[0] must not be empty",
+            )?;
+            check(
+                service.on.as_ref().map(toml::Spanned::span).unwrap_or(0..0),
+                SERVICE_TRIGGERS.contains(&service.on()),
+                "service on must be install or enable",
+            )?;
+            for (value, name) in [(&service.cwd, "cwd"), (&service.log, "log")] {
+                if let Some(value) = value {
+                    check(
+                        value.span(),
+                        bundle_path_ok(value.get_ref()),
+                        &format!("service {name} must be a relative path inside the package"),
+                    )?;
+                }
+            }
+            if let Some(env) = &service.env {
+                for (key, value) in env.get_ref() {
+                    check(
+                        env.span(),
+                        !key.is_empty() && !key.contains('=') && !key.contains('\0'),
+                        "service env keys must be plain variable names",
+                    )?;
+                    check(
+                        env.span(),
+                        value.is_str(),
+                        "service env values must be strings",
+                    )?;
+                }
             }
         }
         let mut terminal_ids = std::collections::BTreeSet::new();
@@ -1160,5 +1314,79 @@ type = "string"
             "{}",
             error.message
         );
+    }
+
+    const SERVICES: &str = r#"
+manifest_version = 2
+id = "dev.example.svc"
+name = "Svc"
+version = "0.1.0"
+host_api = 1
+
+[[services]]
+id = "watch"
+title = "Watcher"
+argv = ["sh", "./bin/watch.sh"]
+cwd = "."
+env = { RUST_LOG = "info" }
+on = "install"
+log = "services/watch.log"
+"#;
+
+    #[test]
+    fn a_v2_manifest_declares_services_with_the_documented_fields() {
+        let manifest = parse(Path::new("hctui.toml"), SERVICES).unwrap();
+        assert_eq!(manifest.services().len(), 1);
+        let service = &manifest.services()[0];
+        assert_eq!(service.id(), "watch");
+        assert_eq!(service.title(), "Watcher");
+        assert_eq!(service.argv(), vec!["sh", "./bin/watch.sh"]);
+        assert_eq!(service.cwd(), Some("."));
+        assert_eq!(service.env()["RUST_LOG"], "info");
+        assert_eq!(service.on(), "install");
+        assert_eq!(service.log(), Some("services/watch.log"));
+        // services 不影响现有能力判定。
+        assert_eq!(
+            manifest.capabilities(),
+            Capabilities {
+                actions: false,
+                terminals: false,
+                module: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_service_defaults_to_enable_and_rejects_bad_fields() {
+        let manifest = parse(
+            Path::new("hctui.toml"),
+            "manifest_version = 2\nid = \"dev.example.svc\"\nname = \"Svc\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[services]]\nid = \"watch\"\ntitle = \"W\"\nargv = [\"sh\"]\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.services()[0].on(), "enable");
+        assert_eq!(manifest.services()[0].cwd(), None);
+        assert_eq!(manifest.services()[0].log(), None);
+
+        let header = "manifest_version = 2\nid = \"dev.example.svc\"\nname = \"Svc\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[services]]\nid = \"watch\"\ntitle = \"W\"\nargv = [\"sh\"]\n";
+        let error = parse_err(&format!("{header}on = \"always\"\n"));
+        assert!(
+            error.message.contains("install or enable"),
+            "{}",
+            error.message
+        );
+        let error = parse_err(&format!("{header}log = \"/var/log/x.log\"\n"));
+        assert!(error.message.contains("relative path"), "{}", error.message);
+        let error = parse_err(&format!("{header}restart = \"always\"\n"));
+        assert!(error.message.contains("unknown field"), "{}", error.message);
+        let error = parse_err(&format!(
+            "{header}\n[[services]]\nid = \"watch\"\ntitle = \"W2\"\nargv = [\"sh\"]\n"
+        ));
+        assert!(
+            error.message.contains("duplicate service id"),
+            "{}",
+            error.message
+        );
+        let error = parse_err("manifest_version = 2\nid = \"dev.example.svc\"\nname = \"Svc\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[services]]\nid = \"watch\"\ntitle = \"W\"\nargv = []\n");
+        assert!(error.message.contains("argv"), "{}", error.message);
     }
 }

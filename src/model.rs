@@ -555,6 +555,31 @@ pub struct SavedState {
     pub workspaces: Vec<SavedWorkspace>,
     #[serde(default)]
     pub panes: BTreeMap<String, SavedPane>,
+    /// 服务作业台账；旧读者忽略这一段。
+    #[serde(default)]
+    pub services: Vec<SavedService>,
+}
+
+/// 一条服务作业：声明与它实际落在 core 里的终端地址。
+///
+/// `id` 是 `(package, service)` 的合并键，布局文档的数组合并按它认身份。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedService {
+    pub id: String,
+    pub package: String,
+    pub service: String,
+    #[serde(default)]
+    pub generation: u64,
+    pub terminal: String,
+    #[serde(default)]
+    pub started_ms: u64,
+}
+
+impl SavedService {
+    /// 台账的合并键。
+    pub fn key(package: &str, service: &str) -> String {
+        format!("{package}.{service}")
+    }
 }
 
 impl SavedState {
@@ -566,6 +591,7 @@ impl SavedState {
             active_workspace: 0,
             workspaces: Vec::new(),
             panes: BTreeMap::new(),
+            services: Vec::new(),
         }
     }
 
@@ -780,6 +806,7 @@ mod tests {
                 }],
             }],
             panes: BTreeMap::new(),
+            services: Vec::new(),
         }
     }
 
@@ -792,6 +819,23 @@ mod tests {
         assert!(parsed.is_usable());
         let tree: SplitNode = (&state.workspaces[0].tabs[0].tree).into();
         assert_eq!(tree.panes(), vec![PaneId(2), PaneId(3)]);
+    }
+
+    #[test]
+    fn the_services_ledger_is_an_optional_segment() {
+        // 旧文档没有 services：照样解析，台账为空。
+        let legacy = r#"{"schema_version":3,"active_workspace":0,"workspaces":[{"id":1,"active_tab":0,"tabs":[{"id":1,"focus":1,"tree":{"kind":"leaf","pane":1}}]}],"panes":{"1":{"terminal":"t1","module":null,"name":null,"origin":null}}}"#;
+        let state = SavedState::parse(legacy).unwrap();
+        assert!(state.services.is_empty());
+        assert!(state.is_usable());
+        // 带 services 的文档：读出来，写回一字不差。
+        let with = r#"{"schema_version":3,"active_workspace":0,"workspaces":[{"id":1,"active_tab":0,"tabs":[{"id":1,"focus":1,"tree":{"kind":"leaf","pane":1}}]}],"panes":{"1":{"terminal":"t1","module":null,"name":null,"origin":null}},"services":[{"id":"dev.example.svc.watch","package":"dev.example.svc","service":"watch","generation":2,"terminal":"t7","started_ms":5}]}"#;
+        let state = SavedState::parse(with).unwrap();
+        assert_eq!(state.services.len(), 1);
+        assert_eq!(state.services[0].terminal, "t7");
+        assert_eq!(state.schema_version, SavedState::SCHEMA);
+        let round = serde_json::to_string(&state).unwrap();
+        assert!(round.contains("\"services\""), "{round}");
     }
 
     #[test]

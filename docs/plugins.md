@@ -82,6 +82,7 @@ events = ["state.changed", "terminal.status"]
 | `[[terminals]].requires_programs` | 启动前由实际执行位置（core）在目标机器检查 PATH，缺失时报 `missing_program` 并列出缺失项 |
 | `[module].bundle` | 包内相对路径；安装时校验文件存在且非空 |
 | `[module].place` / `size` / `focusable` | 与旧 `[mod]` 语义一致：停靠位置、停靠厚度（≤1 视为占比）、是否允许焦点移入 |
+| `[[services]]` | 常驻服务，物化成 core 的 keep 终端；字段见 [5.1](#51-常驻服务) |
 | `[grants].host` / `events` | 宿主方法与事件；必须在宿主白名单内，越界在清单期报错 |
 
 能力 `capabilities { actions, terminals, module }` 由清单推导，不在清单里手写声明。动作名 `<package-id>.<action-id>`，终端名 `<package-id>.<terminal-id>`。包 id 允许点号做命名空间，元素 id 限 `[a-z0-9_-]{1,32}`。内置命令与动作名不可被覆盖。
@@ -182,6 +183,41 @@ hc-tui packages uninstall dev.hctui.pkg.git-board
 - 打开时为目标代际写 pin 文件 `<state>/plugins/pins/<package>/<generation>/<owner>.json`；动作入队即登记 `invocation` pin，调用结束后释放。终端先按请求登记占位身份，attach 后换成带 session 与机器名的核心地址；**关闭 Pane 不释放终端 pin**，只有 core 报告该终端结束（`finished`/`removed`/`lost` 事件、程序退出）才释放。进程 PID 存活不参与判断。
 - `plugins pane open` 先返回请求 ID；需要程序探测时状态为 `probing`，拿到终端地址后为 `opened`。探测结果回来后只验证冻结的目标仍然存在，不重新解析；目标 Space 已移除则报 `target_gone`，Pane 建在目标 Space 里，与探测期间的用户切换无关。失败状态带 `error_kind`：`unsupported`、`missing_program`、`offline`、`target_gone`、`disabled`、`unavailable`；`disabled` 表示包已安装但被停用。
 - 不自动上传插件目录、不执行远端安装、不复制凭证、不转发本机 socket。需要回调客户端时走 `hc-tui` CLI 或事件流。
+
+### 5.1 常驻服务
+
+`[[services]]` 是需要活过窗口的进程：宿主把它物化成 core 的 keep 终端，`hc-tui` 只做「声明 → 作业」的翻译。
+
+```toml
+[[services]]
+id = "watch"                 # [a-z0-9_-]{1,32}，包内唯一
+title = "Watcher"
+argv = ["sh", "./bin/watch.sh"]
+cwd = "."                    # 相对代际目录；默认代际根
+env = { RUST_LOG = "info" }  # 可选
+on = "install"               # install | enable（默认 enable）
+log = "services/watch.log"   # 可选；相对包数据目录 <state>/plugins/data/<package>/
+```
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 服务 ID，`[a-z0-9_-]{1,32}`，包内唯一；完整名 `<package-id>.<service-id>` |
+| `argv` | 与 `[[actions]]` 同义；`./` 开头的程序相对代际目录解析，其余按 PATH 查找，找不到在物化前报 `missing_program` |
+| `cwd` | 相对代际目录，必须是已存在的目录 |
+| `env` | 叠加在动作/终端同一套 `HCTUI_PLUGIN_*` 注入变量之上；新增 `HCTUI_PLUGIN_SERVICE` 与 `HCTUI_PLUGIN_STATE_DIR` |
+| `on` | `install` 只在安装/更新（代际变化）后拉起；`enable`（默认）在启用与窗口重开时补齐 |
+| `log` | 声明的服务 stdout/stderr 追加到这个文件；用 `sh -c 'exec … >> 日志 2>&1'` 打开，不引入额外进程 |
+
+运行期台账写在 `hctui-layout-v1` 文档的可选 `services` 段：一条 `{id, package, service, generation, terminal, started_ms}`，`id` 是三方合并的合并键。这个段不存在时就是没有服务，旧读者按未知字段忽略，`schema_version` 仍是 3。
+
+不变量：
+
+- 同一 `(package, service)` 至多一个活终端。core 里的终端名是 `hcsvc-<hash16>`（`[a-z0-9-]`，≤32 字符），对账先按名字与 `hctui.service` 标签认领既有终端；撞名时 `terminal.run` 返回 `name_taken`，改为认领，不再起第二个。
+- 台账写入走布局文档唯一入口（`doc.set` 的 CAS + 三方合并），没有第二条写入路径。
+- 停用与卸载后声明集合不再包含该服务，台账里的地址一律 `terminal.kill` 并删记录。
+- 没有 core 时 CLI 只改包记录，服务留到下一次窗口打开时对账。
+
+不提供 `restart`：重启策略属于包自己（`docs/adr/0002-process-topology.md` §D.1）。日志轮转、健康检查、自动重启、多机调度都不做；服务只在本机（当前 Space 所属机器的 core）上起。
 
 ## 6. 多机
 
