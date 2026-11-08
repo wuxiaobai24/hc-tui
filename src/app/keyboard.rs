@@ -173,3 +173,129 @@ impl App {
         Some((label.into(), hint))
     }
 }
+
+#[cfg(test)]
+mod kitty_table_tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    use crate::term::input;
+
+    /// 老路径：legacy 终端字节进 crossterm 后的事件，直接在测试里按同样的形状构造。
+    /// 新路径：kitty 协议字节交给 `input::parse_kitty_key`。
+    fn kitty(bytes: &[u8]) -> KeyEvent {
+        let (key, used) = input::parse_kitty_key(bytes).expect("kitty sequence");
+        assert_eq!(used, bytes.len(), "{bytes:?}");
+        key
+    }
+
+    /// 同一个键在两种协议下必须解出同一个键，连 `KeyInput` 也一样。
+    fn assert_same(legacy: KeyEvent, bytes: &[u8]) {
+        let decoded = kitty(bytes);
+        assert_eq!(legacy, decoded, "{bytes:?}");
+        assert_eq!(input::map_key(legacy), input::map_key(decoded), "{bytes:?}");
+    }
+
+    #[test]
+    fn kitty_and_legacy_agree_on_unambiguous_keys() {
+        let table: [(KeyEvent, &[u8]); 12] = [
+            (
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                b"\x1b[97u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                b"\x1b[97;5u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                b"\x1b[97;2u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+                b"\x1b[32;5u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                b"\x1b[13u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                b"\x1b[127u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                b"\x1b[57352u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
+                b"\x1b[57352;5u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+                b"\x1b[57350;3u",
+            ),
+            (
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::SHIFT),
+                b"\x1b[57355;2u",
+            ),
+            (
+                KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+                b"\x1b[57368u",
+            ),
+            (
+                KeyEvent::new(
+                    KeyCode::Char('Q'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+                b"\x1b[113;6u",
+            ),
+        ];
+        for (legacy, bytes) in table {
+            assert_same(legacy, bytes);
+        }
+    }
+
+    /// Ctrl+I / Ctrl+M / Ctrl+[ 在 legacy 下与 Tab / Enter / Esc 撞在一起，
+    /// kitty 协议把它们分开。这一条同时锁住「歧义键确实能区分」和「legacy 仍然撞」。
+    #[test]
+    fn kitty_separates_the_ambiguous_keys() {
+        let ambiguous: [(KeyEvent, KeyEvent, &[u8]); 3] = [
+            (
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+                b"\x1b[105;5u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+                b"\x1b[109;5u",
+            ),
+            (
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL),
+                b"\x1b[91;5u",
+            ),
+        ];
+        for (plain, control, bytes) in ambiguous {
+            let decoded = kitty(bytes);
+            assert_eq!(decoded, control, "{bytes:?}");
+            assert_ne!(decoded, plain, "{bytes:?}");
+            assert_ne!(input::map_key(decoded), input::map_key(plain), "{bytes:?}");
+        }
+    }
+
+    /// release / repeat 只改 `KeyEventKind`，键位映射与按下时一致。
+    #[test]
+    fn kitty_event_kinds_keep_the_same_key() {
+        for (bytes, kind) in [
+            (&b"\x1b[105;5:1u"[..], KeyEventKind::Press),
+            (&b"\x1b[105;5:2u"[..], KeyEventKind::Repeat),
+            (&b"\x1b[105;5:3u"[..], KeyEventKind::Release),
+        ] {
+            let key = kitty(bytes);
+            assert_eq!(key.kind, kind);
+            assert_eq!(key.code, KeyCode::Char('i'));
+            assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+        }
+    }
+}

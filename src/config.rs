@@ -124,6 +124,28 @@ pub enum CollapsedSidebar {
     Hidden,
 }
 
+/// 宿主终端的键盘协议策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardProtocol {
+    /// 探测 `CSI ? u`，100ms 内没有回复就按不支持处理（默认）。
+    Auto,
+    /// 不探测，直接压入 disambiguate 标志。
+    Kitty,
+    /// 只用传统 CSI 序列，不探测也不启用。
+    Legacy,
+}
+
+impl KeyboardProtocol {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "kitty" => Some(Self::Kitty),
+            "legacy" => Some(Self::Legacy),
+            _ => None,
+        }
+    }
+}
+
 /// 宿主光标策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostCursor {
@@ -777,6 +799,8 @@ pub struct Config {
     pub theme_source: String,
     /// `[theme.custom]` 的原始键值，热重载来源后重新套用。
     pub theme_custom: Vec<(String, String)>,
+    /// 宿主键盘协议；探测不到 kitty 回复时沿用传统序列。
+    pub keyboard_protocol: KeyboardProtocol,
     pub mouse_capture: bool,
     pub mouse_scroll_lines: usize,
     pub copy_on_select: bool,
@@ -955,6 +979,7 @@ impl Default for Config {
             theme: theme::builtin("default").expect("default theme exists"),
             theme_source: theme::source::AUTO.to_string(),
             theme_custom: Vec::new(),
+            keyboard_protocol: KeyboardProtocol::Auto,
             mouse_capture: true,
             mouse_scroll_lines: 3,
             copy_on_select: false,
@@ -1196,6 +1221,10 @@ impl Config {
                 "ui.tab_bar_right_separator" => match value.text() {
                     Some(text) => self.tab_bar_right_separator = text.to_string(),
                     None => warnings.push(format!("{path}: 需要字符串")),
+                },
+                "ui.keyboard_protocol" => match value.text().and_then(KeyboardProtocol::parse) {
+                    Some(protocol) => self.keyboard_protocol = protocol,
+                    None => warnings.push(format!("{path}: 只支持 auto / kitty / legacy")),
                 },
                 "ui.mouse_capture" => {
                     self.mouse_capture = value
@@ -1673,6 +1702,14 @@ pub fn default_config_text() -> String {
         "hide_tab_bar_when_single_tab = {}\n",
         config.hide_tab_bar_when_single_tab
     ));
+    out.push_str(&format!(
+        "keyboard_protocol = \"{}\"   # auto | kitty | legacy\n",
+        match config.keyboard_protocol {
+            KeyboardProtocol::Auto => "auto",
+            KeyboardProtocol::Kitty => "kitty",
+            KeyboardProtocol::Legacy => "legacy",
+        }
+    ));
     out.push_str(&format!("mouse_capture = {}\n", config.mouse_capture));
     out.push_str(&format!(
         "mouse_scroll_lines = {}\n",
@@ -2083,6 +2120,26 @@ mod tests {
         let document = parse_toml(&default_config_text()).unwrap();
         config.apply(&document);
         assert!(!config.zellij_keys);
+    }
+
+    #[test]
+    fn parses_the_keyboard_protocol_policy() {
+        let mut config = Config::default();
+        assert_eq!(config.keyboard_protocol, KeyboardProtocol::Auto);
+        let document = parse_toml("[ui]\nkeyboard_protocol = \"kitty\"\n").unwrap();
+        config.apply(&document);
+        assert_eq!(config.keyboard_protocol, KeyboardProtocol::Kitty);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let document = parse_toml("[ui]\nkeyboard_protocol = \"legacy\"\n").unwrap();
+        config.apply(&document);
+        assert_eq!(config.keyboard_protocol, KeyboardProtocol::Legacy);
+        let document = parse_toml(&default_config_text()).unwrap();
+        config.apply(&document);
+        assert_eq!(config.keyboard_protocol, KeyboardProtocol::Auto);
+        let document = parse_toml("[ui]\nkeyboard_protocol = \"bogus\"\n").unwrap();
+        config.apply(&document);
+        assert_eq!(config.keyboard_protocol, KeyboardProtocol::Auto);
+        assert_eq!(config.warnings.len(), 1);
     }
 
     #[test]

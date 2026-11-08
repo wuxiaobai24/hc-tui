@@ -37,6 +37,7 @@ fn main() -> Result<()> {
         Some("plugins") => plugins_command(&args[1..]),
         Some("events") => events_command(&args[1..]),
         Some("probe") => probe(&args[1..]),
+        Some("keys") => keys_command(&args[1..]),
         Some("commands") => {
             let config = parse_options(&args[1..])?;
             println!(
@@ -114,6 +115,10 @@ fn usage() {
     println!();
     println!("{}", t("usage: hc-tui [options]"));
     println!("{}", t("       hc-tui probe [options]"));
+    println!(
+        "{}",
+        t("       hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex>")
+    );
     println!("       hc-tui update [--version X.Y.Z] [--check] [--from archive.tar.gz]");
     println!("       hc-tui session-hook install|remove|status");
     println!("       hc-tui theme list|show|reload [--config <path>]");
@@ -1902,9 +1907,128 @@ fn run_tui(config: hc_tui::config::Config) -> Result<()> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = hc_tui::tui::restore();
+        hc_tui::term::input::restore_keyboard();
         default_hook(info);
     }));
-    hc_tui::app::run(config)
+    // 探测与启用宿主键盘协议；未启用时不动终端。
+    let keyboard = hc_tui::term::input::KeyboardGuard::open(config.keyboard_protocol);
+    let result = hc_tui::app::run(config);
+    drop(keyboard);
+    result
+}
+
+/// `hc-tui keys probe [--seconds <n>]`：打印宿主键盘协议的探测回复与原始按键字节。
+/// `hc-tui keys decode <hex>`：把一段十六进制字节按 kitty 协议解成按键。
+fn keys_command(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("probe") => keys_probe(&args[1..]),
+        Some("decode") => {
+            let text = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!(t("decode needs hex bytes")))?;
+            let bytes = parse_hex(text)?;
+            let (key, used) = hc_tui::term::input::parse_kitty_key(&bytes)
+                .or_else(|| {
+                    let byte = *bytes.first()?;
+                    let key = hc_tui::term::input::parse_legacy_key(byte)?;
+                    Some((key, 1))
+                })
+                .ok_or_else(|| anyhow::anyhow!(t("not a key sequence")))?;
+            println!("used {used} key {key:?}");
+            Ok(())
+        }
+        _ => anyhow::bail!(t("usage: hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex>")),
+    }
+}
+
+fn keys_probe(args: &[String]) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let mut seconds = 5u64;
+    let mut policy = hc_tui::config::KeyboardProtocol::Auto;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--seconds" => {
+                index += 1;
+                seconds = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!(t("--seconds needs a value")))?
+                    .parse()?;
+            }
+            "--protocol" => {
+                index += 1;
+                let text = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!(t("--protocol needs a value")))?;
+                policy = hc_tui::config::KeyboardProtocol::parse(text)
+                    .ok_or_else(|| anyhow::anyhow!(t1("unknown protocol: {}", text)))?;
+            }
+            other => anyhow::bail!(t1("unknown option: {}", other)),
+        }
+        index += 1;
+    }
+
+    crossterm::terminal::enable_raw_mode()?;
+    let guard = hc_tui::term::input::KeyboardGuard::open(policy);
+    println!("policy {policy:?}");
+    println!("probe reply {:02x?}", guard.reply());
+    println!("enabled {}", guard.active());
+    println!(
+        "{}",
+        t1("typing window: {}s, press Ctrl+I then Tab", seconds)
+    );
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut pending: Vec<u8> = Vec::new();
+    while Instant::now() < deadline {
+        let mut chunk = Vec::new();
+        if !hc_tui::term::input::read_tty(Duration::from_millis(50), &mut chunk) {
+            continue;
+        }
+        println!("bytes {:02x?}", chunk);
+        pending.extend_from_slice(&chunk);
+        while !pending.is_empty() {
+            if hc_tui::term::input::kitty_incomplete(&pending) {
+                break;
+            }
+            match hc_tui::term::input::parse_kitty_key(&pending) {
+                Some((key, used)) => {
+                    println!("key {key:?}");
+                    pending.drain(..used);
+                }
+                None => {
+                    let byte = pending[0];
+                    match hc_tui::term::input::parse_legacy_key(byte) {
+                        Some(key) => {
+                            println!("key {key:?}");
+                            pending.remove(0);
+                        }
+                        None => println!("raw byte {:02x}", pending.remove(0)),
+                    }
+                }
+            }
+        }
+    }
+    drop(guard);
+    crossterm::terminal::disable_raw_mode()?;
+    println!("restored");
+    Ok(())
+}
+
+fn parse_hex(text: &str) -> Result<Vec<u8>> {
+    let digits: String = text
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    if !digits.len().is_multiple_of(2) {
+        anyhow::bail!(t1("odd hex length: {}", digits.len()));
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.as_bytes().chunks(2) {
+        let byte = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 /// P0 诊断：连上 core，打印握手结果。不进入 TUI。
