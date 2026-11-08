@@ -2,6 +2,7 @@
 id = "status"
 title = "Status"
 place = "none"
+region = "status"
 size = 1
 focusable = false
 host_api = 1

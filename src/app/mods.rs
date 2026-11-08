@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use super::App;
 use crate::i18n::{t, t1, t2};
 use crate::mods::host::{self, ModHost, ParamsContext, PendingCall};
-use crate::mods::{ModRuntime, SurfacePlace, SurfaceState, WindowPos};
+use crate::mods::{wiring, ModRuntime, SurfacePlace, SurfaceState, WindowPos};
 
 /// 快照的全部域；`state.changed` 的全集与 `state` 的 `domains` 过滤共用。
 pub const MOD_DOMAINS: &[&str] = &[
@@ -1392,7 +1392,7 @@ impl App {
             if self
                 .mods
                 .surface(id)
-                .is_some_and(|target| target.place == SurfacePlace::Toast)
+                .is_some_and(|target| !wiring::behavior(target.place).focus)
             {
                 return;
             }
@@ -1433,7 +1433,8 @@ impl App {
         if self.config.no_mods {
             return Err(t("mods are disabled (--no-mods)").to_string());
         }
-        if place == SurfacePlace::Toast && !self.chrome.has_toasts() {
+        let shape = wiring::behavior(place);
+        if shape.toast && !self.chrome.has_toasts() {
             return Err(t("chrome has no toasts block").to_string());
         }
         let package = self.mod_package(mod_id)?;
@@ -1533,17 +1534,16 @@ impl App {
         surface.state = SurfaceState::Running;
         surface.store_generation = store_generation;
         surface.props = props;
-        if place == SurfacePlace::Toast {
-            // 提示层固定形态：不抢焦点、不是模态、不参与 `Esc`、不吃鼠标。
-            surface.modal = false;
-            surface.autofocus = false;
-            surface.esc_to_host = false;
-            surface.click_through = true;
-            self.mod_toast_dirty = true;
-        } else {
+        // 形态默认行为：清屏、焦点、`Esc`、鼠标与 z 序都按表。
+        surface.modal = shape.modal;
+        surface.autofocus = shape.focus;
+        surface.esc_to_host = shape.esc;
+        surface.click_through = shape.click_through;
+        if shape.focus {
             self.focus_mod_surface(Some(id.clone()));
         }
-        if place == SurfacePlace::Toast {
+        if shape.toast {
+            self.mod_toast_dirty = true;
             // 模块接手绘制：内置槽位里属于这条表面的那条不再另画一份。
             let default = self.resolve_toast_surface(None);
             let taken = self.toast_notification.as_deref().is_some_and(|id| {
@@ -1795,7 +1795,7 @@ impl App {
         let toast = self
             .mods
             .surface(surface_id)
-            .is_some_and(|surface| surface.place == SurfacePlace::Toast);
+            .is_some_and(|surface| wiring::behavior(surface.place).toast);
         if toast {
             return;
         }
@@ -2019,17 +2019,11 @@ impl App {
             .surfaces
             .iter()
             .filter(|surface| {
-                matches!(
-                    surface.place,
-                    SurfacePlace::Dialog | SurfacePlace::Popup | SurfacePlace::Window
-                ) && (surface.interactive() || surface.state == SurfaceState::Failed)
+                wiring::behavior(surface.place).overlay
+                    && (surface.interactive() || surface.state == SurfaceState::Failed)
             })
             .map(|surface| {
-                let z = match surface.place {
-                    SurfacePlace::Dialog => 1,
-                    SurfacePlace::Popup => 2,
-                    _ => 3,
-                };
+                let z = wiring::behavior(surface.place).z;
                 (
                     z,
                     surface.id.clone(),
@@ -2085,7 +2079,7 @@ impl App {
             .iter()
             .find(|surface| {
                 surface.mod_id == mod_id
-                    && matches!(surface.place, SurfacePlace::Region | SurfacePlace::Pane)
+                    && wiring::behavior(surface.place).docked
                     && surface.interactive()
             })
             .map(|surface| surface.id.clone());
@@ -2121,18 +2115,11 @@ impl App {
             .surfaces
             .iter()
             .filter(|surface| {
-                (surface.interactive() || surface.state == SurfaceState::Failed)
+                wiring::behavior(surface.place).esc
                     && surface.esc_to_host
-                    && matches!(
-                        surface.place,
-                        SurfacePlace::Dialog | SurfacePlace::Popup | SurfacePlace::Window
-                    )
+                    && (surface.interactive() || surface.state == SurfaceState::Failed)
             })
-            .max_by_key(|surface| match surface.place {
-                SurfacePlace::Dialog => 1,
-                SurfacePlace::Popup => 2,
-                _ => 3,
-            })
+            .max_by_key(|surface| wiring::behavior(surface.place).z)
             .map(|surface| surface.id.clone());
         let Some(target) = target else {
             return false;
@@ -2146,6 +2133,57 @@ impl App {
             surface.view.handle(crate::mods::input::focus(focused));
         }
         self.dirty = true;
+    }
+
+    /// 默认区域模块有一条区域表面时，该区域一直绑在模块块上：运行中画模块，
+    /// 失败后在同一矩形里画错误占位（不抢焦点，命中域仍由内置实现登记）。
+    /// 没有清单声明接管该区域的模块时返回 `false`，该区域由内置实现渲染。
+    ///
+    /// 只在第一次绑定与插件代际变化时尝试打开：每帧重试会把包解析放到绘制路径上。
+    pub fn ensure_region_module(&mut self, mod_id: &str, props: serde_json::Value) -> bool {
+        if self.config.no_mods {
+            return false;
+        }
+        let existing = self
+            .mods
+            .surfaces
+            .iter()
+            .find(|surface| surface.mod_id == mod_id && surface.place == SurfacePlace::Region)
+            .map(|surface| (surface.id.clone(), surface.state));
+        if self.region_mods_revision != self.plugin_revision {
+            self.region_mods_attempted.clear();
+            self.region_mods_revision = self.plugin_revision;
+        }
+        if let Some((surface_id, state)) = existing {
+            if !self.mods.is_enabled(mod_id) {
+                self.mods_close(&surface_id);
+                return false;
+            }
+            return match state {
+                SurfaceState::Running => true,
+                // 占位阶段仍绑定该区域：矩形与命中域照旧，盒子由 `mods::render` 画。
+                SurfaceState::Failed => true,
+                _ => false,
+            };
+        }
+        if self.region_mods_attempted.contains(mod_id) {
+            return false;
+        }
+        // 区域模块只负责绘制，不接管键盘焦点。
+        let focused = self.focused_mod.clone();
+        let digest = props.to_string();
+        let opened = self.mods_open(mod_id, SurfacePlace::Region, props, None, None, None);
+        self.focus_mod_surface(focused);
+        match opened {
+            Ok(_) => {
+                self.region_mods_props.insert(mod_id.to_string(), digest);
+                true
+            }
+            Err(_) => {
+                self.region_mods_attempted.insert(mod_id.to_string());
+                false
+            }
+        }
     }
 
     /// 让外框里的模块区域与包记录的启用状态一致：停用的包撤下区域并关闭表面，

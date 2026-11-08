@@ -2,6 +2,7 @@
 id = "sidebar"
 title = "Sidebar"
 place = "none"
+region = "spaces"
 size = 26
 focusable = false
 host_api = 1

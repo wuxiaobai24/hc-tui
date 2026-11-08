@@ -207,6 +207,7 @@ fn packaged_module(name: &str) -> crate::pkg::ModuleInfo {
         place: "none".to_string(),
         size: None,
         focusable: true,
+        region: None,
     }
 }
 

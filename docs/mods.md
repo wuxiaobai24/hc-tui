@@ -177,7 +177,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 - `toasts` 是提示层标记：不占布局、不参与折叠，只声明模块提示层覆盖内容区；去掉它则外框不再渲染模块提示表面，内置 Rust toast 不受影响。默认外框带这个节点，旧树缺它时模块提示层不出现。
 - 恰好一个 `panes` 叶子，终端尺寸只由它决定；不允许两个区域同时竞争同一组终端。
 - 尺寸用字符格或比例；最小宽度与最小高度不足时按现有规则折叠，模块区域在折叠时不渲染。
-- 默认外框绑定内置模块。替换某个区域需要显式绑定：`mods.dock`、配置文件或 `mods.chrome` 动作；模块自身不能声明占据哪个区域。
+- 默认外框绑定内置模块。清单的 `[module].region` 可让模块接管三个内置区域（`spaces` / `tabs` / `status`，见 `docs/plugins.md` §2.4）；其它区域需要显式绑定：`mods.dock`、配置文件或 `mods.chrome` 动作，模块不能声明自己占据任意外框区域。
 - 外框保存在本地 state 的 `mods_chrome`，不写共享文档；GUI 侧看不到 TUI 的模块区域。
 
 表面类型：

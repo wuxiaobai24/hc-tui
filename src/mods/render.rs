@@ -40,7 +40,7 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
         areas.push((surface.id.clone(), rect));
         order.push((
             z_order(surface.place),
-            u8::from(surface.place == SurfacePlace::Toast),
+            u8::from(super::wiring::behavior(surface.place).toast),
             surface.id.clone(),
             rect,
         ));
@@ -61,12 +61,13 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
         let Some(surface) = app.mods.surface_mut(&id) else {
             continue;
         };
-        if surface.place == SurfacePlace::Dialog {
+        if super::wiring::behavior(surface.place).clear.is_some() {
             let theme = app.config.theme.clone();
-            match surface.clear {
-                crate::mods::ClearArea::Content => crate::ui::clear_area(frame, content, &theme),
-                crate::mods::ClearArea::Surface => crate::ui::clear_area(frame, rect, &theme),
-            }
+            let area = match surface.clear {
+                crate::mods::ClearArea::Content => content,
+                crate::mods::ClearArea::Surface => rect,
+            };
+            crate::ui::clear_area(frame, area, &theme);
         }
         if !matches!(surface.state, SurfaceState::Loading | SurfaceState::Running) {
             if surface.state == SurfaceState::Failed {
@@ -153,12 +154,7 @@ fn draw_error_box(
 }
 
 fn z_order(place: SurfacePlace) -> u8 {
-    match place {
-        SurfacePlace::Region | SurfacePlace::Pane | SurfacePlace::Toast => 0,
-        SurfacePlace::Dialog => 1,
-        SurfacePlace::Popup => 2,
-        SurfacePlace::Window => 3,
-    }
+    super::wiring::behavior(place).z
 }
 
 /// 表面本帧的矩形；region 用外框布局，pane 用槽位，覆盖层用自身位置。

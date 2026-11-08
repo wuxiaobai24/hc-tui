@@ -9,6 +9,7 @@ pub mod host;
 pub mod input;
 pub mod render;
 pub mod store;
+pub mod wiring;
 
 /// 宿主 → 模块的事件名；签名包按这份清单授予事件。
 pub const EVENTS: &[&str] = &[

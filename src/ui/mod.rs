@@ -38,7 +38,7 @@ mod chat;
 mod m9;
 pub mod mods_bind;
 
-use mods_bind::Plan as ModsBindPlan;
+use crate::mods::wiring::RegionLayer;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -70,44 +70,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     // 外框树算出本轮区域：侧栏、Tab 栏、内容区、模式行与模块区域。
-    // 三块默认区域按模块绑定，模块不可用时该区域仍是内置块。
+    // 区域表声明绘制次序，模块不可用时该区域仍是内置块。
     let plan = mods_bind::layout(app, area);
-    let ModsBindPlan {
-        layout,
-        sidebar_hits,
-        tab_bar_hits,
-    } = plan;
     let mode_line = app.mode_line();
-    app.mod_regions = layout.mods.clone();
-    app.mod_toasts = layout.toasts;
+    app.mod_regions = plan.layout.mods.clone();
+    app.mod_toasts = plan.layout.toasts;
 
-    match (layout.sidebar, layout.rail) {
-        (Some(rail), _) => render_sidebar(frame.buffer_mut(), app, rail, &theme),
-        (None, Some(rail)) => render_rail(frame, app, rail, &theme),
-        (None, None) => {
-            app.workspace_hits.clear();
-            app.agent_hits.clear();
-            // 模块接管侧栏的像素；命中域仍按内置布局登记，鼠标行为不变。
-            if let Some(rect) = sidebar_hits {
-                let mut scratch = Buffer::empty(area);
-                render_sidebar(&mut scratch, app, rect, &theme);
-            }
-        }
-    }
+    mods_bind::paint(frame, app, &plan, RegionLayer::Chrome, &theme, &mode_line);
 
-    if let Some(rect) = layout.tab_bar {
-        render_tab_bar(frame.buffer_mut(), app, rect, &theme);
-    } else if let Some(rect) = tab_bar_hits {
-        let mut scratch = Buffer::empty(area);
-        render_tab_bar(&mut scratch, app, rect, &theme);
-    } else {
-        let corner = Rect::new(layout.column.x, layout.column.y, 0, 0);
-        app.tab_bar = corner;
-        app.tab_hits.clear();
-        app.tab_add = corner;
-    }
-
-    app.reflow(layout.body);
+    app.reflow(plan.layout.body);
     let slots = app.slots.clone();
     for slot in &slots {
         render_pane(frame, app, *slot, &theme);
@@ -116,11 +87,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     crate::mods::render::draw_surfaces(app, frame);
     render_overlays(frame, app, &theme);
     if app.chat.is_some() {
-        chat::render(frame, app, layout.body, &theme);
+        chat::render(frame, app, plan.layout.body, &theme);
     }
-    if let (Some(status), Some(line)) = (layout.status, mode_line) {
-        render_mode_line(frame.buffer_mut(), app, status, &line, &theme);
-    }
+    mods_bind::paint(frame, app, &plan, RegionLayer::Overlay, &theme, &mode_line);
     render_modals(frame, app, area, &theme);
 }
 

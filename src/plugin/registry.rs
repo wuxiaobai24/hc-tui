@@ -223,6 +223,11 @@ pub struct Registry {
     pub plugins: Vec<Plugin>,
     /// 加载失败或跳过的包。
     pub issues: Vec<Issue>,
+    /// 内置区域 → 接管它的模块 ID。
+    ///
+    /// 由清单的 `[module] region` 解析：同一区域多个包声明时，已启用且 id
+    /// 字典序最小的胜出，其余记一条 [`Issue`]。每次重载注册表一并重建。
+    pub regions: std::collections::BTreeMap<&'static str, String>,
 }
 
 impl Registry {
@@ -320,7 +325,40 @@ impl Registry {
                 }
             }
         }
+        registry.resolve_regions();
         registry
+    }
+
+    /// 按清单的 `region` 决议每个内置区域的接管者；冲突不静默。
+    ///
+    /// `modules()` 已按 id 升序排列且只含已启用、bundle 齐全的包，所以同一区域
+    /// 先到者即字典序最小的胜出者。
+    fn resolve_regions(&mut self) {
+        let mut owners: std::collections::BTreeMap<&'static str, String> =
+            std::collections::BTreeMap::new();
+        for entry in self.modules() {
+            let Some(name) = entry.module.region.as_deref() else {
+                continue;
+            };
+            // 非法值在清单校验期就拒绝了，这里只处理合法名。
+            let Some(region) = crate::mods::wiring::region(name) else {
+                continue;
+            };
+            match owners.get(region.name) {
+                Some(winner) => self.issues.push(Issue {
+                    path: entry.root.clone(),
+                    id: Some(entry.id.clone()),
+                    message: format!(
+                        "region {} is already taken by {}; {} is not bound",
+                        region.name, winner, entry.id
+                    ),
+                }),
+                None => {
+                    owners.insert(region.name, entry.id.clone());
+                }
+            }
+        }
+        self.regions = owners;
     }
 
     fn push(&mut self, plugin: Plugin) {

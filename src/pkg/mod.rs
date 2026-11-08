@@ -80,6 +80,9 @@ pub struct ModuleInfo {
     pub size: Option<f64>,
     /// 是否允许把键盘焦点移入。
     pub focusable: bool,
+    /// 接管的内置区域名；`None` 表示不接管。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 /// `[module]`：有这一段才算贡献界面。
@@ -95,6 +98,9 @@ pub struct Module {
     /// `left` / `right` / `top` / `bottom` / `none`。
     #[serde(default)]
     pub place: Option<Spanned<String>>,
+    /// 接管哪个内置区域（`spaces` / `tabs` / `status`）；省略表示不接管。
+    #[serde(default)]
+    pub region: Option<Spanned<String>>,
     /// 停靠厚度；小于等于 1 视为占比。
     #[serde(default)]
     pub size: Option<Spanned<f64>>,
@@ -136,6 +142,11 @@ impl Module {
         self.size.as_ref().map(|value| *value.get_ref())
     }
 
+    /// 接管的内置区域名。
+    pub fn region(&self) -> Option<&str> {
+        self.region.as_ref().map(|value| value.get_ref().as_str())
+    }
+
     /// 是否允许把键盘焦点移入。
     pub fn focusable(&self) -> bool {
         self.focusable
@@ -162,6 +173,7 @@ impl Module {
             place: self.place().to_string(),
             size: self.size(),
             focusable: self.focusable(),
+            region: self.region().map(str::to_string),
         }
     }
 }
@@ -332,6 +344,7 @@ pub fn resolve(config: &Config, id: &str) -> Result<Option<Resolved>, String> {
                     place: "right".to_string(),
                     size: None,
                     focusable: true,
+                    region: None,
                 }),
                 grants: Vec::new(),
                 root,
@@ -446,6 +459,8 @@ struct LegacyMod {
     #[serde(default)]
     place: Option<Spanned<String>>,
     #[serde(default)]
+    region: Option<Spanned<String>>,
+    #[serde(default)]
     size: Option<Spanned<f64>>,
     #[serde(default)]
     focusable: Option<Spanned<bool>>,
@@ -486,6 +501,7 @@ impl LegacyFile {
                 title: Some(title),
                 bundle: legacy.bundle,
                 place: legacy.place,
+                region: legacy.region,
                 size: legacy.size,
                 focusable: legacy.focusable,
                 min_hc_tui_version: legacy.min_hc_tui_version,

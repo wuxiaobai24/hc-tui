@@ -81,6 +81,7 @@ events = ["state.changed", "terminal.status"]
 | `[[terminals]].placement` | 终端在 Tab 中的打开方式，映射到现有 `terminal.open`、`pane.split`、浮动与 popup |
 | `[[terminals]].requires_programs` | 启动前由实际执行位置（core）在目标机器检查 PATH，缺失时报 `missing_program` 并列出缺失项 |
 | `[module].bundle` | 包内相对路径；安装时校验文件存在且非空 |
+| `[module].region` | 接管哪个内置区域：`spaces` / `tabs` / `status`；省略表示不接管，非法值在清单期报 `文件:行:列` |
 | `[module].place` / `size` / `focusable` | 与旧 `[mod]` 语义一致：停靠位置、停靠厚度（≤1 视为占比）、是否允许焦点移入 |
 | `[[services]]` | 常驻服务，物化成 core 的 keep 终端；字段见 [5.1](#51-常驻服务) |
 | `[grants].host` / `events` | 宿主方法与事件；必须在宿主白名单内，越界在清单期报错 |
@@ -121,6 +122,34 @@ hc-tui packages enable dev.hctui.pkg.git-board
 hc-tui mods grant dev.hctui.pkg.git-board --host state --host exec
 hc-tui packages uninstall dev.hctui.pkg.git-board
 ```
+
+### 2.4 用清单接管内置区域
+
+侧栏（`spaces`）、Tab 栏（`tabs`）与模式行（`status`）三个内置区域由清单里的
+`[module].region` 声明接管，不是编译期常量：装一个包、写一行 `region`，它立刻接管
+该区域；卸包或停用后回落到内置实现，不改核心代码、不重新编译。
+
+最小示例（接管模式行）：
+
+```toml
+manifest_version = 2
+id = "dev.example.status-line"
+name = "Status line"
+version = "0.1.0"
+host_api = 1
+
+[module]
+bundle = "dist/bundle.js"
+region = "status"
+```
+
+冲突规则：
+
+- 只有 `spaces` / `tabs` / `status` 三个合法值；其它值在清单校验期拒绝，报错带 `文件:行:列`。
+- 同一区域被多个包声明时，已启用（`enabled`）且 id 字典序最小的包胜出；其余包各得一条 issue，
+  例如 `region spaces is already taken by dev.example.a; dev.example.b is not bound`，不静默丢弃。
+- `--no-mods`、停用、包缺失、渲染失败时该区域回到内置实现，与既有模块回退语义一致。
+- 区域只接管像素，命中域与鼠标行为仍由内置实现登记；模块的键盘输入走 `place` 与焦点表面。
 
 ## 3. 身份
 
