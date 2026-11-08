@@ -3,6 +3,7 @@
 ## 未发布
 
 - notifycli：新增 `hc-tui notify <文本> [--level info|warn|error] [--action <动作名>] [--target <终端|pane>]`，走与模块 `notify` 相同的通道（`src/app.rs` 控制请求 `notify` → `src/app/mods.rs::host_notify` → `register_notification`）：有提示表面就进 `{ toasts, max }` props，没有就走内置 toast；内置 toast 按级别改边框颜色（`info` 用 `accent`，`warn` 用 `agent_working`，`error` 用 `agent_error`），鼠标点击执行通知携带的 `action`（`target` 作为 `terminal` 参数注入），没有 `action` 时跳到 `target` 终端，动作结果写在状态行；没有窗口时退出码 3 并说明 core 文档只存布局、没有通知槽位，不静默成功。新增 `src/app/mods/notify_tests.rs` 五个用例，`docs/usage.md` 补一节。
+- OSC 8 链接可点开：`Ctrl+Click` 取命中单元格的 OSC 8 URI，`prefix+u` 动作按悬停格 → VT 光标格 → 可见区域第一个链接取目标，Copy Mode 的 `o` 同样可用；悬停时状态行显示目标地址（80 列截断），只放行 http/https/mailto，超过 4096 字节不打开，`ui.confirm_open_link` 可要求打开前先确认。
 
 扩展机制开发计划（docs/plan-extensions.md）前三项已交付：
 

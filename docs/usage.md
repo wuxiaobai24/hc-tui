@@ -396,6 +396,7 @@ Tab 内可以有 BSP 分屏、Stack 和浮动 Pane。Pane 可以承载终端或�
 | `shift+c` | 中断当前轮（`terminal.interrupt`） |
 | `shift+o` | 切换 core 的 keep 策略（恢复由 core 负责） |
 | `shift+u` | 移除已结束的终端记录（`terminal.rm`） |
+| `u` | 打开光标或悬停处的 OSC 8 链接（只允许 http/https/mailto） |
 | `e` | 把视口 ANSI 交给 `$EDITOR`，在 popup 里打开 |
 | `/` | 只读文本浮层：`terminal.read` 的屏幕 + 历史（`j`/`k`/`PgUp`/`PgDn` 滚动，`q` 关闭） |
 | `shift+i` | 按名字按键：`terminal.keys`，输入 `enter, ctrl+c` 这类序列 |
@@ -459,11 +460,27 @@ templates = "prefix+alt+t"
 | Agent 分组 / 父项 | 点击折叠或展开 |
 | agents 标题 | 切换工作区分组 / 优先级分组 |
 | 终端内容 | 点选焦点；滚轮翻历史，程序开启鼠标跟踪后转发给程序 |
+| 终端里的链接 | `Ctrl+Click` 打开，悬停时状态行显示目标地址 |
 
 鼠标拖分隔线不会把拖动当作文本选区，也不会发给 Pane 内程序。浮层和浮动窗口优先接收自己的鼠标。
 zoom、手机单 Pane 和隐藏边框的区域没有可拖动的分屏线；可用前缀 `r` 加 `h j k l` 调整。
 `pane_gaps = false` 时相邻 Pane 保留单条共享边界。分屏比例通过共享布局保存，侧栏宽度是本机配置。
 `copy_on_select = true` 时拖选复制；默认关闭，文本可用 Copy Mode 或宿主 Shift 选字。
+
+## 链接
+
+OSC 8 超链接在 Pane 里显示成带下划线的文字，可以点开：
+
+| 操作 | 行为 |
+|---|---|
+| `Ctrl+Click` 链接文字 | 取该单元格的 URI，交给系统 opener（macOS `open`，Linux `xdg-open`） |
+| 悬停链接文字 | 状态行显示目标地址，超过 80 列截断并加 `…` |
+| `prefix+u` | 依次尝试悬停格、VT 光标格、可见区域第一个链接 |
+| Copy Mode 里 `o` | 打开 Copy Mode 光标处的链接 |
+
+只允许 `http`、`https` 与 `mailto`。`file://`、`javascript:` 以及其它 scheme
+不交给 opener，状态行提示被拒绝的 scheme。URI 超过 4096 字节也不打开。
+`ui.confirm_open_link = true` 时先弹 `y/N` 确认，默认关闭。
 
 ## Agents 与注意力
 
