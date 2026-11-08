@@ -1516,6 +1516,23 @@ impl App {
         } else {
             self.focus_mod_surface(Some(id.clone()));
         }
+        if place == SurfacePlace::Toast {
+            // 模块接手绘制：内置槽位里属于这条表面的那条不再另画一份。
+            let default = self.resolve_toast_surface(None);
+            let taken = self.toast_notification.as_deref().is_some_and(|id| {
+                self.mod_notifications
+                    .iter()
+                    .find(|item| item.id == id)
+                    .is_some_and(|item| match &item.surface {
+                        None => true,
+                        Some(surface) => Some(surface) == default.as_ref(),
+                    })
+            });
+            if taken {
+                self.toast = None;
+                self.toast_notification = None;
+            }
+        }
         self.dirty = true;
         Ok(id)
     }
@@ -1958,6 +1975,20 @@ impl App {
                 return true;
             }
         }
+        // 提示层覆盖整个内容区却不抢焦点：只吞掉模块自己认下的那一下，
+        // 点在空白处仍落到下面的 Pane。
+        let toasts: Vec<(String, Rect)> = self
+            .mods
+            .surfaces
+            .iter()
+            .filter(|surface| surface.place == SurfacePlace::Toast && surface.interactive())
+            .map(|surface| (surface.id.clone(), surface.area))
+            .collect();
+        for (id, area) in toasts {
+            if super::contains(area, mouse.column, mouse.row) && self.deliver_mouse(&id, mouse) {
+                return true;
+            }
+        }
         // 非模态覆盖层结束传播后，继续按外框区域命中。
         let hit = self
             .mod_regions
@@ -1985,16 +2016,19 @@ impl App {
         true
     }
 
-    fn deliver_mouse(&mut self, surface_id: &str, mouse: MouseEvent) {
+    /// 把鼠标交给一条表面；返回模块是否认下了这个事件。
+    fn deliver_mouse(&mut self, surface_id: &str, mouse: MouseEvent) -> bool {
         let Some(input) = crate::mods::input::translate_mouse(&mouse) else {
-            return;
+            return false;
         };
         let Some(surface) = self.mods.surface_mut(surface_id) else {
-            return;
+            return false;
         };
-        if surface.view.handle(input) == Handled::Yes {
+        let handled = surface.view.handle(input) == Handled::Yes;
+        if handled {
             self.dirty = true;
         }
+        handled
     }
 
     /// 关闭 z 序最高的覆盖层（window > popup > dialog）；`onEsc: "module"` 的不由宿主关。
