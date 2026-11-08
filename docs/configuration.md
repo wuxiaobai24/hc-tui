@@ -1,6 +1,10 @@
 # 配置说明
 
-[返回 README](../README.md) · [使用指南](usage.md)
+[返回 README](../README.md) · [使用指南](usage.md) · [包与插件](plugins.md)
+
+站点与这里互为入口：在 `site/` 里执行 `npm run build` 后，站点入口是 `site/dist/index.html`
+（仓库中的页面源码是 [site/src/pages/index.astro](../site/src/pages/index.astro)）；
+站点五篇文档逐节标注了摘录自哪份 `docs/` 文件。
 
 ## 文件与优先级
 
@@ -12,17 +16,67 @@ session 可通过 `--session`、`[session] session` 或 HC_SESSION 指定；CLI 
 
 | 路径 | 用途 |
 |---|---|
-| 配置目录中的 config.toml | 外观、键位、通知和终端策略 |
+| 配置目录中的 config.toml | 外观、键位、通知、渲染节流与终端策略 |
 | 配置目录中的 panels/*.json | 克隆的脚本面板，下次加载配置时读取 |
 | 配置目录中的 layouts/*.json | 个人 Pane 布局，通过 layout.switch 选择 |
+| 配置目录中的 plugins/、mods/ | 开发来源目录：放在这里的包与模块原地读代码；其他目录用 `packages link <目录>` 注册 |
 | `$XDG_STATE_HOME/hc-tui/state.json`（默认 ~/.local/state/...） | 本地已读与分组折叠；schema 4 起含外框树 `mods_chrome`、窗口覆盖层位置 `mods_windows` 与已批准的模块授予 `mods_grants` |
-| `$XDG_STATE_HOME/hc-tui/mods/` | 安装的模块：`store/<id>/<generation>/`、`current/<id>`、`records/<id>.json`、`grants/<id>.json`、`logs/<id>/`、`trust/` |
-| 同一 state 目录的 control-*.sock | session 对应的本地命令 socket，Unix 用户权限 0600 |
-| core 中的 herdr-app / hctui-layout-v1 文档 | 共享结构 / TUI 屏幕布局，不在 config.toml 中 |
+| `<state>/plugins/` | 安装的包：`store/<id>/<代际>/`、`current/<id>` 符号链接、`records/<id>.json`、`logs/<id>/engine.log`、`pins/<包>/<代际>/<持有者>.json`、`data/<包>/`、`disabled.json`（开发来源的启用状态）、`trust/` |
+| `<state>/mods/` | 模块商店的同构布局，另有 `grants/<id>.json` 保存授予旁车 |
+| `<state>/control-<哈希>.sock` | session 对应的本地控制 socket，Unix 用户权限 0600；`HCTUI_SOCKET` 可覆盖 |
+| core 中的 herdr-app / hctui-layout-v1 文档 | 共享结构 / TUI 屏幕布局，不在 config.toml 中；`hctui-layout-v1` 的可选 `services` 段是常驻服务台账 |
 
-自定义 --config 会改变面板、布局、模块开发目录与撤销列表的父目录；state、安装存储与 socket 仍由 XDG_STATE_HOME 决定。
+`<state>` 是 `$XDG_STATE_HOME/hc-tui`。下面是在隔离目录里装完三个包之后的真实布局：
 
-## 模块与签名包
+```console
+$ find $XDG_STATE_HOME/hc-tui -maxdepth 2 -type d | sort
+<state>/mods/
+<state>/mods/grants/
+<state>/plugins/
+<state>/plugins/current/
+<state>/plugins/data/
+<state>/plugins/logs/
+<state>/plugins/pins/
+<state>/plugins/records/
+<state>/plugins/store/
+
+$ ls $XDG_STATE_HOME/hc-tui/plugins/store/dev.hctui.pkg.git-board/
+2
+
+$ ls -l $XDG_STATE_HOME/hc-tui/*.sock
+srw------- 1 wxb24 wxb24 0 Nov  8 16:02 /tmp/hcp-docs2/xdg/state/hc-tui/control-65d426b78e91b5f8.sock
+```
+
+`current/<id>` 是指向代际目录的符号链接，`records/<id>.json` 是唯一的发布真相：
+指针缺失或停在旧代际时下一次打开按记录重建；有指针没记录时不删数据，当 issue 报出来。
+服务日志落在 `data/<包>/` 下清单 `log` 声明的相对路径，例如
+`<state>/plugins/data/dev.hctui.demo.svc/services/watch.log`，用
+`hc-tui packages log <包> --service <服务>` 读。
+
+自定义 --config 会改变面板、布局、模块开发目录、开发包目录与撤销列表的父目录；
+state、安装存储与 socket 仍由 XDG_STATE_HOME 决定。
+
+## 会话隔离
+
+同一台机器上的多个 core、多个窗口共用 XDG 目录时，状态与安装记录会混在一起。
+做实验或同时跑多份客户端时，给每个用途一个自己的会话名：
+
+```console
+$ export HC_SESSION=hcp-docs2     # 票据或实验专用的会话名
+$ hc-tui packages install examples/packages/git-board --enable --yes
+package dev.hctui.pkg.git-board (Git board 0.1.0)
+  provides ATM
+  ...
+installed dev.hctui.pkg.git-board generation 1 (enabled)
+```
+
+- `HC_SESSION` 只决定 core 会话与控制 socket；安装记录、状态与锁仍在 `<state>`，
+  想彻底隔离就把 `XDG_STATE_HOME`、`XDG_CONFIG_HOME`、`XDG_RUNTIME_DIR` 一起换到临时目录。
+- 优先级是 `--session` → `[session] session` → `HC_SESSION` → `default`；自定义会话每次调用都要带。
+- 收尾只停自己这一份：`HC_SESSION=<会话名> hc server stop`。直接 `hc server stop` 会停掉默认会话，
+  连带停掉承载当前终端的 core；`hc server status` 会按需拉起 core，不能用来判断是否停干净。
+
+## 模块、包与签名
 
 ```toml
 [mods]
@@ -32,9 +86,24 @@ trust_roots = ["~/.config/hc-tui/release.pub"]
 revocations = "/etc/hc-tui/mods-revocations.json"
 ```
 
-`mods install` 对 `.nshpkg` 先做证书链、包签名、文件哈希、撤销列表、构建号回退与
+插件与界面模块共用同一个 `packages` 入口与同一份 `[mods]` 信任配置；`mods` 段没有独立的
+启用开关，启用状态记在 `<state>` 的记录里（`packages enable|disable`）。
+
+`packages install` 对 `.nshpkg` 先做证书链、包签名、文件哈希、撤销列表、构建号回退与
 `min_runtime` 校验；全部通过才写入新代际。`trust/nsh-trust.json` 保存已接受的撤销序列
 与每个 app 的最高构建号。
+
+包的来源、记录、代际与 `current` 指针的发布事务见[包与插件 §9](plugins.md#9-安装更新与卸载)，
+日常命令见[使用指南](usage.md#包与安装类命令)。
+
+## 渲染节流
+
+```toml
+[render]
+fps = 30   # 帧循环上限，默认 30，夹在 1–240
+```
+
+帧循环按这个上限合并重绘；它不改变程序输出速率，只决定界面多久取一帧。
 
 ## 默认配置参考
 
@@ -95,6 +164,7 @@ sound = false
 restore = true
 
 [keys]
+preset = "default"   # default | zellij
 prefix = "ctrl+b"
 help = "prefix+?"
 settings = "prefix+s"
@@ -185,7 +255,8 @@ paste_image = "prefix+shift+v"
 | terminal.scrollback_bytes | 每个本地 VT 的历史容量预算 |
 | terminal.default_shell | 空串使用 core 默认 shell |
 | session.restore | 恢复 core 中布局；--no-restore 可对单次启动关闭 |
-| no_mods | 使用内置外框，不加载模块运行时；--no-mods 可对单次启动开启，mods.* 动作在此模式下报错 |
+| no_mods（仅 `--no-mods`） | 使用内置外框，不加载模块运行时；动作、终端入口与已装包照常可用。这是命令行开关，不是 config.toml 的键 |
+| render.fps | 帧循环上限，默认 30，夹在 1–240 |
 | ui.window_title | 可用 {hostname}、{workspace} |
 | ui.tab_bar_right | 支持 zoom、hostname、datetime 和 cmd:命令；cmd 取第一行输出，约每 5 秒刷新 |
 
