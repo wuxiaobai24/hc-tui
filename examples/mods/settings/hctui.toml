@@ -1,0 +1,12 @@
+[mod]
+id = "settings"
+title = "Settings"
+place = "none"
+host_api = 1
+
+[overlay]
+kind = "dialog"
+
+[grants]
+host = ["state", "run", "closeOverlay", "surface"]
+events = ["state.changed", "theme.changed", "app.ready"]

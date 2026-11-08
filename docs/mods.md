@@ -308,7 +308,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `theme` | 名称、约 36 个 token、16 色调色板 | 约 1 KB |
 | `commands` | 动作名、标题、来源（`builtin` 或 `plugin:<id>`）、`contexts`、`args` 摘要 | 内置 79 条，约 6 KB |
 | `keybindings` | 名称、按键串、标题、分组、是否停用 | 默认 58 条，约 6 KB |
-| `settings` | 段与项（值、文案、是否当前生效）加当前值 | 4 段 19 项，约 1 KB |
+| `settings` | 段名与段标题、全部项目（`id`/`value`/文案/是否生效）加当前值；`id` 为 `<段>:<value>` | 4 段 19 项，约 2 KB |
 | `templates` | `name`/`title`/`description`；首次 `templates.list` 应答前为空 | 每条约 60 字节 |
 | `notifications` | 队列条目 `id`/`level`/`text`/`created`/`action`/`target`/`surface`，保留最近 200 条 | 每条约 120 字节，随正文长度增长 |
 

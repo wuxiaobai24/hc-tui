@@ -3421,43 +3421,26 @@ impl App {
         self.dirty = true;
     }
 
-    /// 应用设置项并写回配置文件，让下次启动保持同一选择。
+    /// 应用设置项：与模块、动作走同一条路径（`app.*`），事件与写盘一致。
     fn apply_setting(&mut self, section: usize, selected: usize) {
-        let (key, value) = match section {
-            0 => {
-                let name = crate::theme::names()[selected].to_string();
-                self.config.theme = crate::theme::builtin(&name).expect("built-in theme resolves");
-                ("theme.name", format!("\"{name}\""))
-            }
+        let (action, args) = match section {
+            0 => (
+                "app.theme",
+                json!({ "name": crate::theme::names()[selected] }),
+            ),
             1 => {
-                self.config.indicators = if selected == 1 {
-                    crate::config::Indicators::Symbols
-                } else {
-                    crate::config::Indicators::Dots
-                };
-                let text = if selected == 1 { "symbols" } else { "dots" };
-                ("ui.status_indicators", format!("\"{text}\""))
+                let value = ["dots", "symbols"][selected.min(1)];
+                ("app.indicators", json!({ "value": value }))
             }
             2 => {
-                self.config.notifications = match selected {
-                    0 => crate::config::Delivery::Off,
-                    1 => crate::config::Delivery::Toast,
-                    _ => crate::config::Delivery::System,
-                };
-                let text = ["off", "toast", "system"][selected.min(2)];
-                ("ui.toast.delivery", format!("\"{text}\""))
+                let value = ["off", "toast", "system"][selected.min(2)];
+                ("app.notifications", json!({ "value": value }))
             }
-            _ => {
-                self.config.sound = selected == 1;
-                ("ui.sound.enabled", format!("{}", selected == 1))
-            }
+            _ => ("app.sound", json!({ "value": selected == 1 })),
         };
-        let path = self.config.config_path.clone();
-        let outcome = crate::config::write_setting(&path, key, &value);
-        self.note = match outcome {
-            Ok(()) => format!("{key} = {value}"),
-            Err(error) => t1("applied for this session; {}", error),
-        };
+        if let Err(error) = self.execute_action(action, args) {
+            self.note = error.to_string();
+        }
         self.dirty = true;
     }
 

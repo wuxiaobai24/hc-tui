@@ -232,9 +232,12 @@ hc-tui mods enable|disable <id>
 | layout.show / layout.hide / layout.toggle | 显示 / 隐藏 / 切换侧栏 |
 | layout.resize | px 必填；历史参数名，实际单位为**终端列数**，受 min/max 限制 |
 | app.palette | 打开工作台命令面板 |
-| app.settings | 打开设置 |
+| app.settings | 打开设置；装了 `settings` 模块时开模块浮层，否则用内置浮层 |
 | app.help | 打开键位提示 |
 | app.theme | name 必填；切换内置主题并写入配置 |
+| app.indicators | value 为 `dots` / `symbols`；写 `ui.status_indicators` |
+| app.notifications | value 为 `off` / `toast` / `system`；写 `ui.toast.delivery` |
+| app.sound | value 为 `true`/`false` 或 `on`/`off`；写 `ui.sound.enabled` |
 | app.quit | detach 客户端，程序继续运行 |
 | overlay.close | 清除打开的本地浮层；popup 仅关闭视图 |
 

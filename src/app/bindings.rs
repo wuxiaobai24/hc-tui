@@ -77,10 +77,7 @@ impl App {
                 self.dirty = true;
             }
             "settings" => {
-                self.settings = Some(SettingsOverlay {
-                    section: 0,
-                    selected: self.settings_selected(0),
-                });
+                self.open_settings();
                 self.dirty = true;
             }
             "goto" => {
