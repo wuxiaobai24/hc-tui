@@ -275,6 +275,16 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
 
 /// 本地目录安装（拷贝到新代际）。发布顺序与插件安装一致：写记录 → 切指针。
 pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
+    install_local_from(config, dir, None)
+}
+
+/// 同 [`install_local`]，但记录里的来源可以指定成安装来源（git 地址或归档路径），
+/// 而不是暂存目录。
+pub fn install_local_from(
+    config: &Config,
+    dir: &Path,
+    origin: Option<&str>,
+) -> Result<Record, String> {
     let preview = preview_local(dir)?;
     let store = Store::open(config.mods_state_dir());
     let (generation, target) = store
@@ -288,7 +298,7 @@ pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
         installed_at: now_unix(),
         enabled: true,
         manifest_hash: file_sha256(&target.join("hctui.toml")),
-        origin: Some(dir.display().to_string()),
+        origin: Some(origin.unwrap_or(&dir.display().to_string()).to_string()),
         sha256: None,
         key_id: None,
         app: Some(serde_json::json!({

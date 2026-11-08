@@ -112,7 +112,7 @@ ui/                             仓库内的默认模块源码
 
 ### 包：安装、权威、启用、授权
 
-- 安装：`hc-tui packages install <目录> [--yes] [--enable]` 复制到新代际并写记录；`packages link <目录>` 原地读取开发目录。两种来源对运行期没有分支。
+- 安装：`hc-tui packages install <目录|git 仓库|.tar.gz> [--yes] [--enable]` 复制到新代际并写记录；`packages link <目录>` 原地读取开发目录。三种来源对运行期没有分支，记录里的 `origin` 保留真实来源，`packages info` 与 `packages update --check` 按它回读来源端版本。
 - 权威：`records/<id>.json` 是唯一真相。模块是否加载由 `Record.module` 与 `Record.capabilities.module` 决定，`[module].bundle` 相对记录指向的代际目录解析；`crate::pkg::resolve` 是「模块装在哪」的唯一判断。记录损坏、代际缺失或 bundle 不存在的包只给一条 issue，其它包照常加载。
 - 启用：`packages enable|disable <id>` 只改写记录。250 毫秒的注册表指纹轮询接上同一次重载：动作从命令目录消失、终端入口返回 `disabled`、模块表面从外框撤下（不留空区域）；启用后按 `[module].place` 原地停靠，不需要重启。正在跑的终端不 kill，已排队的动作不腰斩。`--no-mods` 只跳过模块表面，动作与终端入口照常。
 - 授权：来源唯一，清单 `[grants]` → 记录 `Record.grants` → 安装期一次确认。运行期只读记录，不再按 `hctui.toml` 现读；`mods grant --revoke` 之后该表面收到 `grant.changed`，后续调用返回 `denied` 且无副作用。

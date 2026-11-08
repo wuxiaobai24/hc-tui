@@ -19,6 +19,8 @@ use crate::config::Config;
 use crate::plugin::manifest::{self, fail, Manifest, ManifestError, HOST_API};
 use crate::store::{Record, Source, Store};
 
+pub mod source;
+
 /// 包根目录里唯一清单的文件名。
 pub const MANIFEST_FILE: &str = "hctui.toml";
 /// v1 插件清单的文件名。

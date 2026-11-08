@@ -703,6 +703,17 @@ pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), Strin
 /// 发布顺序在包锁内完成：分配代际 → 复制到暂存目录 → rename 成正式代际 →
 /// 原子写记录 → 切换 `current`。任何一步失败都不会改动旧记录与旧指针。
 pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record, String> {
+    install_from(config, dir, None, policy)
+}
+
+/// 同 [`install`]，但记录里的来源可以指定成安装来源（git 地址或归档路径），
+/// 而不是暂存目录。
+pub fn install_from(
+    config: &Config,
+    dir: &Path,
+    origin: Option<&str>,
+    policy: EnablePolicy,
+) -> Result<Record, String> {
     let loaded = pkg::install_ready(dir)?;
     let manifest = loaded.manifest;
     if !manifest.supports_this_platform() {
@@ -738,7 +749,7 @@ pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Reco
         enabled,
         manifest_hash: file_sha256(&target.join("hctui.toml"))
             .or_else(|| file_sha256(&target.join("plugin.toml"))),
-        origin: Some(dir.display().to_string()),
+        origin: Some(origin.unwrap_or(&dir.display().to_string()).to_string()),
         sha256: None,
         key_id: None,
         app: Some(serde_json::json!({

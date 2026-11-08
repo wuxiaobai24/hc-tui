@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [界面模块](mods.md) · [插件](plugins.md)
 
 版本：v0.5（2026-11-07）
-状态：实施中。M1–M8、M10、M11a 与 M11b 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10、M11a、M11b 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
+状态：实施中。M1–M8、M10、M11a、M11b 与 M11c 已交付（M1–M8 提交 `6917533`、`faf940f`、`e97a9df`、`6185d0d`、`1e3029d`、`acaf472`、`758f313` 与本次提交；M10、M11a、M11b、M11c 见下表），M9 未开始；逐项见 [§3.1 里程碑交付状态](#31-里程碑交付状态)。
 对应规格：[界面模块 v0.3](mods.md)、[插件 v0.1](plugins.md)。
 
 本计划按依赖顺序拆成两个可并行的轨道，汇合到发行收尾。每个里程碑都能独立评审、独立回退，结束时全套测试保持通过。
@@ -76,6 +76,7 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 | M10.1 验证补强 | ✅ 已交付 | 两个真进程安装用例（跨进程串行、SIGKILL 残留锁接管）、两个真实写失败注入用例（记录写失败保留旧代际、指针失败按记录修复）、`Store::open` 把「指针停在旧代际」也算需要重建、mods 安装改为记录先行、四个 smoke 全跑通；细节见 [M10.1](#m101-验证补强) |
 | M11a 统一包清单与模型 | ✅ 已交付（本次提交） | `src/pkg/`：`hctui.toml`(v2)、`plugin.toml`(v1) 与旧 `[mod]` 形态读成同一个 `Package`，`[module]` 与 `[grants]` 由 `src/plugin/manifest.rs` 的统一 TOML 严格解析负责（未知键、重复 id、越界授予、bundle 路径），能力 `capabilities { actions, terminals, module }` 由清单推导；`src/mods/store.rs::manifest_id` 与 `src/mods/mod.rs::manifest_grants` 的手写逐行解析删除，改走同一解析器；`Record` 增加 `capabilities` 与 `module`，旧记录按清单回填、不报 issue；`src/plugin/registry.rs` 合并两个 store 与两个开发目录（已安装代际按 id 优先），新增 `get`/`modules`/`entries`/`revision`，`PackageRegistry` 保留为旧名别名；`hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log`，`plugins` 与 `mods` 的安装类子命令成为别名并在 stderr 打一行弃用提示；四个 smoke 脚本的 `cleanup()` 在全部通过时清理 `$ROOT`；新增 9 个用例 |
 | M11b 统一包运行时接线 | ✅ 已交付（本次提交） | `src/pkg/mod.rs` 的 `Resolved`/`resolve`/`set_enabled`/`module_root`：模块加载按 `Record.module` 与 `Record.capabilities.module` 决定，bundle 相对代际目录解析，旧记录按清单回填，坏包只给 issue；`Record.grants` 成为运行期授予唯一来源，`src/mods/mod.rs::manifest_grants` 删除；`src/app/mods.rs::sync_package_modules` 把模块 surface 的撤下/恢复接到同一 250 ms 重载路径，`--no-mods` 只跳过模块；`examples/packages/git-board/` 三合一示例与 `scripts/packages-smoke.sh`；新增 7 个用例 |
+| M11c 包分发与更新检查 | ✅ 已交付（本次提交） | `src/pkg/source.rs`：`kind` 判出目录 / git 仓库 / `.tar.gz`、`.tgz`，`stage` 把后两者落成暂存目录（`Staged` 析构删除）、`remote_version` 读来源端清单版本（git 用 `ls-remote --symref` 找默认分支后 `fetch --depth 1` 只读清单，不 clone 整仓）；`src/main.rs` 的 `packages install|update` 接三种来源并在发布前校验清单与 `<id>`，`packages info <id|来源>`、`packages update --check [<id>] [--json]`；`plugin::registry::install_from` 与 `mods::store::install_local_from` 让记录 `origin` 保存真实来源；新增 6 个用例 |
 
 验证基线（M2 起，docs/release.md 同步记录）：musl amd64 冷构建约 106 s / 5.78 MiB，arm64 约 182 s / 5.22 MiB；nsh 未接线阶段发行体积增量 +136 KiB。
 
@@ -313,6 +314,25 @@ M6 只依赖现有动作分发器与控制 socket，可与 M1–M5 同时进行�
 - `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 全绿（328 个库内用例，含 7 个新用例；集成用例全部通过）。
 - `scripts/packages-smoke.sh` 退出码 0：安装后动作、终端入口与模块同时可用，`packages disable` 后三者同时消失，`enable` 恢复，卸载后记录、代际与模块区域清干净。
 - 证据与输出见仓库根下的票据交付记录。
+
+### M11c 包分发与更新检查
+
+目标：包能从 git 仓库与 tarball 装上，装完后能看清单、能对比来源端有没有新版本。
+
+工作项：
+
+- `src/pkg/source.rs`：`kind` 按输入形态判出来源；`stage` 把 git 仓库（`git clone --depth 1`）与归档（`tar -xzf`）落成暂存目录，包根按清单所在层判定，暂存目录随 `Staged` 析构删除；`remote_version` 只读清单版本，git 来源用 `git ls-remote --symref` 找默认分支再浅取一份提交。
+- `src/main.rs`：`packages install|update` 接三种来源，暂存后先校验清单与 `<id>` 再发布；新增 `packages info <id|来源>` 与 `packages update --check [<id>] [--json]`。
+- `src/plugin/registry.rs`、`src/mods/store.rs`：`install_from` / `install_local_from` 让记录 `origin` 保存真实来源，旧三参数入口保持行为不变。
+- `docs/plugins.md` §9.4、§9、`docs/mods.md` 与 `CHANGELOG` 同步。
+
+退出条件：
+
+- 本地 bare 仓库与 `.tar.gz` 两条安装路径真实成功，暂存目录不残留。
+- 非法清单的仓库安装失败，原记录、`current` 指针与代际目录逐字节不变。
+- `packages update --check` 的「有更新 / 已最新」两态输出正确，有更新时 `--json` 带 `"outdated": true` 且退出码 0；来源不可达时报明确错误并非零退出。
+- 同一来源重复安装写新代际，`packages info` 看得出代际增长。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`HC_TUI_GRAPHICS=kitty cargo test` 全绿，旧用例不改。
 
 ### M9 默认模块迁移
 
