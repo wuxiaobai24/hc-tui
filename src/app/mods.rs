@@ -1754,6 +1754,12 @@ impl App {
             if let Some(click_through) = data.get("clickThrough").and_then(Value::as_bool) {
                 surface.click_through = click_through;
             }
+            if let Some(clear) = data.get("clear").and_then(Value::as_str) {
+                surface.clear = match clear {
+                    "surface" => crate::mods::ClearArea::Surface,
+                    _ => crate::mods::ClearArea::Content,
+                };
+            }
         }
         if unfocus && self.focused_mod.as_deref() == Some(surface_id) {
             self.focus_mod_surface(None);

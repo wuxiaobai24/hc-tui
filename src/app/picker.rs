@@ -269,6 +269,8 @@ impl App {
             Ok(id) => {
                 if let Some(surface) = self.mods.surface_mut(&id) {
                     surface.area = rect;
+                    // picker 自己画完整外框；只清自身矩形，避免清掉内置界面。
+                    surface.clear = crate::mods::ClearArea::Surface;
                 }
                 true
             }

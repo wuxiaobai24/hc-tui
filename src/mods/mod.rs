@@ -97,6 +97,16 @@ impl SurfacePlace {
     }
 }
 
+/// 覆盖层绘制前的清屏范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClearArea {
+    /// 清整个内容区（dialog 的默认：模态浮层压暗并遮住内置界面）。
+    #[default]
+    Content,
+    /// 只清表面自己的矩形（占满整屏 inset、自带完整背景的浮层）。
+    Surface,
+}
+
 /// 实例生命周期；见 docs/mods.md §11。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceState {
@@ -146,6 +156,8 @@ pub struct ModSurface {
     pub esc_to_host: bool,
     /// 覆盖层之外的鼠标事件是否穿透到下层。
     pub click_through: bool,
+    /// 绘制前清哪一块；`dialog` 默认清整个内容区。
+    pub clear: ClearArea,
     /// 最近一次错误摘要，写日志并标注在失败表面顶部。
     pub last_error: Option<String>,
     /// 引擎回调收集的运行期错误，绘制后由宿主取走并计数。
@@ -482,6 +494,7 @@ impl ModRuntime {
             autofocus: true,
             esc_to_host: true,
             click_through: false,
+            clear: ClearArea::Content,
             last_error: None,
             errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
