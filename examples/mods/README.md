@@ -10,6 +10,7 @@
 | `sidebar` | 默认侧栏 | 接管 Spaces + Agents + 折叠组 + 状态点，逐格等于内置实现 |
 | `tabs` | 默认 Tab 栏 | 接管 Tab 标签、选中底色与右端菜单块 |
 | `status` | 默认模式行 | 接管连接状态与右侧提示 |
+| `toast` | 提示层 | 读 `props.toasts` 在内容区右下角画盒，点击跑动作再 `dismiss` |
 
 `sidebar` / `tabs` / `status` 是默认外框区域模块：宿主在区域可见时把它们绑到该
 区域，模块没装、`mods.disable` 停用或渲染失败时自动回退到内置 Rust 实现，

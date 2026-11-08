@@ -1,0 +1,10 @@
+[mod]
+id = "toast"
+title = "Toast"
+place = "toast"
+focusable = false
+host_api = 1
+
+[grants]
+host = ["run", "dismiss"]
+events = ["props.changed", "theme.changed"]
