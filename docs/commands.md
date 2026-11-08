@@ -69,7 +69,8 @@ Tab 数量及 Space 概览包含 settled Tab；settle 只是屏幕状态，不�
 | pane.zoom | 切换当前 Pane 放大 |
 | pane.focus | terminal 指定 core 终端；也可通过通用 pane 参数定位现有 Pane |
 | pane.go | direction=left/right/up/down，默认 right |
-| pane.swap | direction 同上；交换位置，保留 Pane 和程序身份 |
+| pane.swap | pane 与 with 指定同一 Tab 的两个 Pane，交换位置并保留各自的终端和程序身份；只给 direction 时与方向邻居交换 |
+| pane.move | pane 指定目标（默认焦点 Pane），to 指定目标 Tab（默认当前 Tab 末尾），before 或 after 指定落点；源 Tab 空掉时随开关闭，程序不结束 |
 
 拖动分隔线属于鼠标交互，不需要先运行命令。键盘比例调整用前缀 r。
 
