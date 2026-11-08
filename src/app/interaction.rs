@@ -293,6 +293,13 @@ impl App {
             }
             return true;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.toast.is_some()
+            && contains(self.toast_hit, mouse.column, mouse.row)
+        {
+            self.activate_toast();
+            return true;
+        }
         if let Some(copy) = self.copy.as_ref() {
             let pane_id = copy.pane;
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {

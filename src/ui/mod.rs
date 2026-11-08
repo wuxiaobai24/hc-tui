@@ -40,6 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.pointer_targets.clear();
     app.menu_hit = Rect::default();
+    app.toast_hit = Rect::default();
     app.pane_drag_hits.clear();
     app.pane_menu_hits.clear();
     app.sync_terminal_theme();
@@ -1301,16 +1302,24 @@ fn render_pane(frame: &mut Frame, app: &mut App, slot: Slot, theme: &Theme) {
     }
 }
 
-fn render_overlays(frame: &mut Frame, app: &App, theme: &Theme) {
-    if let Some(toast) = &app.toast {
-        render_toast(frame, toast, app.content, theme);
-    }
+fn render_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
+    let hit = match &app.toast {
+        Some(toast) => render_toast(frame, toast, app.content, theme),
+        None => Rect::default(),
+    };
+    app.toast_hit = hit;
 }
 
-fn render_toast(frame: &mut Frame, toast: &Toast, content: Rect, theme: &Theme) {
+fn render_toast(frame: &mut Frame, toast: &Toast, content: Rect, theme: &Theme) -> Rect {
     if content.width < 12 || content.height < 3 {
-        return;
+        return Rect::default();
     }
+    // 级别只改边框颜色：info 用 accent，warn 用工作色，error 用错误色。
+    let tint = match toast.level.as_str() {
+        "warn" => theme.color("agent_working"),
+        "error" => theme.color("agent_error"),
+        _ => theme.color("accent"),
+    };
     let width = (toast.text.chars().count() as u16 + 4)
         .min(content.width)
         .max(12);
@@ -1322,7 +1331,7 @@ fn render_toast(frame: &mut Frame, toast: &Toast, content: Rect, theme: &Theme) 
     );
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.color("accent")))
+        .border_style(Style::default().fg(tint))
         .style(Style::default().bg(theme.color("toast_bg")));
     clear_area(frame, area, theme);
     frame.render_widget(block.clone(), area);
@@ -1336,6 +1345,7 @@ fn render_toast(frame: &mut Frame, toast: &Toast, content: Rect, theme: &Theme) 
             .wrap(Wrap { trim: true }),
         block.inner(area),
     );
+    area
 }
 
 fn render_mode_line(

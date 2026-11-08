@@ -37,6 +37,25 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "--attach needs a value" => "--attach 需要一个值",
         "--config needs a value" => "--config 需要一个值",
         "unknown option: {}" => "未知选项：{}",
+        // `notify` 子命令。
+        "       hc-tui notify <text> [--level info|warn|error] [--action <name>] [--target <terminal|pane>]" => {
+            "       hc-tui notify <文本> [--level info|warn|error] [--action <动作名>] [--target <终端|pane>]"
+        }
+        "{} needs a value" => "{} 需要一个值",
+        "notify takes exactly one text argument" => "notify 只接受一个文本参数",
+        "notify requires a text" => "notify 需要一个文本参数",
+        "usage: hc-tui notify <text> [--level info|warn|error] [--action <name>] [--target <terminal|pane>]" => {
+            "用法：hc-tui notify <文本> [--level info|warn|error] [--action <动作名>] [--target <终端|pane>]"
+        }
+        "unknown level {}; use info, warn or error" => {
+            "未知级别 {}；可用 info、warn、error"
+        }
+        "no hc-tui window is running on session {}; notification not delivered (exit 3)." => {
+            "会话 {} 上没有运行中的 hc-tui 窗口；通知未送达（退出码 3）。"
+        }
+        "the core doc stores layout only, so there is no place to keep the notification; start hc-tui and retry" => {
+            "core 文档只存布局，没有保存通知的位置；先启动 hc-tui 再重试"
+        }
         // `probe` 的握手输出：字段名保留，值前的对齐不变。
         "hc {} (generation {})" => "hc {}（generation {}）",
         "core    {} ({})" => "core    {}（{}）",

@@ -1015,6 +1015,68 @@ impl App {
         json!({"name": theme.name, "tokens": tokens, "palette": palette})
     }
 
+    /// 命令行 `notify` 的入口：与模块 `notify` 共用登记、路由与回退。
+    ///
+    /// 返回 `(id, 命中的提示表面)`；表面为 `None` 时已走内置 toast。
+    pub(crate) fn host_notify(
+        &mut self,
+        text: &str,
+        level: &str,
+        action: Option<Value>,
+        target: Option<&str>,
+    ) -> (String, Option<String>) {
+        let routed = self.resolve_toast_surface(None);
+        let id = self.push_mod_notification(text, "", level, 4, action, target, None, false);
+        (id, routed)
+    }
+
+    /// 点击内置 toast：执行它携带的动作，没有动作就跳到绑定目标。
+    pub(crate) fn activate_toast(&mut self) {
+        let Some(id) = self.toast_notification.clone() else {
+            return;
+        };
+        let Some(item) = self
+            .mod_notifications
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.dismiss_notification(&id);
+        let mut args = match &item.action {
+            Some(Value::Object(map)) => match map.get("args") {
+                Some(Value::Object(args)) => Value::Object(args.clone()),
+                _ => json!({}),
+            },
+            _ => json!({}),
+        };
+        let name = match &item.action {
+            Some(Value::String(name)) => Some(name.clone()),
+            Some(Value::Object(map)) => map.get("name").and_then(Value::as_str).map(str::to_string),
+            _ => None,
+        };
+        let name = match (name, item.target.clone()) {
+            (Some(name), _) => name,
+            // 没有动作时，点击后只剩「跳到绑定终端」这一种语义。
+            (None, Some(target)) => {
+                args["terminal"] = json!(target);
+                "agent.focus".to_string()
+            }
+            (None, None) => return,
+        };
+        if args.get("terminal").is_none() {
+            if let Some(target) = item.target.clone() {
+                args["terminal"] = json!(target);
+            }
+        }
+        self.note = match self.execute_action(&name, args) {
+            Ok(()) => t1("notification action {} accepted", &name),
+            Err(error) => t2("notification action {} failed: {}", &name, error),
+        };
+        self.dirty = true;
+    }
+
     /// 通知队列：登记条目并写进现有 toast 或状态行。
     #[allow(clippy::too_many_arguments)]
     fn push_mod_notification(
@@ -1083,6 +1145,7 @@ impl App {
         } else {
             self.toast = Some(crate::app::Toast {
                 text,
+                level: level.to_string(),
                 until: std::time::Instant::now()
                     + std::time::Duration::from_millis(timeout_ms.max(1)),
             });
@@ -2387,6 +2450,9 @@ mod base_tests;
 
 #[cfg(test)]
 mod toast_tests;
+
+#[cfg(test)]
+mod notify_tests;
 
 #[cfg(test)]
 mod tests {

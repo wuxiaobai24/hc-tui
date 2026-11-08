@@ -48,6 +48,7 @@ fn main() -> Result<()> {
         }
         Some("completion") => cli::completion::run(&args[1..]),
         Some("config") => cli::config::run(&args[1..]),
+        Some("notify") => notify_command(&args[1..]),
         Some("ls") => {
             let config = parse_options(&args[1..])?;
             println!(
@@ -150,6 +151,10 @@ fn usage() {
     );
     println!("       hc-tui completion zsh|bash|fish");
     println!("       hc-tui config check|reset-keys [--config <path>] [--yes]");
+    println!(
+        "{}",
+        t("       hc-tui notify <text> [--level info|warn|error] [--action <name>] [--target <terminal|pane>]")
+    );
     println!(
         "{}",
         t("       hc-tui do <command> [<terminal>] [JSON arguments] [options]")
@@ -1843,6 +1848,91 @@ fn install_or_update(
         t2("installed {} generation {}", record.id, record.generation)
     );
     Ok(())
+}
+
+/// `hc-tui notify`：把一条通知交给运行中的窗口，走与模块 `notify` 相同的通道。
+///
+/// 没有窗口时按退出码 3 说明原因：core 文档里没有通知槽位，写了也是静默丢弃。
+fn notify_command(args: &[String]) -> Result<()> {
+    let mut text = None;
+    let mut level = String::from("info");
+    let mut action = None;
+    let mut target = None;
+    let mut options: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--level" | "--action" | "--target" | "--session" | "--config" => {
+                let flag = args[index].clone();
+                index += 1;
+                let value = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(t1("{} needs a value", &flag)))?;
+                match flag.as_str() {
+                    "--level" => level = value,
+                    "--action" => action = Some(value),
+                    "--target" => target = Some(value),
+                    _ => options.extend([flag, value]),
+                }
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!(t1("unknown option: {}", other));
+            }
+            other => {
+                if text.replace(other.to_string()).is_some() {
+                    anyhow::bail!(t("notify takes exactly one text argument"));
+                }
+            }
+        }
+        index += 1;
+    }
+    let Some(text) = text else {
+        anyhow::bail!(t(
+            "usage: hc-tui notify <text> [--level info|warn|error] [--action <name>] [--target <terminal|pane>]"
+        ));
+    };
+    if text.trim().is_empty() {
+        anyhow::bail!(t("notify requires a text"));
+    }
+    if !matches!(level.as_str(), "info" | "warn" | "error") {
+        anyhow::bail!(t1("unknown level {}; use info, warn or error", &level));
+    }
+    let config = parse_options(&options)?;
+    let mut request = serde_json::json!({"method":"notify","text":text,"level":level});
+    if let Some(action) = action {
+        request["action"] = serde_json::json!({"name": action});
+    }
+    if let Some(target) = target {
+        request["target"] = serde_json::json!(target);
+    }
+    match hc_tui::control::call(&config, request) {
+        Ok(answer) => {
+            println!("{answer}");
+            Ok(())
+        }
+        Err(error) if hc_tui::app::winless::window_unavailable(&error) => {
+            let session = config
+                .session
+                .clone()
+                .or_else(|| std::env::var("HC_SESSION").ok())
+                .filter(|session| !session.is_empty())
+                .unwrap_or_else(|| "default".to_string());
+            eprintln!(
+                "{}",
+                t1(
+                    "no hc-tui window is running on session {}; notification not delivered (exit 3).",
+                    &session
+                )
+            );
+            eprintln!(
+                "{}",
+                t("the core doc stores layout only, so there is no place to keep the notification; start hc-tui and retry")
+            );
+            std::process::exit(3)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// 先读 `--config`，再让文件里的值成为基线，最后应用命令行覆盖。

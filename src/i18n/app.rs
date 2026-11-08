@@ -214,6 +214,8 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "detach" => Some("断开"),
         "reload config" => Some("重新加载配置"),
         "open notification target" => Some("打开通知目标"),
+        "notification action {} accepted" => Some("通知动作 {} 已受理"),
+        "notification action {} failed: {}" => Some("通知动作 {} 失败：{}"),
         "search agents and terminals" => Some("搜索 Agent 和终端"),
         "next tab" => Some("下一个 Tab"),
         "previous tab" => Some("上一个 Tab"),
