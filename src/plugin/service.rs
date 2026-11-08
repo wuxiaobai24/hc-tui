@@ -254,6 +254,23 @@ pub fn run_params(plan: &Plan) -> Value {
     params
 }
 
+/// `issues` 里的一条服务汇总：有失败服务时每包至多一条，明细留在 `services[]`。
+///
+/// 每包 N 个服务各报一条会把 `issues` 刷成服务清单，汇总只回答「这个包有没有服务
+/// 出问题」；是哪个、为什么，看同一份 [`ServiceStatus`] 数组里的 `state` 与 `reason`。
+pub fn issue_summary(services: &[ServiceStatus]) -> Option<String> {
+    let failed = services
+        .iter()
+        .filter(|service| service.state == FAILED)
+        .count();
+    (failed > 0).then(|| {
+        format!(
+            "service check failed: {failed} of {} services",
+            services.len()
+        )
+    })
+}
+
 /// 规划期能发现的缺失程序；`packages list` 与物化共用同一条判定。
 pub fn missing_program(info: &ServiceInfo) -> Option<PlanError> {
     let first = info.argv.first()?;
@@ -549,6 +566,26 @@ mod tests {
 
         // 没有记录：stopped。
         assert_eq!(super::status(&spec, &[]).state, STOPPED);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn one_service_summary_counts_the_failed_services() {
+        let dir = temp_dir("summary");
+        std::fs::write(dir.join("watch.sh"), "#!/bin/sh\n").unwrap();
+        let healthy = info(dir.clone(), &["./watch.sh"], None);
+        let broken = info(dir.clone(), &["definitely-missing-hctui-svc"], None);
+        assert_eq!(issue_summary(&[]), None);
+        let services = [super::status(&healthy, &[]), super::status(&broken, &[])];
+        assert_eq!(
+            issue_summary(&services).as_deref(),
+            Some("service check failed: 1 of 2 services")
+        );
+        let both = [super::status(&broken, &[]), super::status(&broken, &[])];
+        assert_eq!(
+            issue_summary(&both).as_deref(),
+            Some("service check failed: 2 of 2 services")
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -99,7 +99,7 @@ check "action catalog back" "$("$BIN" plugins action list)" "$PACKAGE.summary"
 step "uninstall cleans the store"
 "$BIN" packages uninstall "$PACKAGE" >/dev/null || FAILED=1
 sleep 1.2
-check "package list empty" "$("$BIN" packages list 2>&1)" "no plugins installed"
+check "package list empty" "$("$BIN" packages list 2>&1)" "no packages installed"
 [ -e "$ROOT/state/hc-tui/plugins/records/$PACKAGE.json" ] \
   && { echo "FAIL record left behind"; FAILED=1; } || echo "ok   record removed"
 [ -e "$ROOT/state/hc-tui/plugins/store/$PACKAGE" ] \

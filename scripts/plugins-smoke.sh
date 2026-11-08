@@ -89,5 +89,5 @@ check "catalog restored" "$OUT" "summary"
 step "uninstall removes the installed generation"
 "$BIN" plugins uninstall dev.hctui.plugins.hello || FAILED=1
 OUT=$("$BIN" plugins list)
-check "no installed plugins" "$OUT" "no plugins installed"
+check "no installed packages" "$OUT" "no packages installed"
 exit "$FAILED"
