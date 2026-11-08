@@ -184,7 +184,7 @@ fn render_modals(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let rows = app.help_view();
         clear_area(frame, app.content, theme);
         targets.clear();
-        render_help(frame, help, &rows, app.content, theme);
+        render_help(frame, help, &rows, app.content, theme, app.keys_preset());
         pointer_close(frame, app.content, theme, &mut targets);
     }
     if let Some(settings) = &app.settings {
@@ -1768,6 +1768,7 @@ fn render_help(
     rows: &[crate::app::HelpRow],
     content: Rect,
     theme: &Theme,
+    preset: &str,
 ) {
     let area = content;
     if area.width < 20 || area.height < 6 {
@@ -1781,7 +1782,7 @@ fn render_help(
     frame.render_widget(block, area);
     let width = inner.width as usize;
 
-    let header = nav_title(t(" keybinds"), t("esc close"), width, theme);
+    let header = nav_title(t(" keybinds"), &t1("preset {}", preset), width, theme);
     let query_line = if help.query.is_empty() {
         Line::from(vec![
             Span::styled("  /", Style::default().fg(theme.color("accent"))),

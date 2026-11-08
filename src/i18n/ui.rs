@@ -75,6 +75,7 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         // 键位浮层。
         " keybinds" => Some(" 键位"),
         "esc close" => Some("esc 关闭"),
+        "preset {}" => Some("预设 {}"),
         " press / to filter by command or shortcut" => Some(" 按 / 输入命令或快捷键筛选"),
         "search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter" => {
             Some("搜索 / · 滚动 j/k/↑↓/pgup/pgdn · 关闭 esc/enter")

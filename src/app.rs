@@ -245,6 +245,24 @@ pub struct HelpRow {
     pub text: String,
 }
 
+/// 帮助面板的一组键位行：组标题与（按键串、标题）。
+pub struct HelpGroup {
+    pub section: &'static str,
+    pub rows: Vec<(String, String)>,
+}
+
+/// copy-mode 固定行：按键串与标题原文（标题由调用方本地化）。
+pub const COPY_MODE_ROWS: [(&str, &str); 8] = [
+    ("h j k l", "move"),
+    ("w b e", "word"),
+    ("{ }", "paragraph"),
+    ("/ ?", "search"),
+    ("n N", "repeat search"),
+    ("v space", "select"),
+    ("y enter", "copy"),
+    ("q esc", "exit"),
+];
+
 /// 设置浮层：主题、状态图标、通知、声音。
 #[derive(Debug, Clone)]
 pub struct SettingsOverlay {
@@ -3233,20 +3251,22 @@ impl App {
         ),
     ];
 
-    /// Keybinds 面板的全部行，按 herdr 的分组分好。
-    pub fn help_rows(&self) -> Vec<HelpRow> {
-        let bindings = self.config.keys.entries();
-        let text = Self::binding_title;
-        let groups = Self::HELP_GROUPS;
+    /// 键位预设名：`keys.preset` 的当前值。
+    pub fn keys_preset(&self) -> &'static str {
+        if self.config.zellij_keys {
+            "zellij"
+        } else {
+            "default"
+        }
+    }
+
+    /// 帮助面板的五个键位组；内置行与打开模块时的 props 共用。
+    pub fn help_groups(&self) -> Vec<HelpGroup> {
         let by_name: std::collections::HashMap<&str, crate::config::Binding> =
-            bindings.into_iter().collect();
-        let mut rows = Vec::new();
-        for (title, names) in groups {
-            rows.push(HelpRow {
-                section: true,
-                key: String::new(),
-                text: t(title).to_string(),
-            });
+            self.config.keys.entries().into_iter().collect();
+        let mut groups = Vec::new();
+        for (section, names) in Self::HELP_GROUPS {
+            let mut rows = Vec::new();
             for name in names {
                 let Some(binding) = by_name.get(name) else {
                     continue;
@@ -3254,10 +3274,30 @@ impl App {
                 if binding.is_off() {
                     continue;
                 }
+                rows.push((
+                    binding.to_string().trim_matches('"').to_string(),
+                    Self::binding_title(name).to_string(),
+                ));
+            }
+            groups.push(HelpGroup { section, rows });
+        }
+        groups
+    }
+
+    /// Keybinds 面板的全部行，按 herdr 的分组分好。
+    pub fn help_rows(&self) -> Vec<HelpRow> {
+        let mut rows = Vec::new();
+        for group in self.help_groups() {
+            rows.push(HelpRow {
+                section: true,
+                key: String::new(),
+                text: t(group.section).to_string(),
+            });
+            for (key, text) in group.rows {
                 rows.push(HelpRow {
                     section: false,
-                    key: binding.to_string().trim_matches('"').to_string(),
-                    text: text(name).to_string(),
+                    key,
+                    text,
                 });
             }
         }
@@ -3266,16 +3306,7 @@ impl App {
             key: String::new(),
             text: t("copy mode").to_string(),
         });
-        for (key, text) in [
-            ("h j k l", "move"),
-            ("w b e", "word"),
-            ("{ }", "paragraph"),
-            ("/ ?", "search"),
-            ("n N", "repeat search"),
-            ("v space", "select"),
-            ("y enter", "copy"),
-            ("q esc", "exit"),
-        ] {
+        for (key, text) in COPY_MODE_ROWS {
             rows.push(HelpRow {
                 section: false,
                 key: key.to_string(),
