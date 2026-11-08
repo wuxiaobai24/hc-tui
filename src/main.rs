@@ -31,6 +31,7 @@ fn main() -> Result<()> {
         }
         Some("update") => hc_tui::update::run(&args[1..]),
         Some("mods") => mods_command(&args[1..]),
+        Some("theme") => theme_command(&args[1..]),
         Some("packages") => packages_command(&args[1..]),
         Some("plugins") => plugins_command(&args[1..]),
         Some("events") => events_command(&args[1..]),
@@ -113,6 +114,7 @@ fn usage() {
     println!("{}", t("       hc-tui probe [options]"));
     println!("       hc-tui update [--version X.Y.Z] [--check] [--from archive.tar.gz]");
     println!("       hc-tui session-hook install|remove|status");
+    println!("       hc-tui theme list|show|reload [--config <path>]");
     println!("       hc-tui --default-config");
     println!("{}", t("       hc-tui commands | ls [options]"));
     println!(
@@ -165,6 +167,87 @@ fn usage() {
         "{}",
         t("  --no-mods          builtin chrome, no module runtime")
     );
+}
+
+/// `hc-tui theme list|show|reload`：不用启动界面就能看当前解析出的配色。
+fn theme_command(args: &[String]) -> Result<()> {
+    let mut sub = "show";
+    let mut path = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                path = Some(std::path::PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| anyhow::anyhow!(t("--config needs a value")))?,
+                ));
+            }
+            other => sub = other,
+        }
+        index += 1;
+    }
+    match sub {
+        "list" => theme_list(),
+        "show" | "reload" => theme_show(path)?,
+        other => anyhow::bail!(t1(
+            "unknown theme command {}; usage: hc-tui theme list|show|reload [--config <path>]",
+            other
+        )),
+    }
+    Ok(())
+}
+
+fn theme_list() {
+    println!("builtin");
+    for name in hc_tui::theme::names() {
+        println!("  {name}");
+    }
+    for (label, loaded) in [
+        ("ghostty", hc_tui::theme::ghostty::load()),
+        ("omarchy", hc_tui::theme::omarchy::load()),
+    ] {
+        match loaded {
+            Ok(loaded) => {
+                let files = loaded
+                    .files
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("{label}  {} ({files})", loaded.label)
+            }
+            Err(error) => println!("{label}  {error}"),
+        }
+    }
+}
+
+fn theme_show(path: Option<std::path::PathBuf>) -> Result<()> {
+    let config = hc_tui::config::Config::load(path);
+    for warning in &config.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let theme = &config.theme;
+    println!("name    {}", theme.name);
+    match &theme.source {
+        Some(source) => println!("source  {}", source.describe()),
+        None => println!("source  builtin"),
+    }
+    for token in [
+        "bg",
+        "fg",
+        "dim",
+        "border",
+        "accent",
+        "selection_bg",
+        "cursor_bg",
+    ] {
+        println!("{token:<12} {}", hc_tui::theme::hex(theme.color(token)));
+    }
+    for (index, color) in theme.terminal_palette().iter().enumerate() {
+        println!("ansi{index:<8} {}", hc_tui::theme::hex(*color));
+    }
+    Ok(())
 }
 
 /// `hc-tui events`：连到运行中的 TUI，按行输出事件 NDJSON，断开即停。
