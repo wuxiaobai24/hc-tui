@@ -268,6 +268,51 @@ impl SplitNode {
         }
     }
 
+    /// 把 `new` 插到 `anchor` 的前面或后面。`anchor` 在分屏里时沿用那一层分屏的
+    /// 轴，在 Stack 里时插进堆叠的那一行。
+    ///
+    /// 返回 `false` 表示树里没有这个 Pane。
+    pub fn insert_beside(&mut self, anchor: PaneId, new: PaneId, before: bool) -> bool {
+        self.insert_beside_at(anchor, new, before, Axis::Horizontal)
+    }
+
+    fn insert_beside_at(&mut self, anchor: PaneId, new: PaneId, before: bool, axis: Axis) -> bool {
+        match self {
+            SplitNode::Leaf(id) if *id == anchor => {
+                let existing = SplitNode::Leaf(*id);
+                let (first, second) = if before {
+                    (SplitNode::Leaf(new), existing)
+                } else {
+                    (existing, SplitNode::Leaf(new))
+                };
+                *self = SplitNode::split(axis, 0.5, first, second);
+                true
+            }
+            SplitNode::Leaf(_) => false,
+            SplitNode::Split {
+                axis,
+                first,
+                second,
+                ..
+            } => {
+                let axis = *axis;
+                first.insert_beside_at(anchor, new, before, axis)
+                    || second.insert_beside_at(anchor, new, before, axis)
+            }
+            SplitNode::Stack { panes, active } => {
+                let Some(index) = panes.iter().position(|pane| *pane == anchor) else {
+                    return false;
+                };
+                let at = if before { index } else { index + 1 };
+                panes.insert(at, new);
+                if at <= *active {
+                    *active += 1;
+                }
+                true
+            }
+        }
+    }
+
     /// 移除一个叶子并折叠它的父分屏，把空间还给兄弟。根是它自己时返回 `None`。
     pub fn remove_pane(self, target: PaneId) -> Option<SplitNode> {
         match self {
@@ -691,6 +736,35 @@ mod tests {
             tree.remove_pane(PaneId(3)).unwrap().panes(),
             vec![PaneId(1)]
         );
+    }
+
+    #[test]
+    fn inserting_beside_a_leaf_wraps_it_with_the_parent_axis() {
+        let mut tree =
+            SplitNode::split(Axis::Vertical, 0.5, SplitNode::leaf(1), SplitNode::leaf(2));
+        assert!(tree.insert_beside(PaneId(2), PaneId(9), true));
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(9), PaneId(2)]);
+        match &tree {
+            SplitNode::Split { second, .. } => match second.as_ref() {
+                SplitNode::Split { axis, .. } => assert_eq!(*axis, Axis::Vertical),
+                _ => panic!("expected the anchor to be wrapped in a split"),
+            },
+            _ => panic!("expected a split"),
+        }
+        assert!(!tree.insert_beside(PaneId(99), PaneId(8), false));
+    }
+
+    #[test]
+    fn inserting_beside_a_stacked_pane_keeps_it_in_the_stack() {
+        let mut tree = SplitNode::stack(vec![PaneId(1), PaneId(2)], 1);
+        assert!(tree.insert_beside(PaneId(1), PaneId(9), false));
+        match &tree {
+            SplitNode::Stack { panes, active } => {
+                assert_eq!(panes, &vec![PaneId(1), PaneId(9), PaneId(2)]);
+                assert_eq!(*active, 2);
+            }
+            _ => panic!("expected a stack"),
+        }
     }
 
     #[test]

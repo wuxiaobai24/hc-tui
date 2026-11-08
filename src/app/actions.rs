@@ -26,7 +26,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("pane.zoom", "Toggle zoom"),
     ("pane.focus", "Focus pane or terminal"),
     ("pane.go", "Focus a directional neighbor"),
-    ("pane.swap", "Swap with a directional neighbor"),
+    (
+        "pane.swap",
+        "Swap panes in the same tab; pane and with, or direction",
+    ),
+    (
+        "pane.move",
+        "Move a pane to another tab; pane, to, before, after",
+    ),
     ("terminal.open", "Run argv in tab, right or down"),
     ("terminal.keep", "Keep terminal; create view if needed"),
     (
@@ -198,7 +205,7 @@ impl App {
                 self.select_tab(target.1);
             }
         }
-        if name.starts_with("pane.") {
+        if name.starts_with("pane.") && !matches!(name, "pane.swap" | "pane.move") {
             if let Some(id) = text("pane") {
                 let target = self
                     .panes
@@ -469,7 +476,27 @@ impl App {
                 }
             }
             "pane.go" => self.move_focus(direction()),
-            "pane.swap" => self.swap_direction(direction())?,
+            "pane.swap" => match (text("pane"), text("with")) {
+                (Some(first), Some(second)) => {
+                    let first = self.resolve_pane(&first)?;
+                    let second = self.resolve_pane(&second)?;
+                    self.swap_panes(first, second)?;
+                }
+                (None, None) => self.swap_direction(direction())?,
+                _ => anyhow::bail!(t("pane.swap takes both pane and with")),
+            },
+            "pane.move" => {
+                let pane = match text("pane") {
+                    Some(address) => self.resolve_pane(&address)?,
+                    None => self.focused(),
+                };
+                self.move_pane(
+                    pane,
+                    text("to").as_deref(),
+                    text("before").as_deref(),
+                    text("after").as_deref(),
+                )?;
+            }
             "agent.next" => self.cycle_agent(1),
             "agent.prev" => self.cycle_agent(-1),
             "terminal.park" => {
@@ -961,6 +988,45 @@ impl App {
         Ok(())
     }
 
+    /// 动作参数里的 Pane 地址：`origin` 或进程内编号。
+    fn resolve_pane(&self, address: &str) -> Result<u32> {
+        self.panes
+            .iter()
+            .find(|(id, pane)| pane.origin.as_deref() == Some(address) || id.to_string() == address)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| anyhow::anyhow!(t1("unknown pane {}", address)))
+    }
+
+    /// 动作参数里的 Tab 地址：`origin` 或编号，跨工作区查找。
+    fn tab_position(&self, address: &str) -> Result<(usize, usize)> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(index, workspace)| {
+                workspace
+                    .tabs
+                    .iter()
+                    .position(|tab| {
+                        tab.origin.as_deref() == Some(address) || tab.id.to_string() == address
+                    })
+                    .map(|position| (index, position))
+            })
+            .ok_or_else(|| anyhow::anyhow!(t1("unknown tab {}", address)))
+    }
+
+    fn tab_position_by_id(&self, id: u32) -> Option<(usize, usize)> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(index, workspace)| {
+                workspace
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.id == id)
+                    .map(|position| (index, position))
+            })
+    }
+
     pub(super) fn swap_direction(&mut self, direction: Direction) -> Result<()> {
         let id = self.focused();
         let leaves: Vec<_> = self
@@ -975,16 +1041,18 @@ impl App {
         self.swap_panes(id, target)
     }
 
+    /// 同一 Tab 里交换两个 Pane 的位置。`self.panes` 里的终端、标题与模块不搬家，
+    /// 只换它们在树和浮动层里占的位置；焦点是 Pane 编号，所以跟着 Pane 走。
+    /// 跨 Tab 不交换，需要跨 Tab 时用 `pane.move`。
     pub(super) fn swap_panes(&mut self, id: u32, target: u32) -> Result<()> {
-        let tab = self
-            .workspace_mut()
-            .and_then(Workspace::tab_mut)
-            .ok_or_else(|| anyhow::anyhow!(t("no tab")))?;
-        let panes = tab.tree.panes();
-        anyhow::ensure!(
-            panes.contains(&PaneId(id)) && panes.contains(&PaneId(target)),
-            t("no neighbor")
-        );
+        anyhow::ensure!(id != target, t("cannot swap a pane with itself"));
+        let here = self
+            .locate(id)
+            .ok_or_else(|| anyhow::anyhow!(t1("unknown pane {}", id)))?;
+        let there = self
+            .locate(target)
+            .ok_or_else(|| anyhow::anyhow!(t1("unknown pane {}", target)))?;
+        anyhow::ensure!(here == there, t("swap needs both panes in the same tab"));
         fn swap(node: &mut SplitNode, a: u32, b: u32) {
             match node {
                 SplitNode::Leaf(id) => {
@@ -1009,10 +1077,139 @@ impl App {
                 }
             }
         }
+        let tab = &mut self.workspaces[here.0].tabs[here.1];
         swap(&mut tab.tree, id, target);
+        for entry in &mut tab.floating {
+            if entry.pane == id {
+                entry.pane = target;
+            } else if entry.pane == target {
+                entry.pane = id;
+            }
+        }
         self.mark_layout();
         Ok(())
     }
+
+    /// 把 Pane 移到目标 Tab 的指定位置。终端、标题与模块跟着 Pane 走；源 Tab 因此
+    /// 没有 Pane 时按现有规则收回（先提浮动 Pane，再删 Tab，最后删空工作区），
+    /// 已经搬走的终端不结束。
+    pub(super) fn move_pane(
+        &mut self,
+        pane: u32,
+        to_tab: Option<&str>,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            before.is_none() || after.is_none(),
+            t("use before or after, not both")
+        );
+        let (source_ws, source_tab) = self
+            .locate(pane)
+            .ok_or_else(|| anyhow::anyhow!(t1("unknown pane {}", pane)))?;
+        let (target_ws, target_tab) = match to_tab {
+            Some(address) => self.tab_position(address)?,
+            None => (
+                self.active_ws,
+                self.workspace()
+                    .map(|workspace| workspace.active)
+                    .ok_or_else(|| anyhow::anyhow!(t("no tab")))?,
+            ),
+        };
+        let anchor = match (before, after) {
+            (Some(address), _) => Some((self.resolve_pane(address)?, true)),
+            (None, Some(address)) => Some((self.resolve_pane(address)?, false)),
+            (None, None) => None,
+        };
+        if let Some((anchor, _)) = anchor {
+            anyhow::ensure!(anchor != pane, t("cannot move a pane next to itself"));
+            anyhow::ensure!(
+                self.workspaces[target_ws].tabs[target_tab]
+                    .tree
+                    .panes()
+                    .contains(&PaneId(anchor)),
+                t("anchor pane is not in the target tab")
+            );
+        }
+        let same_tab = source_ws == target_ws && source_tab == target_tab;
+        if same_tab
+            && anchor.is_none()
+            && self.workspaces[target_ws].tabs[target_tab]
+                .tree
+                .panes()
+                .last()
+                == Some(&PaneId(pane))
+        {
+            // 已经在目标位置，只要把焦点给回来。
+            self.focus_pane(pane);
+            return Ok(());
+        }
+        let target_id = self.workspaces[target_ws].tabs[target_tab].id;
+        let source_active = self.workspaces[source_ws].tab().map(|tab| tab.id);
+        // 把 Pane 从源 Tab 的结构里摘出来；视图与终端留在 `self.panes` 里。
+        let removed_tab = {
+            let tab = &mut self.workspaces[source_ws].tabs[source_tab];
+            if let Some(index) = tab.floating.iter().position(|entry| entry.pane == pane) {
+                tab.floating.remove(index);
+                false
+            } else {
+                let tree = std::mem::replace(&mut tab.tree, SplitNode::Leaf(PaneId(pane)));
+                match tree.remove_pane(PaneId(pane)) {
+                    Some(tree) => {
+                        tab.tree = tree;
+                        false
+                    }
+                    // 唯一的分屏 Pane：先让浮动 Pane 接住分屏，没有就让 Tab 空掉。
+                    None => !tab.promote_floating(),
+                }
+            }
+        };
+        if removed_tab {
+            self.workspaces[source_ws].tabs.remove(source_tab);
+            if let Some(index) = self.workspaces[source_ws]
+                .tabs
+                .iter()
+                .position(|tab| Some(tab.id) == source_active)
+            {
+                self.workspaces[source_ws].active = index;
+            }
+            if self.workspaces[source_ws].tabs.is_empty() {
+                self.workspaces.remove(source_ws);
+                if source_ws < self.active_ws {
+                    self.active_ws -= 1;
+                }
+                self.active_ws = self.active_ws.min(self.workspaces.len().saturating_sub(1));
+            }
+        } else {
+            let tab = &mut self.workspaces[source_ws].tabs[source_tab];
+            if tab.focus == pane {
+                tab.focus = tab.tree.panes().first().map(|id| id.0).unwrap_or(0);
+            }
+        }
+        // 源 Tab 可能已经消失，按 id 重新定位目标。
+        let (target_ws, target_tab) = self
+            .tab_position_by_id(target_id)
+            .ok_or_else(|| anyhow::anyhow!(t("no tab")))?;
+        let tab = &mut self.workspaces[target_ws].tabs[target_tab];
+        match anchor {
+            Some((anchor, before)) => anyhow::ensure!(
+                tab.tree.insert_beside(PaneId(anchor), PaneId(pane), before),
+                t("anchor pane is not in the target tab")
+            ),
+            None => match tab.tree.panes().last().map(|id| id.0) {
+                Some(last) => {
+                    tab.tree
+                        .split_pane(PaneId(last), Axis::Horizontal, PaneId(pane), 0.5);
+                }
+                None => tab.tree = SplitNode::leaf(pane),
+            },
+        }
+        self.focus_pane(pane);
+        self.note = t1("pane moved to tab {}", target_tab + 1);
+        self.mark_layout();
+        Ok(())
+    }
+
     pub(super) fn cycle_agent(&mut self, delta: isize) {
         let mut rows: Vec<_> = self
             .navigation_rows()
@@ -1309,6 +1506,135 @@ mod tests {
             vec![PaneId(second), PaneId(first)]
         );
         assert_eq!(app.focused(), second);
+    }
+    #[test]
+    fn swapping_two_panes_by_id_keeps_their_terminals_and_follows_the_focus() {
+        let mut app = app();
+        let first = app.focused();
+        app.panes.get_mut(&first).unwrap().terminal = Some("t1".into());
+        app.split_focused(Axis::Horizontal);
+        let second = app.focused();
+        app.panes.get_mut(&second).unwrap().terminal = Some("t2".into());
+        app.execute_action(
+            "pane.swap",
+            json!({"pane": first.to_string(), "with": second.to_string()}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.tab().unwrap().tree.panes(),
+            vec![PaneId(second), PaneId(first)]
+        );
+        assert_eq!(app.focused(), second);
+        assert_eq!(app.panes[&first].terminal.as_deref(), Some("t1"));
+        assert_eq!(app.panes[&second].terminal.as_deref(), Some("t2"));
+    }
+    #[test]
+    fn a_cross_tab_swap_is_refused_and_leaves_both_tabs_alone() {
+        let mut app = app();
+        let first = app.focused();
+        app.new_tab(None);
+        let second = app.focused();
+        let before = app.tab().unwrap().tree.panes();
+        let error = app
+            .execute_action(
+                "pane.swap",
+                json!({"pane": first.to_string(), "with": second.to_string()}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same tab"), "{error}");
+        assert_eq!(app.tab().unwrap().tree.panes(), before);
+        assert_eq!(app.workspaces[0].tabs[0].tree.panes(), vec![PaneId(first)]);
+    }
+    #[test]
+    fn moving_a_pane_to_another_tab_takes_its_terminal_and_drops_the_empty_tab() {
+        let mut app = app();
+        let first = app.focused();
+        app.panes.get_mut(&first).unwrap().terminal = Some("t1".into());
+        app.new_tab(None);
+        let second = app.focused();
+        app.panes.get_mut(&second).unwrap().terminal = Some("t2".into());
+        let target = app.tab().unwrap().id;
+        app.execute_action(
+            "pane.move",
+            json!({"pane": first.to_string(), "to": target.to_string()}),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces[0].tabs.len(), 1);
+        let tab = app.workspaces[0].tab().unwrap();
+        assert_eq!(tab.id, target);
+        assert_eq!(tab.tree.panes(), vec![PaneId(second), PaneId(first)]);
+        assert_eq!(app.focused(), first);
+        assert_eq!(app.panes[&first].terminal.as_deref(), Some("t1"));
+        assert!(!app
+            .inflight
+            .values()
+            .any(|(method, _)| method == "terminal.kill"));
+    }
+    #[test]
+    fn moving_the_only_pane_of_a_workspace_keeps_its_terminal_and_drops_the_space() {
+        let mut app = app();
+        let first = app.focused();
+        app.panes.get_mut(&first).unwrap().terminal = Some("t1".into());
+        app.new_workspace(None);
+        let second = app.focused();
+        let target = app.tab().unwrap().id;
+        app.execute_action(
+            "pane.move",
+            json!({"pane": first.to_string(), "to": target.to_string()}),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(
+            app.workspaces[0].tabs[0].tree.panes(),
+            vec![PaneId(second), PaneId(first)]
+        );
+        assert_eq!(app.focused(), first);
+        assert_eq!(app.panes[&first].terminal.as_deref(), Some("t1"));
+    }
+    #[test]
+    fn moving_a_pane_before_or_after_an_anchor_places_it_on_that_side() {
+        let mut app = app();
+        let first = app.focused();
+        app.split_focused(Axis::Horizontal);
+        let second = app.focused();
+        app.execute_action(
+            "pane.move",
+            json!({"pane": first.to_string(), "after": second.to_string()}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.tab().unwrap().tree.panes(),
+            vec![PaneId(second), PaneId(first)]
+        );
+        assert_eq!(app.focused(), first);
+        app.execute_action("pane.move", json!({"before": second.to_string()}))
+            .unwrap();
+        assert_eq!(
+            app.tab().unwrap().tree.panes(),
+            vec![PaneId(first), PaneId(second)]
+        );
+    }
+    #[test]
+    fn pane_move_refuses_unknown_targets_and_conflicting_anchors() {
+        let mut app = app();
+        let pane = app.focused();
+        let error = app
+            .execute_action("pane.move", json!({"pane": pane.to_string(), "to": "999"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown tab"), "{error}");
+        let error = app
+            .execute_action("pane.move", json!({"pane": "999"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown pane"), "{error}");
+        let error = app
+            .execute_action("pane.move", json!({"before": "1", "after": "1"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("before or after"), "{error}");
+        assert_eq!(app.workspaces[0].tabs[0].tree.panes(), vec![PaneId(pane)]);
     }
     #[test]
     fn done_is_held_only_while_focus_stays_on_the_agent() {
