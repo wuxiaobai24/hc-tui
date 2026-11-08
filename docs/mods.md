@@ -369,6 +369,21 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 - `exec` 单表面并发上限 4 条，超出返回 `busy`；默认 `cwd` 与 `on` 取启动参数里的 `folder` 与 `workspace`，显式值优先。
 - 未授予的方法返回 `forbidden`，不产生副作用。
 
+### `picker` 的候选行
+
+宿主把九种选择来源（动作菜单与其子菜单、工作区、移动 Pane、Resize、Swap Pane、终端菜单与插件菜单、模板、机器、授予确认）归一成同一份 `props.rows`，再用 `state`/`mods.open` 交给 `picker` 模块；模块不解析 `group:`/`binding:`/`custom:` 这类字符串协议。每行：
+
+```json
+{ "id": "…", "label": "…", "section": false, "right": "…",
+  "context": "…", "cwd": "…", "enabled": true,
+  "action": { "name": "…", "args": {} } }
+```
+
+- `section: true` 的行是分组标题，`action` 为 `null`；过滤、选中与滚动由模块自持。
+- `action` 直接交给 `run`（`{ name, args }` 就是 `execute_action` 的入参）；机器面板的 `a`/`c`/`r`/`d`/`n` 由模块组合 `picker.machine` 调用。
+- 两种形态：`form: "chooser"`（固定 64 宽居中，`rowHeight` 与 `visible` 决定窗口）与 `form: "goto"`（占满清屏，按 `filter` 字段过滤 `label+id` 或 `label+context`）。标题、按钮、面包屑与提示文案由宿主本地化后放进 props。
+- `keys.goto` 与 `app.palette` 在 `picker` 模块可用时改走模块；`--no-mods`、模块未安装或停用时每个来源保留原来的 Rust 选择器。
+
 ## 8. 权限与安全
 
 | 层 | 声明位置 | 执行者 | 内容 |

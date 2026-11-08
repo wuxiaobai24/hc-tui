@@ -56,7 +56,7 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
         };
         if surface.place == SurfacePlace::Dialog {
             let theme = app.config.theme.clone();
-            crate::ui::clear_area(frame, app.content, &theme);
+            crate::ui::clear_area(frame, rect, &theme);
         }
         if !matches!(surface.state, SurfaceState::Loading | SurfaceState::Running) {
             if let Some(error) = surface.last_error.clone() {

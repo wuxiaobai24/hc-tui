@@ -35,135 +35,27 @@ pub(super) enum PointerDrag {
 impl App {
     pub fn open_actions_menu(&mut self) {
         self.keyboard_mode = KeyboardMode::Normal;
-        self.open_action_items(
-            t("Actions"),
-            vec![
-                (t("panes").into(), "group:panes".into()),
-                (t("tabs and workspaces").into(), "group:tabs".into()),
-                (t("agents and terminals").into(), "group:terminals".into()),
-                (t("global").into(), "group:global".into()),
-            ],
-        );
-    }
-
-    fn open_action_items(&mut self, title: &str, items: Vec<(String, String)>) {
-        self.pointer_drag = None;
-        self.open_chooser(Chooser {
-            title: title.into(),
-            selected: 0,
-            kind: ChooserKind::Actions,
-            items: items
-                .into_iter()
-                .map(|(label, value)| ChooserItem { label, value })
-                .collect(),
-        });
+        self.open_actions_picker_group("root");
     }
 
     pub(super) fn activate_pointer_action(&mut self, value: &str) {
-        if let Some(group) = value.strip_prefix("group:") {
-            let names: &[&str] = match group {
-                "panes" => &[
-                    "split_vertical",
-                    "split_horizontal",
-                    "zoom",
-                    "rename_pane",
-                    "move_pane",
-                    "resize_mode",
-                    "stack_panes",
-                    "layout_next",
-                    "layout_previous",
-                    "float_pane",
-                    "float_pin",
-                    "float_hide",
-                    "cycle_pane_next",
-                    "cycle_pane_previous",
-                    "last_pane",
-                    "close_pane",
-                    "kill_pane",
-                ],
-                "tabs" => &[
-                    "new_tab",
-                    "rename_tab",
-                    "move_tab_previous",
-                    "move_tab_next",
-                    "next_tab",
-                    "previous_tab",
-                    "close_tab",
-                    "new_workspace",
-                    "rename_workspace",
-                    "workspace_picker",
-                    "next_workspace",
-                    "previous_workspace",
-                    "close_workspace",
-                ],
-                "terminals" => &[
-                    "copy_mode",
-                    "read_pane",
-                    "scroll_bottom",
-                    "edit_history",
-                    "paste_image",
-                    "send_text",
-                    "send_keys",
-                    "wait_output",
-                    "put_file",
-                    "interrupt",
-                    "toggle_keep",
-                    "remove_terminal",
-                    "open_link",
-                    "next_agent",
-                    "chat",
-                ],
-                _ => &[
-                    "goto",
-                    "machines",
-                    "templates",
-                    "settings",
-                    "help",
-                    "toggle_sidebar",
-                    "reload_config",
-                    "open_notification_target",
-                    "detach",
-                ],
-            };
-            let mut items: Vec<_> = names
-                .iter()
-                .map(|name| (Self::binding_title(name).into(), format!("binding:{name}")))
-                .collect();
-            if group == "terminals" {
-                items.insert(0, (t("rename agent").into(), "action:agent.rename".into()));
-            }
-            if group == "panes" {
-                items.push((t("Swap pane").into(), "swap:choose".into()));
-            }
-            if group == "global" {
-                items.push((t("Files").into(), "action:files.open".into()));
-                items.push((t("Changes").into(), "action:changes.open".into()));
-                items.push((t("Keybindings: default / Zellij").into(), "preset".into()));
-                for (index, command) in self.config.commands.iter().enumerate() {
-                    items.push((command.command.clone(), format!("custom:{index}")));
+        // 归一行的内置回退：值就是行里的 `{name, args}`，不再经过旧的字符串协议。
+        if let Some(action) = value.strip_prefix("picker-action:") {
+            if let Ok(action) = serde_json::from_str::<Value>(action) {
+                let name = action.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = action.get("args").cloned().unwrap_or_else(|| json!({}));
+                if let Err(error) = self.execute_action(name, args) {
+                    self.note = error.to_string();
                 }
             }
-            items.push((t("Back").into(), "back".into()));
-            self.open_action_items(t("Actions"), items);
+            self.dirty = true;
+            return;
+        }
+        if let Some(group) = value.strip_prefix("group:") {
+            self.open_actions_picker_group(group);
         } else if let Some(target) = value.strip_prefix("swap:") {
             if target == "choose" {
-                let source = self.focused();
-                let items = self
-                    .tab()
-                    .into_iter()
-                    .flat_map(|tab| tab.tree.panes())
-                    .filter(|id| id.0 != source)
-                    .map(|id| {
-                        (
-                            self.panes
-                                .get(&id.0)
-                                .map(|pane| pane.label())
-                                .unwrap_or_else(|| id.0.to_string()),
-                            format!("swap:{}", id.0),
-                        )
-                    })
-                    .collect();
-                self.open_action_items(t("Swap pane"), items);
+                self.open_swap_picker();
             } else if let Ok(target) = target.parse() {
                 if let Err(error) = self.swap_panes(self.focused(), target) {
                     self.note = error.to_string();
@@ -176,34 +68,14 @@ impl App {
         } else if let Some(name) = value.strip_prefix("binding:") {
             match name {
                 "workspace_picker" => {
-                    let items = self
-                        .workspaces
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| (self.workspace_label(i), format!("workspace:{i}")))
-                        .collect();
-                    self.open_action_items(t("workspace picker"), items);
+                    self.open_workspace_picker();
                 }
                 "move_pane" => {
-                    let mut items: Vec<_> = self
-                        .workspace()
-                        .into_iter()
-                        .flat_map(|w| w.tabs.iter().enumerate())
-                        .map(|(i, tab)| (tab.display(&self.panes), format!("move:{i}")))
-                        .collect();
-                    items.push((t("new tab").into(), "move:new".into()));
-                    self.open_action_items(t("move pane"), items);
+                    self.open_move_pane_picker();
                 }
-                "resize_mode" => self.open_action_items(
-                    t("RESIZE"),
-                    vec![
-                        (t("Wider").into(), "resize:l".into()),
-                        (t("Narrower").into(), "resize:h".into()),
-                        (t("Taller").into(), "resize:j".into()),
-                        (t("Shorter").into(), "resize:k".into()),
-                        (t("Done").into(), "done".into()),
-                    ],
-                ),
+                "resize_mode" => {
+                    self.open_resize_picker();
+                }
                 _ => self.run_named_binding(name),
             }
         } else if let Some(index) = value
@@ -225,13 +97,9 @@ impl App {
         } else {
             match value {
                 "back" => self.open_actions_menu(),
-                "preset" => self.open_action_items(
-                    t("Keybindings"),
-                    vec![
-                        ("Default (Ctrl+B)".into(), "preset:default".into()),
-                        ("Zellij".into(), "preset:zellij".into()),
-                    ],
-                ),
+                "preset" => {
+                    self.open_actions_picker_group("preset");
+                }
                 "preset:default" | "preset:zellij" => {
                     self.config.zellij_keys = value == "preset:zellij";
                     self.keyboard_mode = KeyboardMode::Normal;
