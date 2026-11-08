@@ -2,6 +2,7 @@
 id = "tabs"
 title = "Tabs"
 place = "none"
+region = "tabs"
 size = 1
 focusable = false
 host_api = 1

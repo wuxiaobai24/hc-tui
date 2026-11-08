@@ -661,6 +661,16 @@ fn validate_module(path: &Path, source: &str, module: &Module) -> Result<(), Man
             ));
         }
     }
+    if let Some(region) = &module.region {
+        if !crate::mods::wiring::is_region(region.get_ref()) {
+            return Err(fail(
+                path,
+                source,
+                region.span(),
+                "module region must be spaces, tabs or status",
+            ));
+        }
+    }
     if let Some(size) = &module.size {
         if !size.get_ref().is_finite() || *size.get_ref() <= 0.0 {
             return Err(fail(
