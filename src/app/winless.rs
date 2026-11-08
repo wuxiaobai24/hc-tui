@@ -115,6 +115,16 @@ fn core_alive(config: &Config) -> bool {
     core_socket(config).is_some_and(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
 }
 
+/// prompt 需要的输入从 argv 取：确认类只认 `confirmed: true`（等价于窗口里敲
+/// `y`），其余提示只认 `name`（改名与新建用的那条）。取不到就是 `None`。
+fn prompt_text(prompt: &Prompt, args: &Value) -> Option<String> {
+    if prompt.kind.needs_confirm() {
+        return (args.get("confirmed").and_then(Value::as_bool) == Some(true))
+            .then(|| "y".to_string());
+    }
+    args.get("name").and_then(Value::as_str).map(str::to_string)
+}
+
 fn refuse(command: &str, kind: &str, error: String) -> i32 {
     println!(
         "{}",
@@ -232,9 +242,24 @@ pub fn run(config: &Config, command: &str, args: &Value) -> Result<i32> {
         app.shutdown();
         return Ok(refuse(command, "action_failed", error.to_string()));
     }
+    // 动作要一行输入时，argv 里能拿到的就当场提交；拿不到就明确拒绝，
+    // 不能报 `confirmation_pending: true` 再把 prompt 丢掉。
+    if let Some(prompt) = app.prompt.take() {
+        let Some(text) = prompt_text(&prompt, args) else {
+            app.shutdown();
+            return Ok(refuse(
+                command,
+                "needs_input",
+                t1("{} needs input; pass it in the arguments", command),
+            ));
+        };
+        let mut prompt = prompt;
+        prompt.buffer = text;
+        app.commit_prompt(prompt);
+    }
     let mut response = json!({
         "accepted": true,
-        "confirmation_pending": app.prompt.is_some(),
+        "confirmation_pending": false,
     });
     if let Some(request) = app.plugin_request.take() {
         response["request"] = json!(request);
@@ -281,6 +306,33 @@ mod tests {
         ] {
             assert!(!needs_window(command), "{command}");
         }
+    }
+
+    #[test]
+    fn prompts_take_their_answer_from_the_arguments_or_are_refused() {
+        let prompt = |kind| Prompt {
+            label: String::new(),
+            buffer: String::new(),
+            cursor: 0,
+            history_pos: None,
+            kind,
+        };
+        let close = prompt(PromptKind::CloseTab(0));
+        assert_eq!(
+            prompt_text(&close, &json!({"confirmed": true})),
+            Some("y".to_string())
+        );
+        assert_eq!(prompt_text(&close, &json!({"confirmed": false})), None);
+        assert_eq!(prompt_text(&close, &json!({})), None);
+        let rename = prompt(PromptKind::RenameTab {
+            workspace: 1,
+            tab: 2,
+        });
+        assert_eq!(
+            prompt_text(&rename, &json!({"name": "审查"})),
+            Some("审查".to_string())
+        );
+        assert_eq!(prompt_text(&rename, &json!({})), None);
     }
 
     #[test]

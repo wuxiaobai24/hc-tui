@@ -406,6 +406,14 @@ fn map_refs(value: &mut Value, panes: &BTreeMap<u32, u32>) -> Result<(), String>
 /// 换一个写入者就对不上；`origin` 是跨进程的身份。三方合并先按 `origin`
 /// （没有时按无名元素的位置）把远端值重编号，base / ours / theirs 才可比。
 pub fn translate(theirs: &Value, base: &Value) -> Result<Value, String> {
+    translate_beyond(theirs, base, &Value::Null)
+}
+
+/// 同 [`translate`]，但新实体的本地编号从 `used` 的最大编号之后开始。
+///
+/// 三方合并的另一侧（`ours`）可能已经占用了 base 之后的编号；两边各自新建的
+/// pane/tab/space 若拿到同一个 id，通用合并会把它们当成同一项的内容冲突。
+pub fn translate_beyond(theirs: &Value, base: &Value, used: &Value) -> Result<Value, String> {
     let base_workspaces = base
         .get("workspaces")
         .and_then(Value::as_array)
@@ -417,19 +425,32 @@ pub fn translate(theirs: &Value, base: &Value) -> Result<Value, String> {
         .cloned()
         .unwrap_or_default();
     let mut next = 1;
-    for workspace in &base_workspaces {
-        next = next.max(number(workspace.get("id")) + 1);
-        for tab in workspace
-            .get("tabs")
+    for source in [base, used] {
+        for workspace in source
+            .get("workspaces")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
-            next = next.max(number(tab.get("id")) + 1);
+            next = next.max(number(workspace.get("id")) + 1);
+            for tab in workspace
+                .get("tabs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                next = next.max(number(tab.get("id")) + 1);
+            }
         }
-    }
-    for id in base_panes.keys() {
-        next = next.max(id.parse::<u32>().unwrap_or(0) + 1);
+        for id in source
+            .get("panes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(id, _)| id)
+        {
+            next = next.max(id.parse::<u32>().unwrap_or(0) + 1);
+        }
     }
 
     let mut panes = serde_json::Map::new();
@@ -818,5 +839,45 @@ mod tests {
                 .unwrap(),
             "11"
         );
+    }
+
+    #[test]
+    fn new_entities_of_both_writers_get_disjoint_ids() {
+        let base = json!({
+            "workspaces": [{"id": 1, "label": "", "active_tab": 0, "tabs": [
+                {"id": 1, "label": "a", "tree": {"kind": "leaf", "pane": 1}}]}],
+            "panes": {"1": {"origin": "p1", "terminal": "t1"}}
+        });
+        let ours = json!({
+            "workspaces": [{"id": 1, "label": "", "active_tab": 1, "tabs": [
+                {"id": 1, "label": "a", "tree": {"kind": "leaf", "pane": 1}},
+                {"id": 3, "label": "ours", "tree": {"kind": "leaf", "pane": 3}}]}],
+            "panes": {
+                "1": {"origin": "p1", "terminal": "t1"},
+                "3": {"origin": "p3", "terminal": "t3"}
+            }
+        });
+        let theirs = json!({
+            "workspaces": [{"id": 1, "label": "", "active_tab": 1, "tabs": [
+                {"id": 1, "label": "a", "tree": {"kind": "leaf", "pane": 1}},
+                {"id": 2, "label": "theirs", "tree": {"kind": "leaf", "pane": 2}}]}],
+            "panes": {
+                "1": {"origin": "p1", "terminal": "t1"},
+                "2": {"origin": "p2", "terminal": "t2"}
+            }
+        });
+        // 带上 ours 的编号：远端新 pane 从 ours 之后开始，不会与 ours 的新 pane 撞号。
+        let translated = translate_beyond(&theirs, &base, &ours).unwrap();
+        let mut ids: Vec<u32> = translated["panes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|id| id.parse().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 4]);
+        let merged = merge(&base, &ours, &translated).unwrap();
+        assert_eq!(merged["panes"].as_object().unwrap().len(), 3);
+        assert_eq!(merged["workspaces"][0]["tabs"].as_array().unwrap().len(), 3);
     }
 }

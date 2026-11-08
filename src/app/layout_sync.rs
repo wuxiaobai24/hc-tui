@@ -12,6 +12,60 @@ use super::*;
 use crate::i18n::{t, t1};
 use crate::shared;
 
+/// 把「当前选中的位置」对齐到远端文档：当前 space、每个 space 的活动 tab、
+/// 每个 tab 的焦点 pane。这些是视图状态，不是布局内容；两个写入者各自动过
+/// 它们时，通用合并会把整份文档判成冲突，连对方的真实改动一起挡掉。结构
+/// （有哪些 space/tab/pane、标签、树）仍按三方差分合并，真冲突照旧报错。
+fn align_view_state(ours: &mut Value, theirs: &Value) {
+    let Some(ours) = ours.as_object_mut() else {
+        return;
+    };
+    let Some(theirs) = theirs.as_object() else {
+        return;
+    };
+    if let Some(active) = theirs.get("active_workspace") {
+        ours.insert("active_workspace".to_string(), active.clone());
+    }
+    let (Some(theirs_spaces), Some(ours_spaces)) = (
+        theirs.get("workspaces").and_then(Value::as_array),
+        ours.get_mut("workspaces").and_then(Value::as_array_mut),
+    ) else {
+        return;
+    };
+    for space in ours_spaces {
+        let id = space.get("id").cloned();
+        let Some(theirs_space) = theirs_spaces
+            .iter()
+            .find(|candidate| candidate.get("id") == id.as_ref())
+        else {
+            continue;
+        };
+        if let (Some(slot), Some(active_tab)) =
+            (space.as_object_mut(), theirs_space.get("active_tab"))
+        {
+            slot.insert("active_tab".to_string(), active_tab.clone());
+        }
+        let (Some(theirs_tabs), Some(ours_tabs)) = (
+            theirs_space.get("tabs").and_then(Value::as_array),
+            space.get_mut("tabs").and_then(Value::as_array_mut),
+        ) else {
+            continue;
+        };
+        for tab in ours_tabs {
+            let id = tab.get("id").cloned();
+            let Some(theirs_tab) = theirs_tabs
+                .iter()
+                .find(|candidate| candidate.get("id") == id.as_ref())
+            else {
+                continue;
+            };
+            if let (Some(slot), Some(focus)) = (tab.as_object_mut(), theirs_tab.get("focus")) {
+                slot.insert("focus".to_string(), focus.clone());
+            }
+        }
+    }
+}
+
 /// 把文档值解析成可用的布局；缺失或不可用时返回 `None`。
 fn layout_state(value: &Value) -> Option<SavedState> {
     if value.is_null() {
@@ -135,9 +189,10 @@ impl App {
         }
         // 有本地意图：重编号后三方合并重放；合并不了就阻塞自动覆盖。
         self.assign_origins();
-        let ours = self.snapshot_value();
-        let merged = shared::translate(&value, &self.layout.base)
+        let mut ours = self.snapshot_value();
+        let merged = shared::translate_beyond(&value, &self.layout.base, &ours)
             .and_then(|theirs| {
+                align_view_state(&mut ours, &theirs);
                 shared::merge(&self.layout.base, &ours, &theirs).map(|merged| (theirs, merged))
             })
             .and_then(|(theirs, merged)| match layout_state(&merged) {
@@ -336,5 +391,41 @@ mod tests {
         app.execute_action("layout.reload", json!({})).unwrap();
         assert!(!app.layout.blocked);
         assert!(app.inflight.contains_key("doc.get"));
+    }
+
+    #[test]
+    fn concurrent_selections_do_not_hide_each_others_layout_changes() {
+        let base = json!({
+            "schema_version": 3, "active_workspace": 0,
+            "workspaces": [{"id": 1, "label": "", "active_tab": 1, "tabs": [
+                {"id": 1, "label": "a", "focus": 1, "tree": {"kind": "leaf", "pane": 1}},
+                {"id": 2, "label": "b", "focus": 2, "tree": {"kind": "leaf", "pane": 2}}]}],
+            "panes": {"1": {"origin": "p1"}, "2": {"origin": "p2"}}
+        });
+        // ours：加了一个 tab 并选中它。
+        let mut ours = base.clone();
+        ours["workspaces"][0]["tabs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": 3, "label": "new", "focus": 3,
+                         "tree": {"kind": "leaf", "pane": 3}}));
+        ours["workspaces"][0]["active_tab"] = json!(2);
+        ours["panes"]["3"] = json!({"origin": "p3"});
+        // theirs：关掉了一个 tab，选中位置也变了。
+        let mut theirs = base.clone();
+        theirs["workspaces"][0]["tabs"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        theirs["workspaces"][0]["active_tab"] = json!(0);
+        theirs["panes"].as_object_mut().unwrap().remove("2");
+
+        assert!(shared::merge(&base, &ours, &theirs).is_err());
+        align_view_state(&mut ours, &theirs);
+        let merged = shared::merge(&base, &ours, &theirs).unwrap();
+        assert_eq!(merged["workspaces"][0]["tabs"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["panes"].as_object().unwrap().len(), 2);
+        assert!(merged["panes"].get("3").is_some());
+        assert!(merged["panes"].get("2").is_none());
     }
 }
