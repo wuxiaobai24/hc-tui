@@ -115,6 +115,12 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("app.settings", "Settings"),
     ("app.help", "Key bindings"),
     ("app.theme", "Choose theme; name"),
+    ("app.indicators", "Status indicators; value dots or symbols"),
+    (
+        "app.notifications",
+        "System notification delivery; value off, toast or system",
+    ),
+    ("app.sound", "Notification sound; value on or off"),
     ("app.quit", "Detach client, keep programs running"),
     ("overlay.close", "Close top overlay"),
 ];
@@ -128,6 +134,46 @@ impl App {
         });
         self.dirty = true;
     }
+
+    /// 打开设置：装了 `settings` 模块就开模块浮层，否则用内置浮层。
+    pub fn open_settings(&mut self) {
+        if self.settings_module_available() {
+            let data = json!({
+                "width": self.content.width,
+                "height": self.content.height,
+                "onEsc": "module",
+            });
+            match self.open_mod_overlay("settings", crate::mods::SurfacePlace::Dialog, data) {
+                Ok(_) => {
+                    self.dirty = true;
+                    return;
+                }
+                Err(error) => self.note = error,
+            }
+        }
+        self.settings = Some(SettingsOverlay {
+            section: 0,
+            selected: self.settings_selected(0),
+        });
+        self.dirty = true;
+    }
+
+    /// `--no-mods`、停用或未安装时不走模块。
+    fn settings_module_available(&self) -> bool {
+        !self.config.no_mods
+            && self.mods.is_enabled("settings")
+            && matches!(
+                crate::pkg::resolve(&self.config, "settings"),
+                Ok(Some(package)) if package.enabled && package.module.is_some()
+            )
+    }
+
+    /// 写配置并保持调用方的控制流：调用方决定内存是否跟着变。
+    fn write_setting(&self, key: &str, value: &str) -> Result<()> {
+        crate::config::write_setting(&self.config.config_path, key, value)
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
     pub fn execute_action(&mut self, name: &str, args: Value) -> Result<()> {
         anyhow::ensure!(args.is_object(), t("command arguments must be an object"));
         // 插件动作与内置动作共用分发器；内置名不可被覆盖。
@@ -791,12 +837,7 @@ impl App {
                     .clamp(self.config.sidebar_min_width, self.config.sidebar_max_width);
             }
             "app.palette" => self.open_palette(),
-            "app.settings" => {
-                self.settings = Some(SettingsOverlay {
-                    section: 0,
-                    selected: self.settings_selected(0),
-                })
-            }
+            "app.settings" => self.open_settings(),
             "app.help" => {
                 self.help = Some(HelpOverlay {
                     query: String::new(),
@@ -806,17 +847,57 @@ impl App {
             }
             "app.theme" => {
                 let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
-                self.config.theme = crate::theme::builtin(&name)
+                let theme = crate::theme::builtin(&name)
                     .ok_or_else(|| anyhow::anyhow!(t("unknown theme")))?;
-                self.notify_mods_theme();
-                self.bump_mod_revision_domains(&["theme"]);
-                crate::config::write_setting(
-                    &self.config.config_path,
-                    "theme.name",
-                    &serde_json::to_string(&name)?,
-                )
-                .map_err(anyhow::Error::msg)?;
+                let quoted = serde_json::to_string(&name)?;
+                self.write_setting("theme.name", &quoted)?;
+                self.config.theme = theme;
                 self.config.theme.name = name;
+                self.note = format!("theme.name = {quoted}");
+                self.notify_mods_theme();
+                self.bump_mod_revision_domains(&["theme", "settings"]);
+            }
+            "app.indicators" => {
+                let value = text("value").ok_or_else(|| anyhow::anyhow!(t("value required")))?;
+                let indicators = match value.as_str() {
+                    "dots" => crate::config::Indicators::Dots,
+                    "symbols" => crate::config::Indicators::Symbols,
+                    _ => anyhow::bail!(t("unknown indicators")),
+                };
+                let quoted = format!("\"{value}\"");
+                self.write_setting("ui.status_indicators", &quoted)?;
+                self.config.indicators = indicators;
+                self.note = format!("ui.status_indicators = {quoted}");
+                self.bump_mod_revision_domains(&["settings"]);
+            }
+            "app.notifications" => {
+                let value = text("value").ok_or_else(|| anyhow::anyhow!(t("value required")))?;
+                let delivery = match value.as_str() {
+                    "off" => crate::config::Delivery::Off,
+                    "toast" => crate::config::Delivery::Toast,
+                    "system" => crate::config::Delivery::System,
+                    _ => anyhow::bail!(t("unknown delivery")),
+                };
+                let quoted = format!("\"{value}\"");
+                self.write_setting("ui.toast.delivery", &quoted)?;
+                self.config.notifications = delivery;
+                self.note = format!("ui.toast.delivery = {quoted}");
+                self.bump_mod_revision_domains(&["settings"]);
+            }
+            "app.sound" => {
+                let on = match args.get("value") {
+                    Some(Value::Bool(on)) => *on,
+                    Some(Value::String(value)) => match value.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        _ => anyhow::bail!(t("unknown sound")),
+                    },
+                    _ => anyhow::bail!(t("value required")),
+                };
+                self.write_setting("ui.sound.enabled", &format!("{on}"))?;
+                self.config.sound = on;
+                self.note = format!("ui.sound.enabled = {on}");
+                self.bump_mod_revision_domains(&["settings"]);
             }
             "app.quit" => self.quit = true,
             "mods.dock" | "mods.undock" | "mods.chrome" | "mods.open" | "mods.close"

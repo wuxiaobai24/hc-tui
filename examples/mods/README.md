@@ -1,6 +1,6 @@
 # 示例模块
 
-三个随仓库维护的界面模块，用来验收宿主通道、焦点路由、覆盖层与授予：
+四个随仓库维护的界面模块，用来验收宿主通道、焦点路由、覆盖层与授予：
 
 | 模块 | 形态 | 内容 |
 |---|---|---|
@@ -15,13 +15,14 @@
 区域，模块没装、`mods.disable` 停用或渲染失败时自动回退到内置 Rust 实现，
 `--no-mods` 下三块全部由 Rust 绘制。这三个模块只负责绘制，键盘与鼠标仍由 Rust
 侧处理。
+| `settings` | dialog 覆盖层 | 段、项与按键/鼠标交互；写配置走 `app.theme` 等动作 |
 
 每个目录的 `hctui.toml` 声明挂载位置与宿主授予，`nsh.json` 的 `capabilities.host`
 声明同一份方法名；`dist/` 由构建生成，不进入版本库。
 
 ```sh
 cd examples/mods/agents && nsh build -o dist
-hc-tui mods check examples/mods/agents examples/mods/spaces examples/mods/prs
+hc-tui mods check examples/mods/agents examples/mods/spaces examples/mods/prs examples/mods/settings
 hc-tui do mods.open '{"name":"agents","place":"dialog","size":[60,16]}'
 ```
 

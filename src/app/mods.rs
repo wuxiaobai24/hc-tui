@@ -204,12 +204,20 @@ impl App {
                             .insert(tag, (request.clone(), mod_id.to_string()));
                     }
                 }
+                let value = match &result {
+                    Ok(()) => self.mod_setting_action_value(action.as_ref()),
+                    Err(_) => None,
+                };
                 if let Some(reply) = reply {
-                    reply.resolve(json!({
+                    let mut payload = json!({
                         "request": request,
                         "accepted": result.is_ok(),
                         "confirmation_pending": confirmation_pending,
-                    }));
+                    });
+                    if let Some(value) = value {
+                        payload["value"] = value;
+                    }
+                    reply.resolve(payload);
                 }
                 if let Some(error) = &error {
                     self.note = error.clone();
@@ -885,15 +893,18 @@ impl App {
             map.insert("keybindings".into(), json!(rows));
         }
         if want("settings") {
-            let mut sections = Vec::new();
-            for (index, name) in App::SETTINGS_SECTIONS.iter().enumerate() {
-                let items: Vec<Value> = (0..self.settings_len(index))
-                    .map(|item| {
-                        let (label, active) = self.mod_setting_item(index, item);
-                        json!({"value": item, "label": label, "active": active})
-                    })
-                    .collect();
-                sections.push(json!({"name": name, "items": items}));
+            let mut items = Vec::new();
+            for (section, name) in App::SETTINGS_SECTIONS.iter().enumerate() {
+                for index in 0..self.settings_len(section) {
+                    let value = self.mod_setting_value(section, index);
+                    let (label, active) = self.mod_setting_item(section, index);
+                    items.push(json!({
+                        "id": format!("{name}:{value}"),
+                        "value": value,
+                        "label": label,
+                        "active": active,
+                    }));
+                }
             }
             let delivery = match self.config.notifications {
                 crate::config::Delivery::Off => "off",
@@ -903,7 +914,12 @@ impl App {
             map.insert(
                 "settings".into(),
                 json!({
-                    "sections": sections,
+                    "section": App::SETTINGS_SECTIONS[0],
+                    "sections": App::SETTINGS_SECTIONS
+                        .iter()
+                        .map(|name| json!({"name": name, "label": t(name)}))
+                        .collect::<Vec<Value>>(),
+                    "items": items,
                     "current": {
                         "theme": self.config.theme.name,
                         "indicators": if self.config.indicators == crate::config::Indicators::Symbols { "symbols" } else { "dots" },
@@ -953,39 +969,65 @@ impl App {
         owners
     }
 
+    /// 设置类动作执行后的新值；随 `run` 应答返回，模块不必再读一次快照。
+    fn mod_setting_action_value(&self, action: &str) -> Option<Value> {
+        match action {
+            "app.theme" => Some(json!(self.config.theme.name)),
+            "app.indicators" => Some(json!(if self.config.indicators
+                == crate::config::Indicators::Symbols
+            {
+                "symbols"
+            } else {
+                "dots"
+            })),
+            "app.notifications" => Some(json!(match self.config.notifications {
+                crate::config::Delivery::Off => "off",
+                crate::config::Delivery::Toast => "toast",
+                crate::config::Delivery::System => "system",
+            })),
+            "app.sound" => Some(json!(self.config.sound)),
+            _ => None,
+        }
+    }
+
+    /// 设置项的落盘值；与内置设置面板、模块拿到的域保持同一口径。
+    fn mod_setting_value(&self, section: usize, index: usize) -> String {
+        match section {
+            0 => crate::theme::names()[index].to_string(),
+            1 => if index == 1 { "symbols" } else { "dots" }.to_string(),
+            2 => ["off", "toast", "system"][index.min(2)].to_string(),
+            _ => if index == 1 { "on" } else { "off" }.to_string(),
+        }
+    }
+
     /// 设置项文案与生效状态；与内置设置面板、模块拿到的域保持同一口径。
     fn mod_setting_item(&self, section: usize, index: usize) -> (String, bool) {
-        match section {
-            0 => {
-                let name = crate::theme::names()[index];
-                (name.to_string(), name == self.config.theme.name)
-            }
+        let value = self.mod_setting_value(section, index);
+        let active = match section {
+            0 => value == self.config.theme.name,
             1 => {
-                let symbols = index == 1;
-                (
-                    t(if symbols { "symbols" } else { "dots" }).to_string(),
-                    (self.config.indicators == crate::config::Indicators::Symbols) == symbols,
-                )
+                (self.config.indicators == crate::config::Indicators::Symbols)
+                    == (value == "symbols")
             }
-            2 => {
-                let names = ["off", "toast", "system"];
-                let value = names[index.min(2)];
-                let active = matches!(
-                    (self.config.notifications, value),
-                    (crate::config::Delivery::Off, "off")
-                        | (crate::config::Delivery::Toast, "toast")
-                        | (crate::config::Delivery::System, "system")
-                );
-                (t(value).to_string(), active)
-            }
-            _ => {
-                let on = index == 1;
-                (
-                    t(if on { "on" } else { "off" }).to_string(),
-                    self.config.sound == on,
-                )
-            }
-        }
+            2 => matches!(
+                (self.config.notifications, value.as_str()),
+                (crate::config::Delivery::Off, "off")
+                    | (crate::config::Delivery::Toast, "toast")
+                    | (crate::config::Delivery::System, "system")
+            ),
+            _ => self.config.sound == (value == "on"),
+        };
+        let label = if section == 0 {
+            value.clone()
+        } else {
+            let name = match section {
+                1 => ["dots", "symbols"][index.min(1)],
+                2 => ["off", "toast", "system"][index.min(2)],
+                _ => ["off", "on"][index.min(1)],
+            };
+            t(name).to_string()
+        };
+        (label, active)
     }
 
     /// `state` 调用的领域过滤。

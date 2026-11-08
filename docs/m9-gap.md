@@ -220,6 +220,14 @@
 
 四处固定段与少量项目，渲染和交互都简单（`src/ui/mod.rs:1840-1967`）。缺口集中在三个设置动作与写配置动作，属补动作即可。排第二，见 §7。
 
+已由 m9c 票解决：`settings` 域是 `{section, sections:[{name,label}], items:[{id,value,label,active}], current}`，
+`items` 覆盖四段全部项目、`id` 为 `<段>:<value>`、`label` 按 `locale` 由宿主生成；
+补 `app.indicators` / `app.notifications` / `app.sound` 三个动作（写配置并在 `run` 应答里带回新值）；
+`apply_setting` 与模块统一走 `app.*` 动作，`theme.changed` 只经 `app.theme` 一条发送路径，
+主题变化同时 bump `theme` 与 `settings`；`app.settings` 与 `keys.settings` 在装了
+`settings` 模块时开模块浮层，`--no-mods` 或未安装时回落内置浮层。
+`examples/mods/settings` 与内置实现逐格一致，`tests/m9c_settings_parity.rs` 覆盖两套值 × 四段 × 两个尺寸。
+
 ## 4 help
 
 ### 4.1 它现在渲染什么
