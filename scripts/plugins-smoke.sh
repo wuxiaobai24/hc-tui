@@ -17,6 +17,8 @@ cleanup() {
   tmux -L "$SOCK" send-keys -t tui C-b q 2>/dev/null || true
   sleep 0.3; tmux -L "$SOCK" kill-server 2>/dev/null || true
   hc server stop >/dev/null 2>&1 || true
+  # 全部通过才清理现场；失败时保留 $ROOT 里的日志与状态。
+  if [ "$FAILED" -eq 0 ]; then rm -rf "$ROOT"; fi
 }
 trap cleanup EXIT
 step() { echo "== $*"; }

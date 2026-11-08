@@ -821,11 +821,9 @@ impl App {
                 let enable = name == "mods.enable";
                 let mod_id = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
                 self.mods.enabled.insert(mod_id.clone(), enable);
-                crate::mods::store::set_enabled(&self.config, &mod_id, enable)
+                crate::pkg::set_enabled(&self.config, &mod_id, enable)
                     .map_err(anyhow::Error::msg)?;
-                if !enable {
-                    self.mods_close(&mod_id);
-                }
+                self.refresh_plugins_if_changed();
                 self.bump_mod_revision();
             }
             "overlay.close" => {

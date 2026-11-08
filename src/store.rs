@@ -72,6 +72,21 @@ pub struct Record {
     /// 签名包要求的最低 nsh 运行时。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_runtime: Option<String>,
+    /// 这个包提供的能力；由清单推导后缓存。
+    ///
+    /// 旧记录没有这个字段：读出后按清单回填（见
+    /// [`crate::plugin::registry::PackageRegistry::entries`]），不报问题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::pkg::Capabilities>,
+    /// 声明了 `[module]` 时的模块摘要。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<crate::pkg::ModuleInfo>,
+    /// 清单一 `[grants]` 的宿主方法与事件；运行期只读这一份。
+    ///
+    /// 旧记录没有这个字段：读出后按本代际目录里的清单回填（见
+    /// [`crate::pkg::resolve`]），不报问题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<Vec<String>>,
 }
 
 /// 一次恢复中发现的不一致；调用方把它报给用户，不静默修正数据。
@@ -671,6 +686,9 @@ mod tests {
             key_id: None,
             app: None,
             min_runtime: None,
+            capabilities: None,
+            module: None,
+            grants: None,
         };
         let (generation, dir) = store.prepare_generation("probe").unwrap();
         assert_eq!(generation, 1);
@@ -709,6 +727,9 @@ mod tests {
             key_id: None,
             app: None,
             min_runtime: None,
+            capabilities: None,
+            module: None,
+            grants: None,
         }
     }
 

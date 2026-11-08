@@ -1,0 +1,38 @@
+manifest_version = 2
+id = "dev.hctui.pkg.git-board"
+name = "Git board"
+version = "0.1.0"
+host_api = 1
+platforms = ["linux", "macos"]
+description = "动作、终端入口与右侧模块，一次安装三样都有"
+
+[[actions]]
+id = "summary"
+title = "Git 摘要"
+description = "读取当前 Space 的 Git 分支与改动"
+contexts = ["global", "space", "pane"]
+argv = ["sh", "./bin/summary.sh"]
+timeout_ms = 15000
+
+[actions.args]
+type = "object"
+properties = { short = { type = "boolean", default = true } }
+additionalProperties = false
+
+[[terminals]]
+id = "git-ui"
+title = "Git UI"
+argv = ["lazygit"]
+placement = "right"
+requires_programs = ["lazygit"]
+
+[module]
+title = "Git board"
+bundle = "dist/bundle.js"
+place = "right"
+size = 32
+focusable = true
+
+[grants]
+host = ["state", "exec", "notify"]
+events = ["state.changed", "grant.changed", "terminal.status"]

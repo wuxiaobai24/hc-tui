@@ -36,45 +36,19 @@ pub struct Preview {
     pub sha256: Option<String>,
     /// 最低运行时（签名包）。
     pub min_runtime: Option<String>,
+    /// 由清单推导的能力。
+    pub capabilities: crate::pkg::Capabilities,
+    /// 声明了模块时的模块摘要。
+    pub module: Option<crate::pkg::ModuleInfo>,
     /// 不阻断安装的提示。
     pub warnings: Vec<String>,
 }
 
-/// 读 `hctui.toml` 里的 `[mod] id`。
+/// 读包根目录清单里的包 ID：v2、v1 与旧 `[mod]` 共用同一个解析器。
 pub fn manifest_id(dir: &Path) -> Result<String, String> {
-    let path = dir.join("hctui.toml");
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut in_mod = false;
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') {
-            in_mod = line
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-                .trim()
-                == "mod";
-            continue;
-        }
-        if !in_mod {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() == "id" {
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                return Ok(value.to_string());
-            }
-        }
-    }
-    Err(format!("{}: [mod] id is required", path.display()))
+    crate::pkg::load_dir(dir)
+        .map(|loaded| loaded.manifest.id().to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// 读 `nsh.json` 里的显示名与版本；缺失时给默认值。
@@ -121,18 +95,17 @@ fn count_files(dir: &Path) -> usize {
 
 /// 本地目录的安装预览。
 pub fn preview_local(dir: &Path) -> Result<Preview, String> {
-    let id = manifest_id(dir)?;
+    let loaded = crate::pkg::install_ready(dir)?;
+    let id = loaded.manifest.id().to_string();
     let (name, version, build) = app_metadata(dir);
-    let grants = crate::mods::ModRuntime::manifest_grants(&dir.join("hctui.toml"));
-    if !dir.join("dist").join("bundle.js").exists() {
-        return Err(format!(
-            "{}: no dist/bundle.js; run `nsh build -o dist` first",
-            dir.display()
-        ));
-    }
+    let grants = loaded.manifest.grants();
     Ok(Preview {
         id,
-        name,
+        name: if name.is_empty() {
+            loaded.manifest.name().to_string()
+        } else {
+            name
+        },
         version,
         build,
         source: Source::Local,
@@ -141,6 +114,8 @@ pub fn preview_local(dir: &Path) -> Result<Preview, String> {
         origin: dir.to_path_buf(),
         sha256: None,
         min_runtime: None,
+        capabilities: loaded.manifest.capabilities(),
+        module: loaded.manifest.module_info(),
         warnings: Vec::new(),
     })
 }
@@ -196,7 +171,7 @@ pub fn verify_package(
         .verify(&bytes, nsh_package::RUNTIME_VERSION)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let id = package.app.id.clone();
-    let grants = package_host_grants(&package);
+    let grants = package_grants(&package);
     let files = 1 + usize::from(package.source_map.is_some()) + package.assets.len();
     let preview = Preview {
         id,
@@ -209,9 +184,30 @@ pub fn verify_package(
         origin: path.to_path_buf(),
         sha256: Some(package.sha256.clone()),
         min_runtime: None,
+        capabilities: packaged_capabilities(),
+        module: Some(packaged_module(&package.app.name)),
         warnings: package.ignored.clone(),
     };
     Ok((preview, package, trust))
+}
+
+/// 签名包的清单由 [`package_manifest`] 生成：只有模块，没有动作与终端入口。
+fn packaged_capabilities() -> crate::pkg::Capabilities {
+    crate::pkg::Capabilities {
+        actions: false,
+        terminals: false,
+        module: true,
+    }
+}
+
+fn packaged_module(name: &str) -> crate::pkg::ModuleInfo {
+    crate::pkg::ModuleInfo {
+        title: name.to_string(),
+        bundle: crate::pkg::DEFAULT_BUNDLE.to_string(),
+        place: "none".to_string(),
+        size: None,
+        focusable: true,
+    }
 }
 
 fn package_host_grants(package: &VerifiedPackage) -> Vec<String> {
@@ -229,8 +225,15 @@ fn package_host_grants(package: &VerifiedPackage) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 签名包生成的清单授予：声明的宿主方法加上全部已知事件。
+fn package_grants(package: &VerifiedPackage) -> Vec<String> {
+    let mut grants = package_host_grants(package);
+    grants.extend(EVENTS.iter().map(|name| (*name).to_string()));
+    grants
+}
+
 fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
-    let grants = package_host_grants(package);
+    let grants = package_grants(package);
     let preview = Preview {
         id: package.app.id.clone(),
         name: package.app.name.clone(),
@@ -242,6 +245,8 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
         origin: PathBuf::new(),
         sha256: Some(package.sha256.clone()),
         min_runtime: None,
+        capabilities: packaged_capabilities(),
+        module: Some(packaged_module(&package.app.name)),
         warnings: package.ignored.clone(),
     };
     let record = Record {
@@ -261,6 +266,9 @@ fn package_record(package: &VerifiedPackage) -> (Record, Preview) {
             "build": package.app.build,
         })),
         min_runtime: None,
+        capabilities: Some(preview.capabilities),
+        module: preview.module.clone(),
+        grants: Some(preview.grants.clone()),
     };
     (record, preview)
 }
@@ -289,6 +297,9 @@ pub fn install_local(config: &Config, dir: &Path) -> Result<Record, String> {
             "build": preview.build,
         })),
         min_runtime: None,
+        capabilities: Some(preview.capabilities),
+        module: preview.module.clone(),
+        grants: Some(preview.grants.clone()),
     };
     store
         .save_record(&record)
@@ -425,13 +436,11 @@ pub fn update(config: &Config, id: Option<&str>, target: &Path) -> Result<Record
 
 /// 链接本地目录：不拷贝，`current` 直接指向源目录，改动后重载生效。
 pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
-    let id = manifest_id(dir)?;
-    if !dir.join("dist").join("bundle.js").exists() {
-        return Err(format!(
-            "{}: no dist/bundle.js; run `nsh build -o dist` first",
-            dir.display()
-        ));
-    }
+    let loaded = crate::pkg::install_ready(dir)?;
+    let id = loaded.manifest.id().to_string();
+    let capabilities = loaded.manifest.capabilities();
+    let module = loaded.manifest.module_info();
+    let grants = loaded.manifest.grants();
     let store = Store::open(config.mods_state_dir());
     let target = std::path::absolute(dir).map_err(|error| error.to_string())?;
     let record = Record {
@@ -446,6 +455,9 @@ pub fn link(config: &Config, dir: &Path) -> Result<Record, String> {
         key_id: None,
         app: None,
         min_runtime: None,
+        capabilities: Some(capabilities),
+        module,
+        grants: Some(grants),
     };
     store
         .save_record(&record)
@@ -475,14 +487,9 @@ pub fn uninstall(config: &Config, id: &str) -> Result<(), String> {
     store.remove(id).map_err(|error| error.to_string())
 }
 
-/// 已安装模块的根目录：优先 store 当前代际，其次配置目录。
+/// 模块的根目录：按包记录解析（两个 store 与两个开发目录由 [`crate::pkg::resolve`] 统一判断）。
 pub fn module_root(config: &Config, id: &str) -> Option<PathBuf> {
-    let store = Store::open(config.mods_state_dir());
-    if let Some(dir) = store.current_dir(id) {
-        return Some(dir);
-    }
-    let path = config.mods_dir().join(id);
-    path.is_dir().then_some(path)
+    crate::pkg::module_root(config, id)
 }
 
 /// 记录里的启用状态；损坏记录按启用处理。
@@ -507,9 +514,11 @@ pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), Strin
 
 /// 启动时把记录里的启用状态载入运行时。
 pub fn apply_enabled(config: &Config, runtime: &mut crate::mods::ModRuntime) {
-    for record in Store::open(config.mods_state_dir()).list() {
-        if !record.enabled {
-            runtime.enabled.insert(record.id, false);
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        for record in Store::open(state).list() {
+            if !record.enabled {
+                runtime.enabled.insert(record.id, false);
+            }
         }
     }
 }

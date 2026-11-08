@@ -27,6 +27,7 @@ fn main() -> Result<()> {
         }
         Some("update") => hc_tui::update::run(&args[1..]),
         Some("mods") => mods_command(&args[1..]),
+        Some("packages") => packages_command(&args[1..]),
         Some("plugins") => plugins_command(&args[1..]),
         Some("events") => events_command(&args[1..]),
         Some("probe") => probe(&args[1..]),
@@ -108,7 +109,7 @@ fn usage() {
     );
     println!(
         "{}",
-        t("       hc-tui plugins list|install|link|uninstall|enable|disable|gc ...")
+        t("       hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log ...")
     );
     println!(
         "{}",
@@ -261,7 +262,7 @@ fn plugins_command(args: &[String]) -> Result<()> {
         return plugins_pane(&args[1..]);
     }
     if group != "action" {
-        return plugins_manage(group, &args[1..]);
+        return packages_manage(group, &args[1..], Some("plugins"));
     }
     let Some(sub) = args.get(1).map(String::as_str) else {
         anyhow::bail!(t(
@@ -559,12 +560,24 @@ fn wait_for_pane(config: &hc_tui::config::Config, request: &str) -> Result<serde
     }
 }
 
-/// `hc-tui plugins list|install|update|link|uninstall|enable|disable`：
-/// 插件注册与代际管理，复用 M5 的通用存储。
-fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
+/// `hc-tui packages`：包注册与代际管理的唯一入口。
+fn packages_command(args: &[String]) -> Result<()> {
+    let Some(group) = args.first().map(String::as_str) else {
+        anyhow::bail!(t(
+            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log"
+        ))
+    };
+    packages_manage(group, &args[1..], None)
+}
+
+/// `hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log`：
+/// 包注册与代际管理的唯一入口；`plugins` 与 `mods` 的同名子命令是别名，
+/// 行为一致，只在 stderr 多打一行弃用提示。
+fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<()> {
     let mut config_path = None;
     let mut json = false;
     let mut yes = false;
+    let mut lines = 100usize;
     let mut policy = hc_tui::plugin::registry::EnablePolicy::Keep;
     let mut targets: Vec<String> = Vec::new();
     let mut index = 0;
@@ -580,6 +593,14 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
             }
             "--json" => json = true,
             "--yes" | "-y" => yes = true,
+            "-n" => {
+                index += 1;
+                lines = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!(t("-n needs a value")))?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!(t("-n needs a number")))?;
+            }
             "--enable" => policy = hc_tui::plugin::registry::EnablePolicy::Enable,
             "--disable" => policy = hc_tui::plugin::registry::EnablePolicy::Disable,
             other if other.starts_with('-') => anyhow::bail!(t1("unknown option: {}", other)),
@@ -587,161 +608,52 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
         }
         index += 1;
     }
+    if let Some(alias) = alias {
+        eprintln!("note: `{alias} {group}` is deprecated, use `packages {group}`");
+    }
     let config = hc_tui::config::Config::load(config_path);
     match group {
-        "list" => {
-            let records = hc_tui::store::Store::open(config.plugins_state_dir()).list();
-            let registry = hc_tui::plugin::registry::Registry::load(&config);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&records)?);
-                return Ok(());
-            }
-            if records.is_empty() {
-                println!("{}", t("no plugins installed"));
-            }
-            for record in records {
-                println!(
-                    "{:<32} {:<9} gen {:<3} {}",
-                    record.id,
-                    record.source.as_str(),
-                    record.generation,
-                    if record.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                );
-                if let Some(plugin) = registry
-                    .plugins
-                    .iter()
-                    .find(|plugin| plugin.id == record.id)
-                {
-                    for terminal in &plugin.manifest.terminals {
-                        println!(
-                            "    {:<40} {} · {}",
-                            format!("{}.{}", plugin.id, terminal.id()),
-                            terminal.placement(),
-                            terminal.title()
-                        );
-                    }
-                }
-            }
-            Ok(())
-        }
+        "list" => packages_list(&config, json),
         "install" | "update" => {
-            let dir = targets.first().ok_or_else(|| {
-                anyhow::anyhow!(t(
-                    "usage: hc-tui plugins install <dir> [--enable|--disable]"
-                ))
-            })?;
-            let manifest =
-                hc_tui::plugin::manifest::load(&std::path::Path::new(dir).join("plugin.toml"))
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            println!(
-                "{}",
-                t3(
-                    "plugin {} ({} {})",
-                    manifest.id(),
-                    manifest.name(),
-                    manifest.version()
-                )
-            );
-            println!(
-                "{}",
-                t1(
-                    "  actions {}",
-                    manifest
-                        .actions
-                        .iter()
-                        .map(|action| manifest.action_name(action))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            );
-            println!("{}", t1("  platforms {}", manifest.platforms().join(", ")));
-            for terminal in &manifest.terminals {
-                println!(
-                    "{}",
-                    t2(
-                        "  terminal {} ({})",
-                        format!("{}.{}", manifest.id(), terminal.id()),
-                        terminal.placement()
-                    )
-                );
-                if !terminal.requires_programs().is_empty() {
-                    println!(
-                        "{}",
-                        t1("    requires {}", terminal.requires_programs().join(", "))
-                    );
-                }
-            }
-            if !yes {
-                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                    print!("{} [y/N] ", t("install?"));
-                    use std::io::Write as _;
-                    std::io::stdout().flush()?;
-                    let mut answer = String::new();
-                    std::io::stdin().read_line(&mut answer)?;
-                    if !matches!(answer.trim(), "y" | "Y" | "yes") {
-                        anyhow::bail!(t("cancelled"));
-                    }
-                } else {
-                    anyhow::bail!(t("pass --yes to install without a terminal"));
-                }
-            }
-            let record =
-                hc_tui::plugin::registry::install(&config, std::path::Path::new(dir), policy)
-                    .map_err(anyhow::Error::msg)?;
-            println!(
-                "{}",
-                t3(
-                    "installed {} generation {} ({})",
-                    record.id,
-                    record.generation,
-                    if record.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                )
-            );
-            Ok(())
-        }
-        "link" => {
-            let dir = targets.first().ok_or_else(|| {
-                anyhow::anyhow!(t("usage: hc-tui plugins link <dir> [--enable|--disable]"))
-            })?;
-            let record = hc_tui::plugin::registry::link(&config, std::path::Path::new(dir), policy)
-                .map_err(anyhow::Error::msg)?;
-            println!(
-                "{}",
-                t2(
-                    "linked {} ({})",
-                    record.id,
-                    if record.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                )
-            );
-            Ok(())
+            let (id, target) = match targets.as_slice() {
+                [id, target] => (Some(id.clone()), target.clone()),
+                [target] => (None, target.clone()),
+                _ => anyhow::bail!(t1("usage: hc-tui packages {} <dir|.nshpkg>", group)),
+            };
+            packages_install(&config, id.as_deref(), &target, policy, yes)
         }
         "uninstall" => {
-            let id = targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui plugins uninstall <id>")))?;
-            hc_tui::plugin::registry::uninstall(&config, id).map_err(anyhow::Error::msg)?;
+            let id = package_target(&targets, "uninstall")?;
+            if plugin_record(&config, id).is_some() {
+                hc_tui::plugin::registry::uninstall(&config, id).map_err(anyhow::Error::msg)?;
+            } else {
+                hc_tui::mods::store::uninstall(&config, id).map_err(anyhow::Error::msg)?;
+            }
             println!("{}", t1("uninstalled {}", id));
             Ok(())
         }
+        "link" => {
+            let dir = package_target(&targets, "link")?;
+            packages_link(&config, dir, policy)
+        }
+        "unlink" => {
+            let id = package_target(&targets, "unlink")?;
+            let store = hc_tui::store::Store::open(config.mods_state_dir());
+            match store.record(id) {
+                Some(record) if record.source == hc_tui::store::Source::Linked => {
+                    hc_tui::mods::store::unlink(&config, id).map_err(anyhow::Error::msg)?;
+                }
+                Some(_) => anyhow::bail!(t1("{} is not linked", id)),
+                None => hc_tui::plugin::registry::uninstall(&config, id)
+                    .map_err(anyhow::Error::msg)?,
+            }
+            println!("{}", t1("unlinked {}", id));
+            Ok(())
+        }
         "enable" | "disable" => {
-            let id = targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui plugins enable|disable <id>")))?;
+            let id = package_target(&targets, group)?;
             let enabled = group == "enable";
-            hc_tui::plugin::registry::set_enabled(&config, id, enabled)
-                .map_err(anyhow::Error::msg)?;
+            hc_tui::pkg::set_enabled(&config, id, enabled).map_err(anyhow::Error::msg)?;
             println!(
                 "{}",
                 t2("{} {}", if enabled { "enabled" } else { "disabled" }, id)
@@ -774,11 +686,225 @@ fn plugins_manage(group: &str, args: &[String]) -> Result<()> {
             }
             Ok(())
         }
+        "log" => {
+            let id = package_target(&targets, "log")?;
+            let store = if plugin_record(&config, id).is_some() {
+                hc_tui::store::Store::open(config.plugins_state_dir())
+            } else {
+                hc_tui::store::Store::open(config.mods_state_dir())
+            };
+            match store.log_tail(id, lines) {
+                Ok(text) => println!("{text}"),
+                Err(error) => println!("{}", t2("no log for {}: {}", id, error)),
+            }
+            Ok(())
+        }
         other => anyhow::bail!(t1(
-            "usage: hc-tui plugins list|install|link|uninstall|enable|disable|gc (unknown: {})",
+            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log (unknown: {})",
             other
         )),
     }
+}
+
+fn package_target<'a>(targets: &'a [String], command: &str) -> Result<&'a str> {
+    targets
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!(t1("usage: hc-tui packages {} <id>", command)))
+}
+
+fn plugin_record(config: &hc_tui::config::Config, id: &str) -> Option<hc_tui::store::Record> {
+    hc_tui::store::Store::open(config.plugins_state_dir()).record(id)
+}
+
+/// `packages list`：安装记录一行一个包，前缀徽章标出能力（A/T/M）。
+fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
+    let registry = hc_tui::plugin::registry::Registry::load(config);
+    let entries = registry.entries(config);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+    if entries.is_empty() {
+        println!("{}", t("no plugins installed"));
+    }
+    for entry in &entries {
+        println!(
+            "{:<32} {:<9} gen {:<3} {:<8} {}",
+            entry.id,
+            entry.source,
+            entry.generation,
+            if entry.enabled { "enabled" } else { "disabled" },
+            entry.capabilities.badges()
+        );
+        if let Some(plugin) = registry.get(&entry.id) {
+            for terminal in &plugin.manifest.terminals {
+                println!(
+                    "    {:<40} {} · {}",
+                    format!("{}.{}", plugin.id, terminal.id()),
+                    terminal.placement(),
+                    terminal.title()
+                );
+            }
+        }
+        if let Some(module) = &entry.module {
+            println!("    {:<40} module · {}", module.bundle, module.title);
+        }
+        for issue in &entry.issues {
+            println!("    {:<40} issue · {}", "", issue);
+        }
+    }
+    Ok(())
+}
+
+/// 安装或更新一个包：v2 / v1 清单走包注册表，旧模块目录与签名包走模块存储。
+fn packages_install(
+    config: &hc_tui::config::Config,
+    id: Option<&str>,
+    target: &str,
+    policy: hc_tui::plugin::registry::EnablePolicy,
+    yes: bool,
+) -> Result<()> {
+    let path = std::path::Path::new(target);
+    let loaded = if path.is_dir() {
+        Some(hc_tui::pkg::install_ready(path).map_err(anyhow::Error::msg)?)
+    } else {
+        None
+    };
+    match loaded {
+        Some(loaded) if loaded.origin != hc_tui::pkg::Origin::LegacyMod => {
+            let manifest = loaded.manifest;
+            if let Some(id) = id {
+                if manifest.id() != id {
+                    anyhow::bail!(t3(
+                        "{} declares package id {}, not {}",
+                        target,
+                        manifest.id(),
+                        id
+                    ));
+                }
+            }
+            print_package_preview(&manifest);
+            confirm_install(yes)?;
+            let record = hc_tui::plugin::registry::install(config, path, policy)
+                .map_err(anyhow::Error::msg)?;
+            println!(
+                "{}",
+                t3(
+                    "installed {} generation {} ({})",
+                    record.id,
+                    record.generation,
+                    if record.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
+            );
+            Ok(())
+        }
+        _ => install_or_update(config, yes, target, id),
+    }
+}
+
+fn print_package_preview(manifest: &hc_tui::plugin::manifest::Manifest) {
+    println!(
+        "{}",
+        t3(
+            "package {} ({} {})",
+            manifest.id(),
+            manifest.name(),
+            manifest.version()
+        )
+    );
+    println!("{}", t1("  provides {}", manifest.capabilities().badges()));
+    if !manifest.actions.is_empty() {
+        println!(
+            "{}",
+            t1(
+                "  actions {}",
+                manifest
+                    .actions
+                    .iter()
+                    .map(|action| manifest.action_name(action))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        );
+    }
+    for terminal in &manifest.terminals {
+        println!(
+            "{}",
+            t2(
+                "  terminal {} ({})",
+                format!("{}.{}", manifest.id(), terminal.id()),
+                terminal.placement()
+            )
+        );
+        if !terminal.requires_programs().is_empty() {
+            println!(
+                "{}",
+                t1("    requires {}", terminal.requires_programs().join(", "))
+            );
+        }
+    }
+    if let Some(module) = manifest.module_info() {
+        println!("{}", t2("  module {} ({})", module.bundle, module.place));
+    }
+    let platforms = manifest.platforms().join(", ");
+    if !platforms.is_empty() {
+        println!("{}", t1("  platforms {}", platforms));
+    }
+    let grants = manifest.grants();
+    if !grants.is_empty() {
+        println!("{}", t1("  grants {}", grants.join(", ")));
+    }
+}
+
+fn confirm_install(yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        print!("{} [y/N] ", t("install?"));
+        use std::io::Write as _;
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if matches!(answer.trim(), "y" | "Y" | "yes") {
+            return Ok(());
+        }
+        anyhow::bail!(t("cancelled"));
+    }
+    anyhow::bail!(t("pass --yes to install without a terminal"))
+}
+
+/// 链接一个包：旧模块目录走模块存储，v2 / v1 清单走包注册表。
+fn packages_link(
+    config: &hc_tui::config::Config,
+    target: &str,
+    policy: hc_tui::plugin::registry::EnablePolicy,
+) -> Result<()> {
+    let path = std::path::Path::new(target);
+    let loaded = hc_tui::pkg::install_ready(path).map_err(anyhow::Error::msg)?;
+    let record = if loaded.origin == hc_tui::pkg::Origin::LegacyMod {
+        hc_tui::mods::store::link(config, path).map_err(anyhow::Error::msg)?
+    } else {
+        hc_tui::plugin::registry::link(config, path, policy).map_err(anyhow::Error::msg)?
+    };
+    println!(
+        "{}",
+        t2(
+            "linked {} ({})",
+            record.id,
+            if record.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        )
+    );
+    Ok(())
 }
 
 /// `hc-tui mods` 子命令：安装分发与只读检查，不依赖运行中的窗口；
@@ -884,6 +1010,13 @@ fn mods_command(args: &[String]) -> Result<()> {
             "usage: hc-tui mods list|check|test|build|install|update|uninstall|link|unlink|log|open|close|reload|grant|enable|disable"
         ))
     };
+    // 安装类子命令统一走 `packages`；`mods` 只保留一行弃用提示。
+    if matches!(
+        sub,
+        "install" | "update" | "uninstall" | "link" | "unlink" | "enable" | "disable"
+    ) {
+        return packages_manage(sub, &args[1..], Some("mods"));
+    }
     let parsed = parse_mods_args(&args[1..])?;
     let config = mods_config(&parsed);
     match sub {
@@ -956,50 +1089,6 @@ fn mods_command(args: &[String]) -> Result<()> {
             if !status.success() {
                 anyhow::bail!(t1("nsh {} failed", sub));
             }
-            Ok(())
-        }
-        "install" => {
-            let target = parsed
-                .targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods install <dir|.nshpkg>")))?
-                .clone();
-            install_or_update(&config, &parsed, &target, None)
-        }
-        "update" => {
-            let (id, target) = match parsed.targets.as_slice() {
-                [id, target] => (Some(id.clone()), target.clone()),
-                [target] => (None, target.clone()),
-                _ => anyhow::bail!(t("usage: hc-tui mods update <id> <dir|.nshpkg>")),
-            };
-            install_or_update(&config, &parsed, &target, id.as_deref())
-        }
-        "uninstall" => {
-            let id = parsed
-                .targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods uninstall <id>")))?;
-            hc_tui::mods::store::uninstall(&config, id).map_err(anyhow::Error::msg)?;
-            println!("{}", t1("uninstalled {}", id));
-            Ok(())
-        }
-        "link" => {
-            let dir = parsed
-                .targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods link <dir>")))?;
-            let record = hc_tui::mods::store::link(&config, std::path::Path::new(dir))
-                .map_err(anyhow::Error::msg)?;
-            println!("{}", t2("linked {} at {}", record.id, dir));
-            Ok(())
-        }
-        "unlink" => {
-            let id = parsed
-                .targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods unlink <id>")))?;
-            hc_tui::mods::store::unlink(&config, id).map_err(anyhow::Error::msg)?;
-            println!("{}", t1("unlinked {}", id));
             Ok(())
         }
         "log" => {
@@ -1075,30 +1164,13 @@ fn mods_command(args: &[String]) -> Result<()> {
             println!("{}", t2("grants for {}: {}", id, grants.join(", ")));
             Ok(())
         }
-        "enable" | "disable" => {
-            let id = parsed
-                .targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!(t("usage: hc-tui mods enable|disable <id>")))?;
-            let enable = sub == "enable";
-            let args = serde_json::json!({"name": id});
-            if mods_do(&config, &format!("mods.{sub}"), args).is_ok() {
-                return Ok(());
-            }
-            hc_tui::mods::store::set_enabled(&config, id, enable).map_err(anyhow::Error::msg)?;
-            println!(
-                "{}",
-                t1("{} {id}", if enable { "enabled" } else { "disabled" })
-            );
-            Ok(())
-        }
         other => anyhow::bail!(t1("unknown mods command: {}", other)),
     }
 }
 
 fn install_or_update(
     config: &hc_tui::config::Config,
-    parsed: &ModsArgs,
+    yes: bool,
     target: &str,
     id: Option<&str>,
 ) -> Result<()> {
@@ -1122,7 +1194,7 @@ fn install_or_update(
     for warning in &preview.warnings {
         println!("{}", t1("  warning: {}", warning));
     }
-    if !parsed.yes {
+    if !yes {
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             print!("{} [y/N] ", t("install?"));
             use std::io::Write as _;

@@ -46,27 +46,31 @@ pub fn resolve_dir(config: &Config, target: &str) -> Result<PathBuf, String> {
 /// 校验并试渲染一个模块。
 pub fn check(config: &Config, target: &str) -> Result<Report, String> {
     let path = resolve_dir(config, target)?;
-    let manifest = std::fs::read_to_string(path.join("hctui.toml"))
-        .map_err(|error| format!("{}: {error}", path.join("hctui.toml").display()))?;
-    let id = manifest_value(&manifest, "id")
-        .ok_or_else(|| "hctui.toml: [mod] id is required".to_string())?;
-    let host_api = manifest_value(&manifest, "host_api").unwrap_or_else(|| "1".to_string());
-    if host_api != "1" {
+    let loaded = crate::pkg::load_dir(&path).map_err(|error| error.to_string())?;
+    let manifest = &loaded.manifest;
+    let id = manifest.id().to_string();
+    if *manifest.host_api.get_ref() != crate::plugin::manifest::HOST_API {
         return Err(format!(
-            "hctui.toml: host_api {host_api} is not supported (host api 1)"
+            "hctui.toml: host_api {} is not supported (host api {})",
+            manifest.host_api.get_ref(),
+            crate::plugin::manifest::HOST_API
         ));
     }
     let mut warnings = Vec::new();
-    if let Some(minimum) = manifest_value(&manifest, "min_hc_tui_version") {
+    if let Some(minimum) = manifest
+        .module
+        .as_ref()
+        .and_then(crate::pkg::Module::min_hc_tui_version)
+    {
         let current = env!("CARGO_PKG_VERSION");
-        if compare_versions(&minimum, current).is_gt() {
+        if compare_versions(minimum, current).is_gt() {
             return Err(format!(
                 "hctui.toml: needs hc-tui {minimum} or newer (running {current})"
             ));
         }
     }
-    let grants = ModRuntime::manifest_grants(&path.join("hctui.toml"));
-    let bundle_path = path.join("dist").join("bundle.js");
+    let grants = manifest.grants();
+    let bundle_path = path.join(manifest.bundle().unwrap_or("dist/bundle.js"));
     if !bundle_path.exists() {
         return Err(format!(
             "{}: no dist/bundle.js; run `nsh build -o dist` in {}",
@@ -138,42 +142,22 @@ fn run_nsh_check(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 读取 `[mod]` 段里的标量值。
+/// 旧 `[mod]` 段里一个标量的文本形态；旧用例用它固定字段归属。
+#[cfg(test)]
 fn manifest_value(text: &str, key: &str) -> Option<String> {
-    let mut in_mod = false;
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') {
-            in_mod = line
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-                .trim()
-                == "mod";
-            continue;
-        }
-        if !in_mod {
-            continue;
-        }
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        if name.trim() != key {
-            continue;
-        }
-        return Some(
-            value
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string(),
-        );
+    let loaded = crate::pkg::parse_file(Path::new("hctui.toml"), text).ok()?;
+    let manifest = &loaded.manifest;
+    match key {
+        "id" => Some(manifest.id().to_string()),
+        "name" => Some(manifest.name().to_string()),
+        "host_api" => Some(manifest.host_api.get_ref().to_string()),
+        "min_hc_tui_version" => manifest
+            .module
+            .as_ref()
+            .and_then(crate::pkg::Module::min_hc_tui_version)
+            .map(str::to_string),
+        _ => None,
     }
-    None
 }
 
 /// `a` 与 `b` 的版本比较；非数字段按字典序。

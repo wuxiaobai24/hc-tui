@@ -17,6 +17,7 @@ pub mod i18n;
 pub mod layout;
 pub mod model;
 pub mod mods;
+pub mod pkg;
 pub mod plugin;
 pub mod term;
 pub mod theme;

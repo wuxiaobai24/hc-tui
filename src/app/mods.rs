@@ -737,22 +737,18 @@ impl App {
         if self.config.no_mods {
             return Err(t("mods are disabled (--no-mods)").to_string());
         }
-        if !self.mods.is_enabled(mod_id) {
+        let package = self.mod_package(mod_id)?;
+        if !package.enabled || !self.mods.is_enabled(mod_id) {
             return Err(t1("mod {} is disabled", mod_id));
         }
-        // 首次加载：按 `hctui.toml` 的声明批准本地可信模块的授予；已批准的
+        // 首次加载：按包记录的 `[grants]` 批准本地可信模块的授予；已批准的
         // 记录以 state.json 为准，模块不能自己扩大范围。
-        if !self.mods.grants.contains_key(mod_id) {
-            let declared = crate::mods::store::module_root(&self.config, mod_id)
-                .map(|root| ModRuntime::manifest_grants(&root.join("hctui.toml")))
-                .unwrap_or_default();
-            if !declared.is_empty() {
-                self.mods.approve_grants(mod_id, &declared);
-                self.seen_dirty = true;
-                self.persist_mod_grants(mod_id);
-            }
+        if !self.mods.grants.contains_key(mod_id) && !package.grants.is_empty() {
+            self.mods.approve_grants(mod_id, &package.grants);
+            self.seen_dirty = true;
+            self.persist_mod_grants(mod_id);
         }
-        let bundle = self.load_mod_bundle(mod_id)?;
+        let bundle = Self::read_bundle(&package)?;
         let id = self.mods.next_surface_id();
         let generation = *self.mods.generations.get(mod_id).unwrap_or(&0) + 1;
         let host = ModHost::new(&id, mod_id);
@@ -861,12 +857,21 @@ impl App {
 
     /// 当前安装代际；未安装的模块返回 `None`。
     fn mod_store_generation(&self, mod_id: &str) -> Option<u64> {
-        crate::store::Store::open(self.config.mods_state_dir())
-            .record(mod_id)
-            .map(|record| record.generation)
+        for state in [
+            self.config.plugins_state_dir(),
+            self.config.mods_state_dir(),
+        ] {
+            if let Some(record) = crate::store::Store::open(state).record(mod_id) {
+                return Some(record.generation);
+            }
+        }
+        None
     }
 
     /// 回收没有表面引用的旧代际；当前代际总保留。
+    ///
+    /// 插件商店的代际由 [`crate::plugin::lease`] 按 pin 回收：正在运行的终端与
+    /// 已排队的动作都持有 pin，这里若一并 prune 会删掉它们仍在读的代码。
     fn prune_mod_generations(&self, mod_id: &str) {
         let live: Vec<u64> = self
             .mods
@@ -895,7 +900,8 @@ impl App {
         else {
             return Err(t1("mod {} has no surface", mod_id));
         };
-        let bundle = self.load_mod_bundle(mod_id)?;
+        let package = self.mod_package(mod_id)?;
+        let bundle = Self::read_bundle(&package)?;
         let host_channel = self
             .mods
             .surface(&surface_id)
@@ -946,14 +952,20 @@ impl App {
         Ok(())
     }
 
-    fn load_mod_bundle(&self, mod_id: &str) -> Result<nsh_platform_tui::Bundle, String> {
-        let root = crate::mods::store::module_root(&self.config, mod_id)
-            .unwrap_or_else(|| self.config.mods_dir().join(mod_id));
-        let bundle_path = root.join("dist").join("bundle.js");
-        if !bundle_path.exists() {
+    /// 按包记录解析出的运行期形态：代码根、能力、模块与授予。
+    fn mod_package(&self, mod_id: &str) -> Result<crate::pkg::Resolved, String> {
+        crate::pkg::resolve(&self.config, mod_id)?.ok_or_else(|| t1("no package {}", mod_id))
+    }
+
+    /// 从记录里的模块摘要读 bundle；相对路径按该代际目录解析。
+    fn read_bundle(package: &crate::pkg::Resolved) -> Result<nsh_platform_tui::Bundle, String> {
+        let bundle_path = package
+            .bundle_path()
+            .ok_or_else(|| t1("package {} declares no module", &package.id))?;
+        if !bundle_path.is_file() {
             return Err(t1(
-                "mod {} has no dist bundle; run `nsh build -o dist` in its directory",
-                mod_id,
+                "mod {} has no bundle; run `nsh build -o dist` in its directory",
+                &package.id,
             ));
         }
         nsh_platform_tui::Bundle::read(&bundle_path).map_err(|error| error.to_string())
@@ -1251,6 +1263,71 @@ impl App {
             surface.view.handle(crate::mods::input::focus(focused));
         }
         self.dirty = true;
+    }
+
+    /// 让外框里的模块区域与包记录的启用状态一致：停用的包撤下区域并关闭表面，
+    /// 新启用（或首次出现）的包按其 `[module].place` 停靠。用户主动 `mods.undock`
+    /// 过的包留在 `mods_docked` 里，不再自动停靠。
+    pub fn sync_package_modules(&mut self) {
+        if self.config.no_mods {
+            return;
+        }
+        let enabled = self.plugins.modules();
+        let enabled_ids: std::collections::BTreeSet<String> =
+            enabled.iter().map(|entry| entry.id.clone()).collect();
+        let mut changed = false;
+        let docked: Vec<String> = self.chrome.mods().into_iter().map(|(id, _)| id).collect();
+        for id in &docked {
+            if enabled_ids.contains(id) {
+                continue;
+            }
+            if self.chrome.undock(id) {
+                changed = true;
+            }
+            if self.mods_docked.remove(id) {
+                changed = true;
+            }
+            if self.mods_close(id) {
+                changed = true;
+            }
+        }
+        for entry in enabled {
+            if self.chrome.mods().iter().any(|(id, _)| id == &entry.id) {
+                changed |= self.mods_docked.insert(entry.id.clone());
+                continue;
+            }
+            if self.mods_docked.contains(&entry.id) {
+                continue;
+            }
+            let Some(place) = dock_place(&entry.module.place) else {
+                continue;
+            };
+            let horizontal = matches!(
+                place,
+                crate::mods::chrome::DockPlace::Left | crate::mods::chrome::DockPlace::Right
+            );
+            let size = entry.module.size.and_then(|size| {
+                if size <= 1.0 {
+                    Some(crate::mods::chrome::ChromeSize {
+                        cols: None,
+                        rows: None,
+                        ratio: Some(size as f32),
+                    })
+                } else if horizontal {
+                    crate::mods::chrome::ChromeSize::cols(size.round() as u16)
+                } else {
+                    crate::mods::chrome::ChromeSize::rows(size.round() as u16)
+                }
+            });
+            self.chrome.dock(&entry.id, place, size, None, json!({}));
+            self.mods_docked.insert(entry.id.clone());
+            changed = true;
+        }
+        if changed {
+            self.seen_dirty = true;
+            self.dirty = true;
+            self.save_local_state();
+        }
     }
 
     /// 让外框里的模块区域与活表面一致；树未变时直接返回。
@@ -1577,6 +1654,17 @@ fn ansi256(index: u8) -> (u8, u8, u8) {
             let value = 8 + (index - 232) * 10;
             (value, value, value)
         }
+    }
+}
+
+/// `[module].place` 到外框停靠位置的映射；`none` 与覆盖层不自动停靠。
+fn dock_place(place: &str) -> Option<crate::mods::chrome::DockPlace> {
+    match place {
+        "left" => Some(crate::mods::chrome::DockPlace::Left),
+        "right" => Some(crate::mods::chrome::DockPlace::Right),
+        "top" => Some(crate::mods::chrome::DockPlace::Top),
+        "bottom" => Some(crate::mods::chrome::DockPlace::Bottom),
+        _ => None,
     }
 }
 

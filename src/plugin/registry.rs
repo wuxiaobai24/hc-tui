@@ -7,9 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::pkg::{self, Capabilities, ModuleInfo};
 use crate::store::{copy_tree, file_sha256, now_unix, Record, Source, Store};
 
-use super::manifest::{self, Manifest};
+use super::manifest::Manifest;
 
 /// 安装、更新与链接时的启用策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,8 +48,78 @@ pub struct Plugin {
     pub generation: u64,
     /// 是否启用。
     pub enabled: bool,
-    /// 清单。
+    /// 统一清单：动作、终端入口与可选模块。
     pub manifest: Manifest,
+    /// 已安装来源的记录；开发目录里的包没有记录。
+    pub record: Option<Record>,
+}
+
+impl Plugin {
+    /// 记录里缓存的能力；旧记录按清单回填。
+    pub fn capabilities(&self) -> Capabilities {
+        self.record
+            .as_ref()
+            .and_then(|record| record.capabilities)
+            .unwrap_or_else(|| self.manifest.capabilities())
+    }
+
+    /// 模块摘要：记录优先，旧记录按清单回填。
+    pub fn module_info(&self) -> Option<ModuleInfo> {
+        self.record
+            .as_ref()
+            .and_then(|record| record.module.clone())
+            .or_else(|| self.manifest.module_info())
+    }
+
+    /// 运行期授予：记录优先，旧记录按清单回填。
+    pub fn grants(&self) -> Vec<String> {
+        self.record
+            .as_ref()
+            .and_then(|record| record.grants.clone())
+            .unwrap_or_else(|| self.manifest.grants())
+    }
+}
+
+/// 一个贡献界面模块的包。
+#[derive(Debug, Clone)]
+pub struct ModuleEntry {
+    /// 包 ID。
+    pub id: String,
+    /// 代码根目录。
+    pub root: PathBuf,
+    /// 来源。
+    pub source: Source,
+    /// 代际。
+    pub generation: u64,
+    /// 是否启用。
+    pub enabled: bool,
+    /// 模块摘要。
+    pub module: ModuleInfo,
+    /// 声明的宿主方法与事件。
+    pub grants: Vec<String>,
+}
+
+/// `packages list --json` 的一项。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PackageEntry {
+    /// 包 ID。
+    pub id: String,
+    /// 显示名。
+    pub name: String,
+    /// 版本。
+    pub version: String,
+    /// 来源。
+    pub source: String,
+    /// 代际。
+    pub generation: u64,
+    /// 是否启用。
+    pub enabled: bool,
+    /// 能力。
+    pub capabilities: Capabilities,
+    /// 模块摘要；没有模块时为 `null`。
+    pub module: Option<ModuleInfo>,
+    /// 这个包的加载问题。
+    pub issues: Vec<String>,
 }
 
 /// 加载失败的插件或跳过原因。
@@ -124,49 +195,72 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// 扫描配置目录与安装记录。
+    /// 扫描安装记录与两个开发目录（插件与模块）。
+    ///
+    /// 来源：插件与模块两个 store 的已安装代际、`<config>/plugins/`
+    /// （开发插件）、`<config>/mods/`（开发模块）。按 id 去重：已安装代际优先。
     pub fn load(config: &Config) -> Registry {
-        let store = Store::open(config.plugins_state_dir());
         let disabled = disabled_set(config);
         let mut registry = Registry::default();
-        for issue in store.recovery_issues() {
-            registry.issues.push(Issue {
-                path: issue.path.clone(),
-                id: issue.id.clone(),
-                message: issue.message.clone(),
-            });
-        }
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for record in store.list() {
-            let Some(root) = store.current_dir(&record.id) else {
+        for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+            let store = Store::open(state);
+            for issue in store.recovery_issues() {
                 registry.issues.push(Issue {
-                    path: store.root().join("current").join(&record.id),
-                    id: Some(record.id.clone()),
-                    message: "current generation is missing".to_string(),
+                    path: issue.path.clone(),
+                    id: issue.id.clone(),
+                    message: issue.message.clone(),
                 });
-                continue;
-            };
-            match load_plugin(&root, record.source, record.generation, record.enabled) {
-                Ok(plugin) => {
-                    if plugin.id != record.id {
-                        registry.issues.push(Issue {
-                            path: root,
-                            id: Some(record.id.clone()),
-                            message: format!(
-                                "record says {}, manifest says {}",
-                                record.id, plugin.id
-                            ),
-                        });
-                        continue;
+            }
+            for record in store.list() {
+                let Some(root) = store.current_dir(&record.id) else {
+                    registry.issues.push(Issue {
+                        path: store.root().join("current").join(&record.id),
+                        id: Some(record.id.clone()),
+                        message: "current generation is missing".to_string(),
+                    });
+                    continue;
+                };
+                let loaded = load_plugin(
+                    &root,
+                    record.source,
+                    record.generation,
+                    record.enabled,
+                    Some(record.clone()),
+                    &mut registry.issues,
+                );
+                match loaded {
+                    Ok(plugin) => {
+                        if plugin.id != record.id {
+                            registry.issues.push(Issue {
+                                path: root,
+                                id: Some(record.id.clone()),
+                                message: format!(
+                                    "record says {}, manifest says {}",
+                                    record.id, plugin.id
+                                ),
+                            });
+                            continue;
+                        }
+                        if !seen.insert(plugin.id.clone()) {
+                            registry.issues.push(Issue {
+                                path: plugin.root.clone(),
+                                id: Some(plugin.id.clone()),
+                                message: "duplicate package id; the installed generation wins"
+                                    .to_string(),
+                            });
+                            continue;
+                        }
+                        registry.push(plugin);
                     }
-                    seen.insert(plugin.id.clone());
-                    registry.push(plugin);
+                    Err(issue) => registry.issues.push(issue),
                 }
-                Err(issue) => registry.issues.push(issue),
             }
         }
-        let dir = config.plugins_dir();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
+        for dir in [config.plugins_dir(), config.mods_dir()] {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             let mut entries: Vec<PathBuf> = entries
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
@@ -174,7 +268,9 @@ impl Registry {
                 .collect();
             entries.sort();
             for root in entries {
-                match load_plugin(&root, Source::Linked, 1, true) {
+                let loaded =
+                    load_plugin(&root, Source::Linked, 1, true, None, &mut registry.issues);
+                match loaded {
                     Ok(plugin) => {
                         if seen.contains(&plugin.id) {
                             registry.issues.push(Issue {
@@ -197,6 +293,21 @@ impl Registry {
     }
 
     fn push(&mut self, plugin: Plugin) {
+        if plugin.capabilities().module {
+            if let Some(module) = plugin.module_info() {
+                let bundle = plugin.root.join(&module.bundle);
+                if !bundle.is_file() {
+                    self.issues.push(Issue {
+                        path: bundle.clone(),
+                        id: Some(plugin.id.clone()),
+                        message: format!(
+                            "module bundle {} is missing; the module is not loaded",
+                            bundle.display()
+                        ),
+                    });
+                }
+            }
+        }
         if !plugin.manifest.supports_this_platform() {
             self.issues.push(Issue {
                 path: plugin.root.clone(),
@@ -324,30 +435,150 @@ impl Registry {
             .into_iter()
             .find(|entry| entry.name == name)
     }
+
+    /// 按 id 查找包。
+    pub fn get(&self, id: &str) -> Option<&Plugin> {
+        self.plugins.iter().find(|plugin| plugin.id == id)
+    }
+
+    /// 启用的界面模块，按 id 排序。
+    pub fn modules(&self) -> Vec<ModuleEntry> {
+        let mut modules: Vec<ModuleEntry> = self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.enabled)
+            .filter(|plugin| plugin.capabilities().module)
+            .filter_map(|plugin| {
+                let module = plugin.module_info()?;
+                let bundle = plugin.root.join(&module.bundle);
+                if !bundle.is_file() {
+                    return None;
+                }
+                Some(ModuleEntry {
+                    id: plugin.id.clone(),
+                    root: plugin.root.clone(),
+                    source: plugin.source,
+                    generation: plugin.generation,
+                    enabled: plugin.enabled,
+                    module,
+                    grants: plugin.grants(),
+                })
+            })
+            .collect();
+        modules.sort_by(|a, b| a.id.cmp(&b.id));
+        modules
+    }
+
+    /// 已加载包集合的内存指纹；磁盘指纹见 [`revision`]。
+    pub fn revision(&self) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for plugin in &self.plugins {
+            plugin.id.hash(&mut hasher);
+            plugin.root.hash(&mut hasher);
+            plugin.generation.hash(&mut hasher);
+            plugin.enabled.hash(&mut hasher);
+            plugin.manifest.name().hash(&mut hasher);
+            plugin.manifest.actions.len().hash(&mut hasher);
+            plugin.manifest.terminals.len().hash(&mut hasher);
+            plugin.manifest.module.is_some().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// 这个包的加载问题。
+    pub fn issues_for(&self, id: &str) -> Vec<String> {
+        self.issues
+            .iter()
+            .filter(|issue| issue.id.as_deref() == Some(id))
+            .map(|issue| issue.message.clone())
+            .collect()
+    }
+
+    /// `packages list` 的数据：两个 store 的记录按 id 合并，能力恒有。
+    ///
+    /// 旧记录没有 `capabilities` 字段时按清单回填，不进 `issues`。
+    pub fn entries(&self, config: &Config) -> Vec<PackageEntry> {
+        let mut records: Vec<Record> = Vec::new();
+        for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+            records.extend(Store::open(state).list());
+        }
+        records.sort_by(|a, b| a.id.cmp(&b.id));
+        records.dedup_by(|a, b| a.id == b.id);
+        records
+            .into_iter()
+            .map(|record| {
+                let plugin = self.get(&record.id);
+                let capabilities = record
+                    .capabilities
+                    .or_else(|| plugin.map(Plugin::capabilities))
+                    .unwrap_or_default();
+                let module = plugin
+                    .and_then(Plugin::module_info)
+                    .or_else(|| record.module.clone());
+                let app_field = |key: &str| {
+                    record
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.get(key))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                };
+                PackageEntry {
+                    id: record.id.clone(),
+                    name: plugin
+                        .map(|plugin| plugin.manifest.name().to_string())
+                        .or_else(|| app_field("name"))
+                        .unwrap_or_else(|| record.id.clone()),
+                    version: plugin
+                        .map(|plugin| plugin.manifest.version().to_string())
+                        .or_else(|| app_field("version"))
+                        .unwrap_or_default(),
+                    source: record.source.as_str().to_string(),
+                    generation: record.generation,
+                    enabled: record.enabled,
+                    capabilities,
+                    module,
+                    issues: self.issues_for(&record.id),
+                }
+            })
+            .collect()
+    }
 }
+
+/// 统一包注册表；[`Registry`] 是它的旧名字。
+pub type PackageRegistry = Registry;
 
 fn load_plugin(
     root: &Path,
     source: Source,
     generation: u64,
     enabled: bool,
+    record: Option<Record>,
+    issues: &mut Vec<Issue>,
 ) -> Result<Plugin, Issue> {
-    let path = root.join("plugin.toml");
-    let manifest = manifest::load(&path).map_err(|error| Issue {
-        path: path.clone(),
+    let loaded = pkg::load_dir(root).map_err(|error| Issue {
+        path: error.path.clone(),
         id: None,
         message: error.to_string(),
     })?;
-    let mut plugin = Plugin {
-        id: manifest.id().to_string(),
+    let id = loaded.manifest.id().to_string();
+    for notice in loaded.notices {
+        issues.push(Issue {
+            path: root.to_path_buf(),
+            id: Some(id.clone()),
+            message: notice,
+        });
+    }
+    Ok(Plugin {
+        id,
         root: root.to_path_buf(),
         source,
         generation,
         enabled,
-        manifest,
-    };
-    plugin.enabled = enabled;
-    Ok(plugin)
+        manifest: loaded.manifest,
+        record,
+    })
 }
 
 fn disabled_path(config: &Config) -> PathBuf {
@@ -360,6 +591,11 @@ fn disabled_set(config: &Config) -> std::collections::BTreeMap<String, ()> {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     keys.into_iter().map(|id| (id, ())).collect()
+}
+
+/// 开发目录里的包是否启用；`disabled.json` 是它们的启用状态。
+pub fn dev_enabled(config: &Config, id: &str) -> bool {
+    !disabled_set(config).contains_key(id)
 }
 
 /// 停用一个开发插件：写入 `disabled.json`；安装来源同时更新记录。
@@ -388,12 +624,13 @@ pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), Strin
     .map_err(|error| error.to_string())
 }
 
-/// 安装一个插件目录到新代际；先校验清单。
+/// 安装一个包目录到新代际；先校验清单与模块 bundle。
 ///
 /// 发布顺序在包锁内完成：分配代际 → 复制到暂存目录 → rename 成正式代际 →
 /// 原子写记录 → 切换 `current`。任何一步失败都不会改动旧记录与旧指针。
 pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record, String> {
-    let manifest = manifest::load(&dir.join("plugin.toml")).map_err(|e| e.to_string())?;
+    let loaded = pkg::install_ready(dir)?;
+    let manifest = loaded.manifest;
     if !manifest.supports_this_platform() {
         return Err(format!(
             "{} does not support this platform ({})",
@@ -425,7 +662,8 @@ pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Reco
         generation,
         installed_at: now_unix(),
         enabled,
-        manifest_hash: file_sha256(&target.join("plugin.toml")),
+        manifest_hash: file_sha256(&target.join("hctui.toml"))
+            .or_else(|| file_sha256(&target.join("plugin.toml"))),
         origin: Some(dir.display().to_string()),
         sha256: None,
         key_id: None,
@@ -434,6 +672,9 @@ pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Reco
             "version": manifest.version(),
         })),
         min_runtime: None,
+        capabilities: Some(manifest.capabilities()),
+        module: manifest.module_info(),
+        grants: Some(manifest.grants()),
     };
     if let Err(error) = store.save_record(&record) {
         let _ = std::fs::remove_dir_all(&target);
@@ -446,9 +687,10 @@ pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Reco
     Ok(record)
 }
 
-/// 链接一个开发插件目录；不拷贝。
+/// 链接一个开发包目录；不拷贝。
 pub fn link(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record, String> {
-    let manifest = manifest::load(&dir.join("plugin.toml")).map_err(|e| e.to_string())?;
+    let loaded = pkg::install_ready(dir)?;
+    let manifest = loaded.manifest;
     let store = Store::open(config.plugins_state_dir());
     let id = manifest.id().to_string();
     let lock = store.lock_package(&id).map_err(|error| error.to_string())?;
@@ -460,7 +702,8 @@ pub fn link(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record,
         generation: 1,
         installed_at: now_unix(),
         enabled,
-        manifest_hash: file_sha256(&target.join("plugin.toml")),
+        manifest_hash: file_sha256(&target.join("hctui.toml"))
+            .or_else(|| file_sha256(&target.join("plugin.toml"))),
         origin: Some(target.display().to_string()),
         sha256: None,
         key_id: None,
@@ -469,6 +712,9 @@ pub fn link(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record,
             "version": manifest.version(),
         })),
         min_runtime: None,
+        capabilities: Some(manifest.capabilities()),
+        module: manifest.module_info(),
+        grants: Some(manifest.grants()),
     };
     store
         .save_record(&record)
@@ -485,27 +731,31 @@ pub fn disabled_package(config: &Config, name: &str) -> Option<String> {
     Registry::load(config).disabled_owner(name)
 }
 
-/// 注册表在磁盘上的指纹：记录、启用状态与开发清单的内容哈希。
+/// 注册表在磁盘上的指纹：两个 store 的记录、启用状态与开发清单的内容哈希。
 /// 运行中的 TUI 用它判断是否需要重新加载，不重启也能感知启用变化。
 pub fn revision(config: &Config) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
-    let state = config.plugins_state_dir();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    hash_files(&mut hasher, &state.join("records"));
-    if let Ok(text) = std::fs::read_to_string(state.join("disabled.json")) {
+    for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+        hash_files(&mut hasher, &state.join("records"));
+    }
+    if let Ok(text) = std::fs::read_to_string(config.plugins_state_dir().join("disabled.json")) {
         text.hash(&mut hasher);
     }
-    let dev = config.plugins_dir();
-    if let Ok(entries) = std::fs::read_dir(&dev) {
-        let mut manifests: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path().join("plugin.toml"))
-            .collect();
-        manifests.sort();
-        for path in manifests {
-            path.hash(&mut hasher);
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                text.hash(&mut hasher);
+    for dev in [config.plugins_dir(), config.mods_dir()] {
+        if let Ok(entries) = std::fs::read_dir(&dev) {
+            let mut manifests: Vec<PathBuf> = Vec::new();
+            for entry in entries.filter_map(Result::ok) {
+                for name in [pkg::MANIFEST_FILE, pkg::PLUGIN_FILE] {
+                    manifests.push(entry.path().join(name));
+                }
+            }
+            manifests.sort();
+            for path in manifests {
+                path.hash(&mut hasher);
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    text.hash(&mut hasher);
+                }
             }
         }
     }
@@ -792,6 +1042,91 @@ mod tests {
             .join("dev.example.race")
             .join(format!(".tmp-{}", record.generation))
             .exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_old_record_without_capabilities_loads_and_backfills() {
+        let root = unique_dir("old-record");
+        let config = config_in(&root);
+        let source = write_plugin_at(&root.join("source").join("old"), "dev.example.old");
+        let record = install(&config, &source, EnablePolicy::Enable).unwrap();
+
+        // 退回 M5 形态：记录里没有 capabilities / module 字段。
+        let store = crate::store::Store::open(config.plugins_state_dir());
+        let path = store
+            .root()
+            .join("records")
+            .join(format!("{}.json", record.id));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("capabilities");
+        object.remove("module");
+        std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let reopened = crate::store::Store::open(config.plugins_state_dir());
+        assert!(
+            reopened.record(&record.id).unwrap().capabilities.is_none(),
+            "an old record must read without the new field"
+        );
+
+        let registry = Registry::load(&config);
+        assert!(registry.issues.is_empty(), "{:?}", registry.issues);
+        let entries = registry.entries(&config);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            entries[0].capabilities,
+            Capabilities {
+                actions: true,
+                terminals: true,
+                module: false,
+            }
+        );
+        assert!(entries[0].issues.is_empty(), "{:?}", entries[0].issues);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn packages_list_json_carries_capabilities_and_module() {
+        let root = unique_dir("entries");
+        let config = config_in(&root);
+        let dir = root.join("source").join("board");
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(
+            dir.join(crate::pkg::MANIFEST_FILE),
+            "manifest_version = 2\nid = \"dev.hctui.pkg.board\"\nname = \"Board\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[[actions]]\nid = \"summary\"\ntitle = \"Summary\"\nargv = [\"true\"]\n\n[[terminals]]\nid = \"board\"\ntitle = \"Board\"\nargv = [\"true\"]\nplacement = \"right\"\n\n[module]\ntitle = \"Board\"\nbundle = \"dist/bundle.js\"\nplace = \"right\"\nsize = 32\nfocusable = true\n\n[grants]\nhost = [\"state\"]\nevents = [\"state.changed\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("dist").join("bundle.js"), "// bundle").unwrap();
+        install(&config, &dir, EnablePolicy::Enable).unwrap();
+
+        let registry = Registry::load(&config);
+        let entries = registry.entries(&config);
+        let json = serde_json::to_value(&entries).unwrap();
+        let item = &json[0];
+        for key in [
+            "id",
+            "name",
+            "version",
+            "source",
+            "generation",
+            "enabled",
+            "capabilities",
+            "module",
+            "issues",
+        ] {
+            assert!(item.get(key).is_some(), "missing {key}: {item}");
+        }
+        assert_eq!(item["id"], "dev.hctui.pkg.board");
+        assert_eq!(item["capabilities"]["actions"], true);
+        assert_eq!(item["capabilities"]["terminals"], true);
+        assert_eq!(item["capabilities"]["module"], true);
+        assert_eq!(item["module"]["bundle"], "dist/bundle.js");
+        assert_eq!(item["module"]["place"], "right");
+        assert_eq!(item["module"]["size"], 32.0);
+        assert_eq!(item["module"]["focusable"], true);
+        assert_eq!(Registry::load(&config).modules().len(), 1);
         std::fs::remove_dir_all(root).ok();
     }
 

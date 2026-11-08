@@ -45,6 +45,8 @@ mod layout_sync;
 mod layouts;
 mod mods;
 mod mouse_resize;
+#[cfg(test)]
+mod package_tests;
 mod panels;
 mod plugin;
 mod renaming;
@@ -314,6 +316,9 @@ struct LocalState {
     mods_windows: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mods_grants: Option<serde_json::Value>,
+    /// 已经按包记录自动停靠过的模块；用户主动撤下的包留在这里，不再自动停靠。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    mods_docked: std::collections::BTreeSet<String>,
 }
 
 /// 普通模式下鼠标拖选。
@@ -382,6 +387,8 @@ pub struct App {
     pub mods_windows: std::collections::BTreeMap<String, serde_json::Value>,
     /// 模块运行时：表面、代际、授予、请求。
     pub mods: crate::mods::ModRuntime,
+    /// 已自动停靠过的模块 ID；停用后移除，用户 `mods.undock` 不再自动恢复。
+    pub mods_docked: std::collections::BTreeSet<String>,
     /// 模块可见的数据版本；变化时递增并发 `state.changed`。
     pub mod_revision: u64,
     /// 引擎线程置位的唤醒标记；只置位，不触碰 App 状态。
@@ -576,6 +583,7 @@ impl App {
             mod_regions: Vec::new(),
             mods_windows: std::collections::BTreeMap::new(),
             mods: crate::mods::ModRuntime::default(),
+            mods_docked: std::collections::BTreeSet::new(),
             plugins: crate::plugin::registry::Registry::default(),
             plugin_revision: 0,
             plugin_scan_at: None,
@@ -704,10 +712,12 @@ impl App {
             .filter(|address| !address.starts_with("pending/"))
             .collect();
         crate::mods::store::apply_enabled(&app.config, &mut app.mods);
-        for record in crate::store::Store::open(app.config.mods_state_dir()).list() {
-            let grants = crate::mods::store::load_grants(&app.config, &record.id);
-            if !grants.is_empty() {
-                app.mods.approve_grants(&record.id, &grants);
+        for state in [app.config.plugins_state_dir(), app.config.mods_state_dir()] {
+            for record in crate::store::Store::open(state).list() {
+                let grants = crate::mods::store::load_grants(&app.config, &record.id);
+                if !grants.is_empty() {
+                    app.mods.approve_grants(&record.id, &grants);
+                }
             }
         }
         if !app.restore_pending {
@@ -925,6 +935,7 @@ impl App {
     /// 防抖持久化、toast 过期、恢复超时。
     pub fn tick(&mut self) {
         let now = Instant::now();
+        self.sync_package_modules();
         self.sync_mod_surfaces();
         self.pump_mods();
         if self.restore_pending && now.duration_since(self.restore_since) >= RESTORE_TIMEOUT {
@@ -5004,6 +5015,7 @@ impl App {
                 self.chrome = chrome;
             }
             self.mods_windows = state.mods_windows;
+            self.mods_docked = state.mods_docked;
             self.mods.grants_from_state(state.mods_grants.as_ref());
             self.load_mod_windows();
         }
@@ -5019,6 +5031,7 @@ impl App {
             mods_chrome: Some(self.chrome.to_state()),
             mods_windows: self.mods_windows.clone(),
             mods_grants: Some(self.mods.grants_to_state()),
+            mods_docked: self.mods_docked.clone(),
         };
         let path = self.config.state_path.clone();
         if let Some(parent) = path.parent() {
