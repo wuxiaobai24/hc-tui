@@ -358,3 +358,41 @@ preset = "zellij"  # default | zellij
 ```
 
 Zellij 模式键、锁定直通和鼠标替代操作见 [交互操作](interaction.md)。
+
+## 检查与重置
+
+`hc-tui config check [--config <path>]` 解析配置文件并逐条报出问题：错误写成
+`文件:行:列: 原因`，可以直接定位到出错的行。解析通过时列出主题（含来源行）、
+键位数量与冲突、`render_fps`、`mods` 段与插件目录摘要。
+
+```console
+$ hc-tui config check --config ~/.config/hc-tui/config.toml
+配置 /home/me/.config/hc-tui/config.toml
+主题 nord（/home/me/.config/hc-tui/config.toml:39）
+键位 59 个 · 冲突 1 处
+渲染 render_fps = 30
+mods 信任根 0 个 · 撤销列表 /home/me/.config/hc-tui/mods-revocations.json
+插件 目录 /home/me/.config/hc-tui/plugins（不存在）· [[panels]] 0 条 · 自定义命令 0 条
+/home/me/.config/hc-tui/config.toml:41:1: 键位冲突 prefix+q：detach、new_tab
+1 个警告
+```
+
+退出码：0 合法、1 有错误、2 只有警告。语法错误、未知键、重复键是错误；
+取值无效、未知主题、键位冲突是警告。主题来源只有两种：配置文件里的 `[theme] name`
+（给出行号）与内置默认。默认值里已知的三对重键（见[使用指南](usage.md)「默认绑定冲突」）
+只有在配置改过其中一侧时才算配置引入的冲突，所以 `--default-config` 的原样输出仍然退出 0。
+
+`hc-tui config reset-keys [--yes] [--config <path>]` 把 `[keys]` 段恢复成默认键位：
+
+```console
+$ hc-tui config reset-keys --config ~/.config/hc-tui/config.toml
+配置 /home/me/.config/hc-tui/config.toml
+[keys] 段在第 39–46 行
+保留其它段 ui、theme、keys.command
+重置为默认键位 59 个
+未写入；加 --yes 执行
+```
+
+带 `--yes` 时先备份到 `config.toml.bak.<时间戳>`，再只替换 `[keys]` 段；
+其它段（含 `[[keys.command]]`、`[[panels]]`）原样保留。文件里没有 `[keys]` 段时
+不做任何事，也不写备份。
