@@ -1559,6 +1559,7 @@ impl App {
                 self.toast = None;
                 self.toast_notification = None;
             }
+        }
         if let Err(error) = loaded {
             // 引擎没装上：没有可绘制的帧，直接进占位。
             if let Some(surface) = self.mods.surface_mut(&id) {
