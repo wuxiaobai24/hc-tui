@@ -177,6 +177,7 @@ fn data_app() -> App {
     app.toast = Some(Toast {
         text: "mod probe requests grants: exec".into(),
         until: Instant::now() + Duration::from_secs(60),
+        level: "info".into(),
     });
     app
 }
@@ -218,6 +219,7 @@ fn empty_app() -> App {
     app.toast = Some(Toast {
         text: String::new(),
         until: Instant::now() + Duration::from_secs(60),
+        level: "info".into(),
     });
     app
 }

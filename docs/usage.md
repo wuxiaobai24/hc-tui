@@ -202,6 +202,28 @@ dev.hctui.pkg.git-board          local     gen 2   enabled  ATM
 没有 core 时这一行会先打印 `no core for this session; service state comes from declarations only`，
 只按声明推状态，不按需拉起 core。
 
+## 命令行通知 `notify`
+
+`hc-tui notify <文本> [--level info|warn|error] [--action <动作名>] [--target <终端|pane>]`
+把一条通知交给运行中的窗口，走与模块 `notify` 相同的通道：有提示表面就进队列 props，
+没有就走内置 toast（`warn`/`error` 的边框颜色不同）。带 `--action` 或 `--target` 的 toast
+可以用鼠标点：点击执行该动作（`target` 作为 `terminal` 参数传入），没有动作时跳到绑定终端。
+
+```console
+$ hc-tui notify "build done" --level info
+{"fallback":"builtin","id":"nr1","surface":null}
+```
+
+没有窗口时不静默成功：core 文档只存布局，通知无处保存，退出码 3。
+
+```console
+$ hc-tui notify "build done"
+no hc-tui window is running on session default; notification not delivered (exit 3).
+the core doc stores layout only, so there is no place to keep the notification; start hc-tui and retry
+$ echo $?
+3
+```
+
 ## 无窗口 `do`
 
 控制 socket 连不上（没有窗口）时，`do` 直接读改本地 core 的布局文档，

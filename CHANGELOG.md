@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- notifycli：新增 `hc-tui notify <文本> [--level info|warn|error] [--action <动作名>] [--target <终端|pane>]`，走与模块 `notify` 相同的通道（`src/app.rs` 控制请求 `notify` → `src/app/mods.rs::host_notify` → `register_notification`）：有提示表面就进 `{ toasts, max }` props，没有就走内置 toast；内置 toast 按级别改边框颜色（`info` 用 `accent`，`warn` 用 `agent_working`，`error` 用 `agent_error`），鼠标点击执行通知携带的 `action`（`target` 作为 `terminal` 参数注入），没有 `action` 时跳到 `target` 终端，动作结果写在状态行；没有窗口时退出码 3 并说明 core 文档只存布局、没有通知槽位，不静默成功。新增 `src/app/mods/notify_tests.rs` 五个用例，`docs/usage.md` 补一节。
+
 扩展机制开发计划（docs/plan-extensions.md）前三项已交付：
 
 - M9 toast 表面化：新增 `toast` 表面形态（内容区之上的提示层，不抢焦点、不参与 `Esc` 关覆盖层，z 序高于 region/pane、低于 dialog/popup/window），外框接受并默认带上 `toasts` 节点（零尺寸标记，模块提示层以此开关，内置 Rust toast 不受影响）；打包清单 `[module].place` 支持 `toast`；宿主把通知队列以 `props.changed` 推成 `{ toasts, max }`（`{ id, level, text, action?, target?, created_ms, timeout_ms }`，条数由 `notifications.toast_limit` 限制，默认 3），`notify` 的 `surface` 可指定提示表面、未指定走默认，宿主自身提醒（`status: true`、Agent blocked/done）进同一条队列；`dismiss` 按 id 撤销（不再按文本相等匹配），超时由宿主计时并撤；`state.changed` 在只有 revision 变化时不发空 `domains`。新增 `src/app/mods/toast_tests.rs` 六个用例，`docs/mods.md`、`docs/configuration.md` 与 `docs/m9-gap.md` 同步。

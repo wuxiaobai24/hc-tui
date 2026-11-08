@@ -202,6 +202,8 @@ pub struct Prompt {
 pub struct Toast {
     pub text: String,
     pub until: Instant,
+    /// 通知级别：`info` / `warn` / `error`，只影响绘制颜色。
+    pub level: String,
 }
 
 /// 会话级浮层终端。
@@ -523,6 +525,8 @@ pub struct App {
     pub keyboard_mode: interaction::KeyboardMode,
     pub pointer_targets: Vec<(interaction::PointerTarget, Rect)>,
     pub menu_hit: Rect,
+    /// 内置 toast 的绘制矩形，鼠标点击命中时执行它携带的动作。
+    pub toast_hit: Rect,
     pub pane_drag_hits: Vec<(u32, Rect)>,
     pub pane_menu_hits: Vec<(u32, Rect)>,
     pointer_drag: Option<interaction::PointerDrag>,
@@ -706,6 +710,7 @@ impl App {
             keyboard_mode: interaction::KeyboardMode::Normal,
             pointer_targets: Vec::new(),
             menu_hit: Rect::default(),
+            toast_hit: Rect::default(),
             pane_drag_hits: Vec::new(),
             pane_menu_hits: Vec::new(),
             pointer_drag: None,
@@ -913,6 +918,20 @@ impl App {
         match body["method"].as_str() {
             Some("snapshot") => {
                 json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session,"plugin":t.plugin,"plugin_terminal":t.plugin_terminal,"cwd":t.cwd})).collect::<Vec<_>>()})
+            }
+            Some("notify") => {
+                let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+                if text.trim().is_empty() {
+                    return json!({"error":"notify requires a text"});
+                }
+                let level = body.get("level").and_then(Value::as_str).unwrap_or("info");
+                if !matches!(level, "info" | "warn" | "error") {
+                    return json!({"error":"level must be info, warn or error"});
+                }
+                let action = body.get("action").cloned().filter(|value| !value.is_null());
+                let target = body.get("target").and_then(Value::as_str);
+                let (id, surface) = self.host_notify(text, level, action, target);
+                json!({"id":id,"surface":surface,"fallback":if surface.is_none(){"builtin"}else{"toast"}})
             }
             Some("do") if self.restore_pending => json!({"error":"layout is still loading"}),
             Some("do") => {
