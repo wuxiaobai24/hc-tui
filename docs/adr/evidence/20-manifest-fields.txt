@@ -1,0 +1,55 @@
+$ git rev-parse HEAD
+da6b3295fb6e2e40e8a88025c9530ddf53ff2bac
+
+$ grep -n "pub struct Manifest {" src/plugin/manifest.rs
+86:pub struct Manifest {
+
+$ awk "NR>=84 && NR<=120" src/plugin/manifest.rs   # 含 deny_unknown_fields 与字段列表
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    /// 清单格式版本。
+    pub manifest_version: toml::Spanned<u32>,
+    /// 包 ID。
+    pub id: toml::Spanned<String>,
+    /// 显示名。
+    pub name: toml::Spanned<String>,
+    /// 包版本。
+    pub version: toml::Spanned<String>,
+    /// 宿主接口版本。
+    pub host_api: toml::Spanned<u32>,
+    /// 支持的平台；空表示全部。
+    #[serde(default)]
+    pub platforms: Option<toml::Spanned<Vec<toml::Spanned<String>>>>,
+    /// 描述。
+    #[serde(default)]
+    pub description: Option<toml::Spanned<String>>,
+    /// 动作。
+    #[serde(default)]
+    pub actions: Vec<Action>,
+    /// 终端入口；M6 只校验与展示，执行在 M7。
+    #[serde(default)]
+    pub terminals: Vec<Terminal>,
+    /// 常驻服务：物化成 core 的 keep 终端。
+    #[serde(default)]
+    pub services: Vec<Service>,
+    /// 界面模块；有这一段才算贡献界面。
+    #[serde(default)]
+    pub module: Option<Module>,
+    /// 模块授予：宿主方法与事件。
+    #[serde(default)]
+    pub grants: Option<Grants>,
+}
+
+/// `[[actions]]`。
+
+$ grep -n "deny_unknown_fields" src/plugin/manifest.rs | head -2
+85:#[serde(deny_unknown_fields)]
+122:#[serde(deny_unknown_fields)]
+
+$ grep -n "pub services\|pub module\|pub grants\|pub actions\|pub terminals" src/plugin/manifest.rs
+105:    pub actions: Vec<Action>,
+108:    pub terminals: Vec<Terminal>,
+111:    pub services: Vec<Service>,
+114:    pub module: Option<Module>,
+117:    pub grants: Option<Grants>,

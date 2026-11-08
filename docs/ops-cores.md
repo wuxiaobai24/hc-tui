@@ -35,6 +35,19 @@ holder 同理，路径是 `<runtime>/herdr-core/<session>.holder.<hash>.sock`；
 
 终端挂在 holder 上，所以「这个会话是不是真有人在用」看 holder 的子进程数（`cat /proc/<holder>/task/*/children`），不看 core。
 
+## 每张票用自己的会话
+
+并发跑的票据各用各的会话，不要落到 `default`：
+
+```sh
+export HC_SESSION=hcp-<票号>          # 所有实验、所有 hc 命令都带它
+HC_SESSION=hcp-<票号> hc server stop   # 收尾只停自己这一份
+```
+
+- **禁止裸跑 `hc server stop`**：默认会话的 core 承载着操作者自己的终端，一停就把正在干活的那一份一起停掉。
+- 判断停干净用 `pgrep -c -f 'herdr-core serve'` 前后对比，或看 holder 的 socket 路径 `/<session>.holder`；**不要用 `hc server status`**：它是客户端命令，会话 core 不在时会按需拉起一个，不能用来判断存活。
+- 本文件的清理脚本把 `hcp-*` 全部归入 `protect`；别人留下的 core / holder 不要动，写进票据的存疑段。
+
 ## 清理
 
 ```sh

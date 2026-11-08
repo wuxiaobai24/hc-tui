@@ -48,7 +48,9 @@ $ sed -n '1,8p' .../herdr-web-ui/scripts/plugin.ts
  * daemons (https://herdr.dev/docs/plugins/), so this script owns the process:
 ```
 
-（`evidence/09-herdr-facts.txt`）结论：herdr 侧「抄插件模型」解决不了常驻，连它自己的常驻桥都是 `systemd --user` 单元（`collie-ctl.sh:9` `UNIT="collie"`、`:360` `systemctl --user daemon-reload`）+ 插件自管 pid 文件。这条对本文的候选 2 是直接反例。
+复跑（2026-11-08，`docs/adr/evidence/09-herdr-facts.txt`）：`[[startup]]` 的实际字段只有 `command`（argv 数组）与可选的 `platforms`（web-ui 清单 `:34-40` 两条：`command = ["sh", "scripts/with-bun.sh", "scripts/plugin.ts", "start"]` / `platforms = ["linux", "macos"]`，以及 PowerShell 同构的一条），没有 `restart`、`supervise`、pid 之类字段。collie 的现场：`systemctl --user list-units --all | grep collie` 给出 `collie.service loaded active running Collie`；`systemctl --user cat collie` 的单元里有 `Restart=on-failure`、`RestartSec=5`、`StartLimitIntervalSec=0`，`ExecStart=/usr/bin/bun run …/bridge/index.ts`；单元由 `collie-ctl.sh:9` 的 `UNIT="collie"` 生成、`:360` 的 `systemctl --user daemon-reload` 安装。
+
+（`docs/adr/evidence/09-herdr-facts.txt`）结论：herdr 侧「抄插件模型」解决不了常驻，连它自己的常驻桥都是 `systemd --user` 单元（`collie-ctl.sh:9` `UNIT="collie"`、`:360` `systemctl --user daemon-reload`）+ 插件自管 pid 文件。这条对本文的候选 2 是直接反例。
 
 ### C.2 三个缺口（本文统一口径）
 
@@ -94,7 +96,7 @@ graph LR
 | 多写入者协调 | `doc.set` 带 `version`；发陈旧版本返回 `kind:"conflict"` + `hint:"read doc.get and retry with its version"` | `evidence/08-core-methods-cas.txt` |
 | 多持有者 | `server.status` 返回 `holders[]`（各自 pid / terminals）、`live`、`uptime_ms` | `hc server status`（本机当时 `holders` 2 项、`live` 38、`uptime_ms` 175130184） |
 | 事件流 | `events.subscribe` 一条长连接，任何短命进程都能订 | `src/hc/net.rs:500`、`src/main.rs:139-240` |
-| 往返成本 | 同一连接上 `doc.get` 每次 **0.1 ms**；`hc-tui do` 整条链路（含进程启动）中位 15.4 ms | `evidence/07-latency.txt` |
+| 往返成本 | 同一连接上 `doc.get` p50 **0.21 ms**、p90 0.28 ms；无窗口 `hc-tui do` 整条链路（进程启动 + 连 core + 读改写文档）p50 **22.8 ms**、p90 24.7 ms | `docs/adr/evidence/07-latency.txt` |
 
 **这台机器同时证明了「按需起常驻进程」的真实成本**：132 个 `herdr-core serve` 主进程、78 个不同 cgroup、184 MB RSS，而正在跑的窗口只有 1 个。它们全部来自测试与临时会话，没人回收。
 
@@ -169,7 +171,7 @@ log = "state"                       # state | off，默认 state：落 ~/.local/
 
 **付出的**
 
-- 无窗口能力是「读改写文档」的模型：一次 `do` 至少两次 RPC（实测持久连接上 `doc.get` 0.1 ms，进程启动主导，整条 15.4 ms 中位，`evidence/07-latency.txt`）。交互路径不变的仍然是窗口内那条。
+- 无窗口能力是「读改写文档」的模型：一次 `do` 至少两次 RPC（实测持久连接上 `doc.get` p50 0.21 ms，进程启动主导，无窗口整条 p50 22.8 ms / p90 24.7 ms，`docs/adr/evidence/07-latency.txt`）。交互路径不变的仍然是窗口内那条。
 - 服务只能用 VT 输出看日志（`ESC`/`NUL` 丢失，实测）。需要精确字节流的作业必须写文件/端口，不能把 stdout 当协议——这条与现有 runner 的约定一致（`docs/plugins.md:94`），只是把同样的约束延伸到常驻作业。
 - 文档写入从"想写就写"变成"先读、合并、CAS 写、可能被阻塞"。多了 `layout.reload` 这样的用户动作。
 - 一处代码重复的诱惑：动作执行 `execute_action`（动作表在 `src/app/actions.rs`，`app.quit` 在 `:97`；分发在 `src/app.rs:838-857`）在无窗口路径里需要一份不依赖渲染状态的入口。必须在同一个函数族里做条件分支，不能抄一份。
@@ -310,7 +312,7 @@ log = "state"                       # state | off，默认 state：落 ~/.local/
 | 17 | `src/plugin/runner.rs:407,734` | `pub fn shutdown(&self, deadline: Instant) -> Result<(), ShutdownError>` / `kill_group(pid, libc::SIGTERM)` | 回收只发生在被调用时 |
 | 18 | `src/app.rs:4973-5016` | `fn load_local_state(…)` / `fn save_local_state(…)` → `serde_json::to_string(&state)` 写 `config.state_path` | 第三份本地状态 |
 | 19 | `src/app.rs:381` + `src/mods/mod.rs:203-222` | `pub mods: crate::mods::ModRuntime` / `pub struct ModRuntime { surfaces, generations, grants, pending_grants, … }` | mods 运行时是窗口内存 |
-| 20 | `src/plugin/manifest.rs:84-108` | `pub struct Manifest { … actions: Vec<Action>, terminals: Vec<Terminal>, module: Option<Module>, grants: Option<Grants> }`（`deny_unknown_fields`） | `[[services]]` 必须加在这个严格解析器里 |
+| 20 | `src/plugin/manifest.rs:86-120` | `pub struct Manifest { … actions: Vec<Action>, terminals: Vec<Terminal>, services: Vec<Service>, module: Option<Module>, grants: Option<Grants> }`（`deny_unknown_fields`；此段随 M11 更新） | `[[services]]` 必须加在这个严格解析器里 |
 | 21 | `src/pkg/mod.rs:1-11` | `//! 统一包模型：一个 hctui.toml（v2）同时声明动作、终端入口与界面模块。` | m11a 的落点：一段清单 |
 | 22 | `src/hc/client.rs:60-64,126` | `const REQUIRED_METHODS: [&str; 4] = ["terminal.run","terminal.attach","terminal.kill","events.subscribe"]` / `"method": "hello"` | 与 core 的耦合面（候选 1 的硬约束） |
 
@@ -432,13 +434,13 @@ A：不能当**数据协议**用，这正是边界：`docs/plugins.md:94,287` �
 A：herdr 能这么做是因为它用 `SemanticFrame`（实测日志 1983 次）——服务端算好帧，客户端只画。hc 的契约是原始 VT + 客户端 VT，客户端必须维护 VT，工作台语义只能落在客户端一侧；这不是工作量问题，是协议形状决定的。反过来，hc 的字节流可以给手机、`ssh`、`hc connect` 用，这是 herdr 换不来的。
 
 **Q4「`do` 无窗口时要读文档再写文档，动作会变慢。」**
-A：量过。持久连接上 `doc.get` 每次 0.1 ms，`hc-tui do` 整条链路（进程启动 + socket + 应答）中位 15.4 ms（`evidence/07-latency.txt`）。无窗口路径多一次 `doc.get`，量级仍是几十毫秒，属于 CLI 可接受；交互路径根本没变（仍是窗口内那条内存分发）。
+A：量过。持久连接上 `doc.get` p50 0.21 ms，无窗口 `hc-tui do` 整条链路（进程启动 + 连 core + 读改写文档）p50 22.8 ms / p90 24.7 ms（`docs/adr/evidence/07-latency.txt`）。无窗口路径多一次 `doc.get`，量级仍是几十毫秒，属于 CLI 可接受；交互路径根本没变（仍是窗口内那条内存分发）。
 
 **Q5「文档当唯一真相，冲突就阻塞，用户体验会退化。」**
 A：阻塞只发生在**同一字段被两个写者同时改**时。`herdr-app` 已经这么跑了（`src/app/shared_sync.rs:100-120`，提示 `layout.reload`），`hctui-layout-v1` 接过去是复用而不是新发明；不同字段的改动会合并（`src/shared.rs:310`）。今天的行为是"静默覆盖"，那不是更好的体验，只是更安静的丢数据（`evidence/05-clobber.txt`）。
 
 **Q6「`[[services]]` 长在 v2 清单里，是把 m11a 的工作当依赖，本票不敢自己做决定。」**
-A：发起方的补充背景就是要这个落点：`[[services]]` 作为 v2 的一个新段。本 ADR 给出段的字段与语义（D.1）以及它依赖的严格解析器位置（`src/plugin/manifest.rs:84`、`src/pkg/mod.rs:1-11`），阶段 1 不依赖它、可独立验收。依赖是排期上的，不是设计上的。
+A：发起方的补充背景就是要这个落点：`[[services]]` 作为 v2 的一个新段。本 ADR 给出段的字段与语义（D.1）以及它依赖的严格解析器位置（`src/plugin/manifest.rs:86-120`、`src/pkg/mod.rs:1-11`），阶段 1 不依赖它、可独立验收。依赖是排期上的，不是设计上的。
 
 **Q7「一个窗口一个 socket 的限制（`src/control.rs:167`）还在，多窗口仍不行。」**
 A：是的，本 ADR 不解决多窗口，只解决"窗口不在时仍有人应答"。多窗口需要共享工作台状态与输入仲裁，那是候选 3 的领域；本 ADR 的 CAS/合并为它铺了路（文档成为唯一真相后，多窗口不再是"第二个 App 抢同一份内存"），但明确不做（见 §4）。
@@ -452,3 +454,13 @@ A：是的，本 ADR 不解决多窗口，只解决"窗口不在时仍有人应�
 - `zoom` 到底该不该持久化，本 ADR 只指出"它现在不在任何文档里"（与 `docs/usage.md:150` 的说法不符），没有替产品决定它的归属；它在 `App` 里被十几处动作重置为 `false`（`src/app.rs:3690,3890,3912,3993,4229,4430,4604,4626,4646,4668,4823`），看起来是刻意瞬态。
 - 候选 1 的改动面只有本仓库部分被估算；`herdr-core` 不在本工作区，外部仓库的真实成本未核实。
 - 跨机器场景（`on = "space-machine"` 的服务）没有实测：本机的 spaces 都是 local，远端路径只有代码依据（`src/hc/net.rs:964` 的 `terminal.run` 带 `on`），没有跑过。
+
+---
+
+## 7. 证据补录（2026-11-08 复跑）
+
+基线 commit `da6b3295fb6e2e40e8a88025c9530ddf53ff2bac`，构建 `mise exec -- cargo build --release -p hc-tui`。
+
+- **E7 延迟**（`docs/adr/evidence/07-latency.txt`，脚本 `docs/adr/evidence/07-latency-bench.py`）：无 TUI 窗口、`HC_SESSION=hcp-docs` 直连 core，动作 `space.rename`，40 次采样加 3 次热身，p50/p90 用最近秩。`hc-tui do` p50 22.76 ms / p90 24.72 ms；同一 `hc connect` 连接上 `doc.get` p50 0.212 ms / p90 0.277 ms。旧数字 15.4 ms 是**有窗口**的 `do`（控制 socket + 窗口内分发，7 次采样），本次量的是本文主张的无窗口路径，所以变大；`doc.get` 的 0.1 → 0.212 ms 是同一测法在当前机器负载下（`loadavg` 26.43、13 个其它会话的 core、两张票的构建）的实际值。
+- **E9 herdr 现场**（`docs/adr/evidence/09-herdr-facts.txt`）：herdr 0.9.3 的 `[[startup]]` 字段与 collie 的 systemd `--user` 单元原始输出。
+- **#20 Manifest 字段**（`docs/adr/evidence/20-manifest-fields.txt`）：`src/plugin/manifest.rs:86-120`，字段为 `actions` / `terminals` / `services` / `module` / `grants`，`deny_unknown_fields` 在 `:85`。

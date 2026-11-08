@@ -1,0 +1,41 @@
+# E7 复跑：无窗口 `hc-tui do` 往返与持久连接上的 `doc.get`
+
+基线 commit: da6b3295fb6e2e40e8a88025c9530ddf53ff2bac
+构建: `mise exec -- cargo build --release -p hc-tui`
+二进制: `/home/wxb24/code/hc-tui-docs/target/release/hc-tui`
+会话: `HC_SESSION=hcp-docs`，隔离 `XDG_RUNTIME_DIR=/tmp/hcp-docs/run`，无 TUI 窗口
+（`hc-tui do` 因控制 socket 不存在走 `src/app/winless.rs` 的无窗口路径）
+采样: n = 40，热身 3 次丢弃，p50/p90 = 最近秩 `index = ceil(p/100 * n) - 1`
+动作: `space.rename`（先 `doc.get` 读 `hctui-layout-v1`，取 label 为 `bench` 的 space 的稳定 `origin`）
+
+测量时机器上下文（并发票据仍在跑）：
+
+```
+$ date -Iseconds; nproc; cat /proc/loadavg; pgrep -c -f 'herdr-core serve'; pgrep -c -x hc-tui
+2026-11-08T11:49:33+08:00
+16
+26.43 26.56 20.36 36/6037 37002
+14
+4
+```
+
+命令与原始输出：
+
+```
+$ python3 docs/adr/evidence/07-latency-bench.py target/release/hc-tui 40
+session: hcp-docs
+space:   sp18e5f509d2752d0c3c80c63
+n = 40, warmup = 3, percentile = nearest-rank
+hc-tui do (winless, full process) ms: [21.16, 22.84, 23.01, 21.97, 20.83, 22.56, 22.24, 22.08, 22.15, 21.4, 21.8, 22.66, 25.69, 21.74, 22.91, 22.76, 22.8, 23.19, 23.31, 21.79, 22.88, 24.72, 25.73, 22.28, 23.56, 22.17, 21.54, 23.39, 23.16, 21.74, 25.74, 29.64, 21.77, 23.29, 24.21, 22.1, 22.5, 23.62, 23.45, 24.49]
+  p50 = 22.76 ms  p90 = 24.72 ms
+doc.get (one persistent connection) ms: [0.186, 0.219, 0.198, 0.189, 0.192, 0.184, 0.747, 0.277, 1.056, 0.256, 0.211, 0.214, 0.537, 0.603, 0.201, 0.217, 0.203, 0.203, 0.235, 0.243, 0.217, 0.245, 0.178, 0.198, 0.244, 0.189, 0.212, 0.204, 0.233, 0.183, 0.211, 0.228, 0.222, 0.228, 0.229, 0.179, 0.205, 0.212, 0.232, 0.177]
+  p50 = 0.212 ms  p90 = 0.277 ms
+```
+
+与 ADR 旧数字的差异：
+
+- 旧的 15.4 ms 是**有窗口**的 `do`（控制 socket + 窗口内内存分发，7 次采样）；本次量的是
+  ADR 主张的**无窗口**路径：进程启动 + `hc connect` 子进程 + 读改写文档的 CAS 往返。
+- 旧的 `doc.get` 0.1 ms 与本次 0.212 ms 用的是同一测法（同一持久连接上连续请求），
+  本次采样时机器 `loadavg` 26.43，本机同时有 13 个其它会话的 core 与两张票的构建在跑；
+  本次取的是当前机器上的真实值。

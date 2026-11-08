@@ -1,0 +1,82 @@
+$ herdr --version
+herdr 0.9.3
+
+$ for f in ~/.config/herdr/plugins/github/*/herdr-plugin.toml; do echo "--- $f"; grep -oE "^\[\[[a-z]+\]\]" "$f" | sort -u; done
+--- /home/wxb24/.config/herdr/plugins/github/annotate-9c299759567c/herdr-plugin.toml
+[[actions]]
+[[build]]
+[[panes]]
+--- /home/wxb24/.config/herdr/plugins/github/devswha.herdr-web-ui-210f619d6b7b/herdr-plugin.toml
+[[actions]]
+[[build]]
+[[panes]]
+[[startup]]
+--- /home/wxb24/.config/herdr/plugins/github/herdr.collie-1edf0e1e987e/herdr-plugin.toml
+[[actions]]
+[[build]]
+
+$ grep -n -B1 -A6 '^\[\[startup\]\]' /home/wxb24/.config/herdr/plugins/github/devswha.herdr-web-ui-210f619d6b7b/herdr-plugin.toml
+33-# One-shot per herdr start: brings the bridge up if it is not already answering.
+34:[[startup]]
+35-command = ["sh", "scripts/with-bun.sh", "scripts/plugin.ts", "start"]
+36-platforms = ["linux", "macos"]
+37-
+38:[[startup]]
+39-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/plugin.ps1", "start"]
+40-platforms = ["windows"]
+41-
+42-[[actions]]
+43-id = "start"
+44-title = "Start herdr web ui"
+
+$ sed -n '1,10p' /home/wxb24/.config/herdr/plugins/github/devswha.herdr-web-ui-210f619d6b7b/scripts/plugin.ts
+/**
+ * herdr plugin lifecycle for the web UI.
+ *
+ * herdr's startup hooks are one-shot initialization commands, not supervised
+ * daemons (https://herdr.dev/docs/plugins/), so this script owns the process:
+ * `start` detaches the server and records its pid under HERDR_PLUGIN_STATE_DIR,
+ * `stop` takes it down, `status` reports, `pair` prints a pairing code for another device, `phone`
+ * publishes the app to the user's tailnet and prints its address as a QR code. Start is idempotent — a server that is
+ * already answering on the port is left alone, which is what makes it safe as
+ * both a startup hook and a hand-invoked action.
+
+$ systemctl --user list-units --all | grep collie
+  collie.service                                                                                                                                      loaded    active     running      Collie
+
+$ systemctl --user is-active collie; systemctl --user is-enabled collie
+is-active: active
+is-enabled: enabled
+
+$ systemctl --user cat collie
+# /home/wxb24/.config/systemd/user/collie.service
+[Unit]
+Description=Collie
+After=default.target
+# Never give up restarting — a phone-only operator can't run 'systemctl reset-failed'.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/wxb24/.config/herdr/plugins/github/herdr.collie-1edf0e1e987e
+ExecStart=/usr/bin/bun run /home/wxb24/.config/herdr/plugins/github/herdr.collie-1edf0e1e987e/bridge/index.ts
+Restart=on-failure
+RestartSec=5
+# Hardening: the bridge is remote shell access, so deny privilege escalation and give it a private
+# /tmp. ProtectSystem is intentionally NOT set — the only write path is the env-driven state dir,
+# which Herdr may inject to an arbitrary location, so it can't be enumerated in a static ReadWritePaths.
+NoNewPrivileges=yes
+PrivateTmp=yes
+Environment=HERDR_SOCKET_PATH=/home/wxb24/.config/herdr/herdr.sock
+Environment=COLLIE_PORT=8787
+Environment=HERDR_PLUGIN_CONFIG_DIR=/home/wxb24/.config/herdr/plugins/config/herdr.collie
+EnvironmentFile=-/home/wxb24/.config/herdr/plugins/config/herdr.collie/.env
+
+[Install]
+WantedBy=default.target
+
+$ grep -n 'UNIT="collie"\|daemon-reload\|systemctl --user enable --now' /home/wxb24/.config/herdr/plugins/github/herdr.collie-1edf0e1e987e/scripts/collie-ctl.sh
+9:UNIT="collie"
+360:  systemctl --user daemon-reload
+450:    systemctl --user enable --now "$UNIT"
+525:    systemctl --user daemon-reload 2>/dev/null || true
