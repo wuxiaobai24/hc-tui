@@ -8,6 +8,7 @@ use nsh_engine::{HostCall, HostChannel, HostReply};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -61,12 +62,21 @@ impl ModHost {
     pub fn new(surface: &str, mod_id: &str) -> ModHost {
         let channel = HostChannel::new();
         let (tx, rx) = crossbeam_channel::unbounded::<PendingCall>();
+        let seq = Arc::new(AtomicU64::new(0));
         for name in METHODS {
             let tx = tx.clone();
+            let mod_id = mod_id.to_string();
+            let seq = seq.clone();
             channel.handle(*name, move |call: HostCall| {
                 let name = call.name().to_string();
                 let data = call.data().clone();
                 let reply = call.into_reply();
+                // 调用一到就压进诊断上下文：之后的任何 panic 都带着这三层。
+                crate::diag::record_call(&mod_id, &name, seq.fetch_add(1, Ordering::Relaxed) + 1);
+                // 演练崩溃报告：`HC_TUI_CRASH_ON_HOST_CALL=<方法名>` 让调用到达时 panic。
+                if std::env::var("HC_TUI_CRASH_ON_HOST_CALL").as_deref() == Ok(name.as_str()) {
+                    panic!("injected host-call panic: {name}");
+                }
                 let _ = tx.send(PendingCall { name, data, reply });
             });
         }

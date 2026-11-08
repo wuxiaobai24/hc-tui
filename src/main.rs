@@ -5,6 +5,7 @@ mod cli {
     pub mod completion;
     pub mod config;
     pub mod config_dump;
+    pub mod doctor;
 }
 
 fn main() -> Result<()> {
@@ -12,6 +13,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
+
+    // 崩溃报告在 core / CLI / 模块三条路径共用同一份格式。
+    hc_tui::diag::install();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -49,6 +53,7 @@ fn main() -> Result<()> {
         }
         Some("completion") => cli::completion::run(&args[1..]),
         Some("config") => cli::config::run(&args[1..]),
+        Some("doctor") => cli::doctor::run(&args[1..]),
         Some("notify") => notify_command(&args[1..]),
         Some("ls") => {
             let config = parse_options(&args[1..])?;
@@ -152,6 +157,7 @@ fn usage() {
     );
     println!("       hc-tui completion zsh|bash|fish");
     println!("       hc-tui config check|reset-keys [--config <path>] [--yes]");
+    println!("       hc-tui doctor [--config <path>]");
     println!(
         "       hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]"
     );

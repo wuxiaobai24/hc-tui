@@ -28,6 +28,7 @@ pub struct Report {
 }
 
 /// 把 CLI 参数解析成模块目录：存在的路径优先，其次安装存储，最后配置目录。
+/// 找不到时把查过的位置全列出来。
 pub fn resolve_dir(config: &Config, target: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(target);
     if path.is_dir() {
@@ -36,24 +37,53 @@ pub fn resolve_dir(config: &Config, target: &str) -> Result<PathBuf, String> {
     if let Some(dir) = crate::mods::store::module_root(config, target) {
         return Ok(dir);
     }
-    Err(format!(
-        "no mod at {target}, {}, or {}",
-        config.mods_dir().join(target).display(),
-        config.mods_state_dir().join("store").join(target).display()
+    let situation = if target.contains(std::path::MAIN_SEPARATOR) {
+        "这个路径不存在；绝对路径只按目录查，安装存储按包 ID 查"
+    } else {
+        "这个路径不存在，两个安装存储与两个开发目录里也没有同名的包"
+    };
+    Err(crate::diag::not_found(
+        &format!("找不到模块 {target}"),
+        situation,
+        &searched(config, target),
+        "hc-tui packages list",
     ))
+}
+
+/// `resolve_dir` 查过的全部位置，按查找顺序；绝对路径只按路径查，不再拼目录。
+fn searched(config: &Config, target: &str) -> Vec<String> {
+    let mut found = vec![target.to_string()];
+    if !target.contains(std::path::MAIN_SEPARATOR) {
+        found.push(config.plugins_dir().join(target).display().to_string());
+        found.push(config.mods_dir().join(target).display().to_string());
+        for state in [config.plugins_state_dir(), config.mods_state_dir()] {
+            found.push(format!("{}/records/{target}.json", state.display()));
+            found.push(format!("{}/store/{target}/<代际>", state.display()));
+        }
+    }
+    found.dedup();
+    found
 }
 
 /// 校验并试渲染一个模块。
 pub fn check(config: &Config, target: &str) -> Result<Report, String> {
     let path = resolve_dir(config, target)?;
-    let loaded = crate::pkg::load_dir(&path).map_err(|error| error.to_string())?;
+    let loaded =
+        crate::pkg::load_dir(&path).map_err(|error| crate::pkg::manifest_error(target, &error))?;
     let manifest = &loaded.manifest;
     let id = manifest.id().to_string();
     if *manifest.host_api.get_ref() != crate::plugin::manifest::HOST_API {
-        return Err(format!(
-            "hctui.toml: host_api {} is not supported (host api {})",
-            manifest.host_api.get_ref(),
-            crate::plugin::manifest::HOST_API
+        return Err(crate::diag::detail(
+            &format!(
+                "{target}: host_api {} 不受支持",
+                manifest.host_api.get_ref()
+            ),
+            &format!(
+                "这个包要的宿主 API 是 {}，当前 hc-tui 只讲 {}",
+                manifest.host_api.get_ref(),
+                crate::plugin::manifest::HOST_API
+            ),
+            "hc-tui update",
         ));
     }
     let mut warnings = Vec::new();
@@ -64,21 +94,32 @@ pub fn check(config: &Config, target: &str) -> Result<Report, String> {
     {
         let current = env!("CARGO_PKG_VERSION");
         if compare_versions(minimum, current).is_gt() {
-            return Err(format!(
-                "hctui.toml: needs hc-tui {minimum} or newer (running {current})"
+            return Err(crate::diag::detail(
+                &format!("{target}: 需要 hc-tui {minimum}，当前是 {current}"),
+                "清单要求的最低版本高于正在运行的这个可执行文件",
+                "hc-tui update",
             ));
         }
     }
     let grants = manifest.grants();
     let bundle_path = path.join(manifest.bundle().unwrap_or("dist/bundle.js"));
     if !bundle_path.exists() {
-        return Err(format!(
-            "{}: no dist/bundle.js; run `nsh build -o dist` in {}",
-            bundle_path.display(),
-            path.display()
+        return Err(crate::diag::detail(
+            &format!("{target}: 缺少 {}", bundle_path.display()),
+            "清单声明了界面模块，但没有构建产物",
+            &format!("nsh build -o dist {}", path.display()),
         ));
     }
-    let bundle = nsh_platform_tui::Bundle::read(&bundle_path).map_err(|error| error.to_string())?;
+    let bundle = nsh_platform_tui::Bundle::read(&bundle_path).map_err(|error| {
+        crate::diag::detail(
+            &format!(
+                "{target}: bundle 读不过去 {}: {error}",
+                bundle_path.display()
+            ),
+            "构建产物不是模块运行时能加载的 bundle",
+            &format!("nsh build -o dist {}", path.display()),
+        )
+    })?;
     let runtime = ModRuntime::default();
     let host = host::ModHost::new("s1", &id);
     host.set_params(host::build_params(&host::ParamsContext {
