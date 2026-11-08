@@ -273,10 +273,12 @@ fn subscribe_events(
 /// 取消与日志经本地控制 socket 转发给运行中的 TUI。
 fn plugins_command(args: &[String]) -> Result<()> {
     let Some(group) = args.first().map(String::as_str) else {
-        anyhow::bail!(t(
-            "usage: hc-tui plugins action list|invoke|status|cancel|log"
-        ))
+        anyhow::bail!("{}", packages_usage("plugins"))
     };
+    if wants_help(group) || args[1..].iter().any(|arg| wants_help(arg)) {
+        println!("{}", packages_usage("plugins"));
+        return Ok(());
+    }
     if group == "pane" {
         return plugins_pane(&args[1..]);
     }
@@ -579,12 +581,30 @@ fn wait_for_pane(config: &hc_tui::config::Config, request: &str) -> Result<serde
     }
 }
 
+/// `packages` 的子命令集合。
+const PACKAGE_GROUPS: &str = "list|install|update|link|unlink|uninstall|enable|disable|gc|log|info";
+/// `mods` 的自有子命令，其余与 `packages` 同名。
+const MODS_GROUPS: &str = "list|check|test|build|install|update|uninstall|link|unlink|log|open|close|reload|grant|enable|disable";
+
+/// 一个表面的用法行：`packages` 与 `plugins` / `mods` 两个别名各带自己的子命令。
+/// `--help` 与未知子命令共用这一份文本。
+fn packages_usage(surface: &str) -> String {
+    match surface {
+        "plugins" => format!("usage: hc-tui plugins action|pane|{PACKAGE_GROUPS}"),
+        "mods" => format!("usage: hc-tui mods {MODS_GROUPS}"),
+        _ => format!("usage: hc-tui packages {PACKAGE_GROUPS}"),
+    }
+}
+
+/// `--help` / `-h`：打印用法并以 0 退出。
+fn wants_help(arg: &str) -> bool {
+    arg == "--help" || arg == "-h"
+}
+
 /// `hc-tui packages`：包注册与代际管理的唯一入口。
 fn packages_command(args: &[String]) -> Result<()> {
     let Some(group) = args.first().map(String::as_str) else {
-        anyhow::bail!(t(
-            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log|info"
-        ))
+        anyhow::bail!("{}", packages_usage("packages"))
     };
     packages_manage(group, &args[1..], None)
 }
@@ -593,6 +613,11 @@ fn packages_command(args: &[String]) -> Result<()> {
 /// 包注册与代际管理的唯一入口；`plugins` 与 `mods` 的同名子命令是别名，
 /// 行为一致，只在 stderr 多打一行弃用提示。
 fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<()> {
+    let surface = alias.unwrap_or("packages");
+    if wants_help(group) || args.iter().any(|arg| wants_help(arg)) {
+        println!("{}", packages_usage(surface));
+        return Ok(());
+    }
     let mut config_path = None;
     let mut json = false;
     let mut yes = false;
@@ -639,7 +664,9 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
         index += 1;
     }
     if let Some(alias) = alias {
-        eprintln!("note: `{alias} {group}` is deprecated, use `packages {group}`");
+        if PACKAGE_GROUPS.split('|').any(|known| known == group) {
+            eprintln!("note: `{alias} {group}` is deprecated, use `packages {group}`");
+        }
     }
     if check && group != "update" {
         anyhow::bail!(t1("--check only applies to update, not {}", group));
@@ -694,8 +721,9 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
                     hc_tui::mods::store::unlink(&config, id).map_err(anyhow::Error::msg)?;
                 }
                 Some(_) => anyhow::bail!(t1("{} is not linked", id)),
-                None => hc_tui::plugin::registry::uninstall(&config, id)
-                    .map_err(anyhow::Error::msg)?,
+                None => {
+                    hc_tui::plugin::registry::uninstall(&config, id).map_err(anyhow::Error::msg)?
+                }
             }
             println!("{}", t1("unlinked {}", id));
             sync_services(&config, hc_tui::app::services::Trigger::Enable);
@@ -754,10 +782,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
             }
             Ok(())
         }
-        other => anyhow::bail!(t1(
-            "usage: hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log|info (unknown: {})",
-            other
-        )),
+        other => anyhow::bail!("{} (unknown: {})", packages_usage(surface), other),
     }
 }
 
@@ -806,7 +831,7 @@ fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
         return Ok(());
     }
     if entries.is_empty() {
-        println!("{}", t("no plugins installed"));
+        println!("{}", t("no packages installed"));
     }
     if terminals.is_none() && entries.iter().any(|entry| !entry.services.is_empty()) {
         eprintln!(
@@ -1079,7 +1104,7 @@ fn packages_check(config: &hc_tui::config::Config, id: Option<&str>, json: bool)
         }
     }
     if records.is_empty() {
-        println!("{}", t("no plugins installed"));
+        println!("{}", t("no packages installed"));
         return Ok(());
     }
     let mut checked: Vec<(String, String, String)> = Vec::new();
@@ -1507,10 +1532,12 @@ fn mods_do(config: &hc_tui::config::Config, command: &str, args: serde_json::Val
 
 fn mods_command(args: &[String]) -> Result<()> {
     let Some(sub) = args.first().map(String::as_str) else {
-        anyhow::bail!(t(
-            "usage: hc-tui mods list|check|test|build|install|update|uninstall|link|unlink|log|open|close|reload|grant|enable|disable"
-        ))
+        anyhow::bail!("{}", packages_usage("mods"))
     };
+    if wants_help(sub) || args[1..].iter().any(|arg| wants_help(arg)) {
+        println!("{}", packages_usage("mods"));
+        return Ok(());
+    }
     // 安装类子命令统一走 `packages`；`mods` 只保留一行弃用提示。
     if matches!(
         sub,
@@ -1665,7 +1692,7 @@ fn mods_command(args: &[String]) -> Result<()> {
             println!("{}", t2("grants for {}: {}", id, grants.join(", ")));
             Ok(())
         }
-        other => anyhow::bail!(t1("unknown mods command: {}", other)),
+        other => anyhow::bail!("{} (unknown: {})", packages_usage("mods"), other),
     }
 }
 
