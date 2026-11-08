@@ -1,0 +1,11 @@
+[mod]
+id = "sidebar"
+title = "Sidebar"
+place = "none"
+size = 26
+focusable = false
+host_api = 1
+
+[grants]
+host = ["state"]
+events = ["state.changed", "focus.changed", "app.ready"]

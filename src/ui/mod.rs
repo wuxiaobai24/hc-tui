@@ -3,6 +3,7 @@
 //! 只画 Pane 的内容区；边框、Tab 栏、侧栏、状态栏都不交给终端内容。宽度与中文
 //! 宽字符的对齐由 `term::view` 保证。所有颜色都来自 [`crate::theme`] 的 token。
 
+use ratatui_core::widgets::Widget;
 use ratatui_core::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -35,6 +36,9 @@ use crate::app::interaction::PointerTarget;
 mod chat;
 #[cfg(test)]
 mod m9;
+pub mod mods_bind;
+
+use mods_bind::Plan as ModsBindPlan;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -65,33 +69,36 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     // 外框树算出本轮区域：侧栏、Tab 栏、内容区、模式行与模块区域。
-    let tabs = app
-        .workspace()
-        .map(|workspace| workspace.tabs.len())
-        .unwrap_or(0);
+    // 三块默认区域按模块绑定，模块不可用时该区域仍是内置块。
+    let plan = mods_bind::layout(app, area);
+    let ModsBindPlan {
+        layout,
+        sidebar_hits,
+        tab_bar_hits,
+    } = plan;
     let mode_line = app.mode_line();
-    let params = crate::mods::chrome::LayoutParams {
-        config: &app.config,
-        sidebar_visible: app.sidebar,
-        tab_count: tabs,
-        mode_line: mode_line.is_some(),
-        area,
-    };
-    let layout = app.chrome.layout(params);
     app.mod_regions = layout.mods.clone();
     app.mod_toasts = layout.toasts;
 
     match (layout.sidebar, layout.rail) {
-        (Some(rail), _) => render_sidebar(frame, app, rail, &theme),
+        (Some(rail), _) => render_sidebar(frame.buffer_mut(), app, rail, &theme),
         (None, Some(rail)) => render_rail(frame, app, rail, &theme),
         (None, None) => {
             app.workspace_hits.clear();
             app.agent_hits.clear();
+            // 模块接管侧栏的像素；命中域仍按内置布局登记，鼠标行为不变。
+            if let Some(rect) = sidebar_hits {
+                let mut scratch = Buffer::empty(area);
+                render_sidebar(&mut scratch, app, rect, &theme);
+            }
         }
     }
 
     if let Some(rect) = layout.tab_bar {
-        render_tab_bar(frame, app, rect, &theme);
+        render_tab_bar(frame.buffer_mut(), app, rect, &theme);
+    } else if let Some(rect) = tab_bar_hits {
+        let mut scratch = Buffer::empty(area);
+        render_tab_bar(&mut scratch, app, rect, &theme);
     } else {
         let corner = Rect::new(layout.column.x, layout.column.y, 0, 0);
         app.tab_bar = corner;
@@ -111,7 +118,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         chat::render(frame, app, layout.body, &theme);
     }
     if let (Some(status), Some(line)) = (layout.status, mode_line) {
-        render_mode_line(frame, app, status, &line, &theme);
+        render_mode_line(frame.buffer_mut(), app, status, &line, &theme);
     }
     render_modals(frame, app, area, &theme);
 }
@@ -533,7 +540,7 @@ fn render_mobile_switcher(frame: &mut Frame, app: &mut App, area: Rect, theme: &
     );
 }
 
-fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+fn render_tab_bar(buffer: &mut Buffer, app: &mut App, area: Rect, theme: &Theme) {
     app.tab_bar = area;
     let full_area = area;
     let menu_width = 8.min(area.width);
@@ -645,15 +652,16 @@ fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         ));
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(background), area);
-    frame.render_widget(
-        Paragraph::new(t(" menu ")).style(
+    Paragraph::new(Line::from(spans))
+        .style(background)
+        .render(area, buffer);
+    Paragraph::new(t(" menu "))
+        .style(
             Style::default()
                 .bg(theme.color("accent"))
                 .fg(theme.color("tab_active_fg")),
-        ),
-        app.menu_hit,
-    );
+        )
+        .render(app.menu_hit, buffer);
     app.tab_bar = full_area;
 }
 
@@ -696,7 +704,7 @@ fn workspace_summary(workspace: &crate::model::Workspace) -> String {
     t2(text, tabs, panes)
 }
 
-fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+fn render_sidebar(buffer: &mut Buffer, app: &mut App, area: Rect, theme: &Theme) {
     app.sidebar_area = area;
     app.workspace_hits.clear();
     app.agent_hits.clear();
@@ -709,7 +717,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .border_style(Style::default().fg(theme.color("border")))
         .style(Style::default().bg(theme.color("sidebar_bg")));
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    block.render(area, buffer);
     if inner.width < 4 || inner.height < 2 {
         return;
     }
@@ -1061,16 +1069,14 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             "»"
         };
         let last = inner.y + inner.height - 1;
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                glyph,
-                Style::default().fg(theme.color("dim")),
-            ))),
-            Rect::new(inner.x + inner.width - 1, last, 1, 1),
-        );
+        Paragraph::new(Line::from(Span::styled(
+            glyph,
+            Style::default().fg(theme.color("dim")),
+        )))
+        .render(Rect::new(inner.x + inner.width - 1, last, 1, 1), buffer);
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    Paragraph::new(lines).render(inner, buffer);
 }
 
 /// 段标题：左边名字，右边状态词。
@@ -1349,7 +1355,7 @@ fn render_toast(frame: &mut Frame, toast: &Toast, content: Rect, theme: &Theme) 
 }
 
 fn render_mode_line(
-    frame: &mut Frame,
+    buffer: &mut Buffer,
     app: &App,
     area: Rect,
     line: &(String, String),
@@ -1394,7 +1400,9 @@ fn render_mode_line(
             ));
         }
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(background), area);
+    Paragraph::new(Line::from(spans))
+        .style(background)
+        .render(area, buffer);
 }
 
 pub(crate) fn clear_area(frame: &mut Frame, area: Rect, theme: &Theme) {

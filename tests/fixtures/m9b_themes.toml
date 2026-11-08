@@ -1,0 +1,92 @@
+# m9b 逐格对等测试使用的两套主题。
+#
+# 取值约束来自 nsh TUI 渲染器（见 /home/wxb24/tickets/m9b/evidence/02-nsh-cell-probe.txt）：
+# - 前景色只能落在 Color::Reset（nsh 把中性色画成 Reset）或 16 色名上，所以所有前景
+#   token 取 "reset"；
+# - 底色只有写入字形格的字面 RGB 能被模块照抄，所以区域底色 token 也取 "reset"，
+#   只有需要对比的色块（选中行、激活 Tab、Space 图标）用具体 RGB。
+#
+# 两套主题形状相同、颜色不同：模块必须真的从 host.params.theme.tokens 取色，
+# 硬编码任何一套都会在另一套上出现差异。
+
+[[theme]]
+name = "m9b-parity-a"
+
+[theme.tokens]
+bg = "reset"
+fg = "reset"
+dim = "reset"
+border = "reset"
+border_focused = "reset"
+accent = "reset"
+tab_bar_bg = "reset"
+tab_bar_fg = "reset"
+tab_active_bg = "#00c8c8"
+tab_active_fg = "reset"
+status_bar_bg = "reset"
+status_bar_fg = "reset"
+sidebar_bg = "reset"
+sidebar_selected_bg = "#2b4c8c"
+space_teal = "#20a096"
+space_green = "#3aa66a"
+space_blue = "#5585e0"
+space_pink = "#cc5897"
+space_orange = "#d87b4a"
+space_purple = "#896fde"
+space_icon_fg = "reset"
+sidebar_title = "reset"
+selection_bg = "#3c5a8c"
+selection_fg = "reset"
+cursor_bg = "reset"
+cursor_fg = "reset"
+agent_blocked = "reset"
+agent_error = "reset"
+agent_working = "reset"
+agent_done = "reset"
+agent_idle = "reset"
+agent_unknown = "reset"
+badge_bg = "#c8b43c"
+badge_fg = "reset"
+toast_bg = "reset"
+toast_fg = "reset"
+
+[[theme]]
+name = "m9b-parity-b"
+
+[theme.tokens]
+bg = "reset"
+fg = "reset"
+dim = "reset"
+border = "reset"
+border_focused = "reset"
+accent = "reset"
+tab_bar_bg = "reset"
+tab_bar_fg = "reset"
+tab_active_bg = "#c820c8"
+tab_active_fg = "reset"
+status_bar_bg = "reset"
+status_bar_fg = "reset"
+sidebar_bg = "reset"
+sidebar_selected_bg = "#4c2070"
+space_teal = "#10b0b0"
+space_green = "#50b050"
+space_blue = "#4060b0"
+space_pink = "#b050b0"
+space_orange = "#b07030"
+space_purple = "#7050b0"
+space_icon_fg = "reset"
+sidebar_title = "reset"
+selection_bg = "#1030a0"
+selection_fg = "reset"
+cursor_bg = "reset"
+cursor_fg = "reset"
+agent_blocked = "reset"
+agent_error = "reset"
+agent_working = "reset"
+agent_done = "reset"
+agent_idle = "reset"
+agent_unknown = "reset"
+badge_bg = "#b09030"
+badge_fg = "reset"
+toast_bg = "reset"
+toast_fg = "reset"
