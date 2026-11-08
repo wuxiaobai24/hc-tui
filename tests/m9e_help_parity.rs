@@ -468,9 +468,15 @@ fn no_mods_falls_back_to_the_builtin_panel() {
     let _ = app.execute_action("app.help", serde_json::json!({}));
     assert!(app.help.is_some(), "builtin overlay under --no-mods");
     assert!(app.mods.surfaces.is_empty(), "no module surface opened");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.help.is_none(), "Esc closed the builtin overlay");
 
     app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
     app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+    assert!(
+        app.help.is_some() && app.mods.surfaces.is_empty(),
+        "keys.help fell back to the builtin overlay"
+    );
     terminal
         .draw(|frame| ui::draw(frame, &mut app))
         .expect("draw");
