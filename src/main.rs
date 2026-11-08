@@ -3,6 +3,7 @@ use hc_tui::i18n::{t, t1, t2, t3};
 
 mod cli {
     pub mod completion;
+    pub mod config;
 }
 
 fn main() -> Result<()> {
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("completion") => cli::completion::run(&args[1..]),
+        Some("config") => cli::config::run(&args[1..]),
         Some("ls") => {
             let config = parse_options(&args[1..])?;
             println!(
@@ -142,6 +144,7 @@ fn usage() {
         t("       hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>]")
     );
     println!("       hc-tui completion zsh|bash|fish");
+    println!("       hc-tui config check|reset-keys [--config <path>] [--yes]");
     println!(
         "{}",
         t("       hc-tui do <command> [<terminal>] [JSON arguments] [options]")

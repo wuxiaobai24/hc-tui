@@ -13,6 +13,59 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::theme::{self, Theme};
 
+/// 文件里的位置，1 起算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
+}
+
+/// 一条配置诊断：文件内的行列与原因。
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    /// 1 起算的行；0 表示问题不在某一行上。
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+
+impl Diagnostic {
+    fn at(position: Position, message: impl Into<String>) -> Self {
+        Self {
+            line: position.line,
+            column: position.column,
+            message: message.into(),
+        }
+    }
+
+    fn whole(message: impl Into<String>) -> Self {
+        Self {
+            line: 0,
+            column: 0,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.line == 0 {
+            write!(formatter, "{}", self.message)
+        } else {
+            write!(formatter, "{}:{}: {}", self.line, self.column, self.message)
+        }
+    }
+}
+
+/// `config check` 的一行：错误带 `文件:行:列`。
+pub fn describe(path: &std::path::Path, diagnostic: &Diagnostic) -> String {
+    if diagnostic.line == 0 {
+        format!("{}: {}", path.display(), diagnostic.message)
+    } else {
+        format!("{}:{}", path.display(), diagnostic)
+    }
+}
+
 /// 分隔线绘制策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneBorders {
@@ -588,7 +641,14 @@ impl Keys {
         ]
     }
 
-    fn path(&mut self, name: &str, value: &str, warnings: &mut Vec<String>) {
+    fn path(
+        &mut self,
+        name: &str,
+        value: &str,
+        warnings: &mut Vec<String>,
+        errors: &mut Vec<Diagnostic>,
+        position: Position,
+    ) {
         let slot = match name {
             "prefix" => &mut self.prefix,
             "help" => &mut self.help,
@@ -650,7 +710,7 @@ impl Keys {
             "machines" => &mut self.machines,
             "paste_image" => &mut self.paste_image,
             other => {
-                warnings.push(format!("[keys] 未知动作 {other}，已忽略"));
+                errors.push(Diagnostic::at(position, format!("[keys] 未知动作 {other}")));
                 return;
             }
         };
@@ -659,6 +719,33 @@ impl Keys {
             Err(error) => warnings.push(format!("[keys] {error}")),
         }
     }
+}
+
+/// 冲突比较用的按键规范式：字母大小写与 shift 折算成同一种写法。
+fn binding_key(binding: Binding) -> Option<String> {
+    let (prefix, code, modifiers) = match binding {
+        Binding::Off => return None,
+        Binding::Prefix(code, modifiers) => (true, code, modifiers),
+        Binding::Direct(code, modifiers) => (false, code, modifiers),
+    };
+    let (code, modifiers) = match code {
+        KeyCode::Char(character) => {
+            let shift = modifiers.contains(KeyModifiers::SHIFT) || character.is_uppercase();
+            let modifiers = if shift {
+                modifiers | KeyModifiers::SHIFT
+            } else {
+                modifiers - KeyModifiers::SHIFT
+            };
+            (KeyCode::Char(character.to_ascii_lowercase()), modifiers)
+        }
+        _ => (code, modifiers),
+    };
+    let binding = if prefix {
+        Binding::Prefix(code, modifiers)
+    } else {
+        Binding::Direct(code, modifiers)
+    };
+    Some(binding.to_string().trim_matches('"').to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -739,6 +826,12 @@ pub struct Config {
     pub state_path: PathBuf,
     /// 加载期发现的问题，启动后显示一次。
     pub warnings: Vec<String>,
+    /// `config check` 用的错误：语法、未知键、重复键，带行列。
+    pub errors: Vec<Diagnostic>,
+    /// 配置文件里出现过的键及位置：键是 `section.key`。
+    pub positions: std::collections::BTreeMap<String, Position>,
+    /// `[theme] name` 在文件里的位置；`None` 表示没写过这个键。
+    pub theme_name_position: Option<Position>,
 }
 
 /// XDG 目录：变量存在且非空时用它，否则退回 `$HOME/<fallback>`。
@@ -785,6 +878,47 @@ impl Config {
             .parent()
             .map(|parent| parent.join("plugins"))
             .unwrap_or_else(|| std::path::PathBuf::from("plugins"))
+    }
+
+    /// 同一按键绑到两个动作。默认值里已知的重键（`docs/usage.md`「默认绑定冲突」）
+    /// 不算配置引入的冲突；至少一侧被配置改过才算。
+    pub fn key_conflicts(&self) -> Vec<Diagnostic> {
+        let defaults: BTreeMap<&str, Binding> = Keys::default().entries().into_iter().collect();
+        let mut groups: BTreeMap<String, Vec<(String, bool, Option<Position>)>> = BTreeMap::new();
+        for (name, binding) in self.keys.entries() {
+            let Some(key) = binding_key(binding) else {
+                continue;
+            };
+            let changed = defaults.get(name) != Some(&binding);
+            let position = self.positions.get(&format!("keys.{name}")).copied();
+            groups
+                .entry(key)
+                .or_default()
+                .push((name.to_string(), changed, position));
+        }
+        for (index, command) in self.commands.iter().enumerate() {
+            let Some(key) = binding_key(command.key) else {
+                continue;
+            };
+            groups.entry(key).or_default().push((
+                format!("[[keys.command]] 第 {} 条", index + 1),
+                true,
+                None,
+            ));
+        }
+        groups
+            .into_iter()
+            .filter(|(_, actions)| actions.len() > 1 && actions.iter().any(|action| action.1))
+            .map(|(key, actions)| {
+                let position = actions
+                    .iter()
+                    .filter_map(|action| action.2)
+                    .min_by_key(|position| (position.line, position.column))
+                    .unwrap_or_default();
+                let labels: Vec<&str> = actions.iter().map(|action| action.0.as_str()).collect();
+                Diagnostic::at(position, format!("键位冲突 {key}：{}", labels.join("、")))
+            })
+            .collect()
     }
 
     /// 撤销列表路径。
@@ -856,6 +990,9 @@ impl Default for Config {
             config_path: xdg_dir("XDG_CONFIG_HOME", ".config").join("hc-tui/config.toml"),
             state_path: xdg_dir("XDG_STATE_HOME", ".local/state").join("hc-tui/state.json"),
             warnings: Vec::new(),
+            errors: Vec::new(),
+            positions: std::collections::BTreeMap::new(),
+            theme_name_position: None,
         }
     }
 }
@@ -890,25 +1027,43 @@ impl Config {
                 config.apply(&Document {
                     values: Table::new(),
                     arrays: Vec::new(),
+                    array_positions: Vec::new(),
+                    positions: BTreeMap::new(),
+                    duplicates: Vec::new(),
                 });
                 config.load_panel_files();
                 return config;
             }
             Err(error) => {
-                config
-                    .warnings
-                    .push(format!("读取 {}: {error}", path.display()));
+                let diagnostic = Diagnostic::whole(format!("读取文件失败：{error}"));
+                config.warnings.push(describe(&path, &diagnostic));
+                config.errors.push(diagnostic);
                 return config;
             }
         };
         let document = match parse_toml(&text) {
             Ok(document) => document,
             Err(error) => {
-                config.warnings.push(format!("{}: {error}", path.display()));
+                config.warnings.push(describe(&path, &error));
+                config.errors.push(error);
                 return config;
             }
         };
-        config.apply(&document);
+        config.errors = document
+            .duplicates
+            .iter()
+            .map(|(position, message)| Diagnostic::at(*position, message.clone()))
+            .collect();
+        config.positions = document.positions.clone();
+        let errors = config.apply(&document);
+        config.errors.extend(errors);
+        // 运行时没有 `config check`，错误也要进状态栏提示一次。
+        let notes: Vec<String> = config
+            .errors
+            .iter()
+            .map(|error| describe(&path, error))
+            .collect();
+        config.warnings.extend(notes);
         config.load_panel_files();
         config
     }
@@ -945,9 +1100,11 @@ impl Config {
         }
     }
 
-    fn apply(&mut self, document: &Document) {
+    fn apply(&mut self, document: &Document) -> Vec<Diagnostic> {
         let mut warnings = Vec::new();
+        let mut errors = Vec::new();
         let mut theme_name = self.theme.name.clone();
+        let mut theme_name_position = None;
         let mut theme_source = self.theme_source.clone();
         let mut custom: Vec<(String, String)> = Vec::new();
 
@@ -1122,7 +1279,10 @@ impl Config {
                         .clamp(1, 240) as u32
                 }
                 "theme.name" => match value.text() {
-                    Some(name) => theme_name = name.to_string(),
+                    Some(name) => {
+                        theme_name = name.to_string();
+                        theme_name_position = Some(document.position(path));
+                    }
                     None => warnings.push(format!("{path}: 需要字符串")),
                 },
                 "theme.source" => match value.text() {
@@ -1174,7 +1334,13 @@ impl Config {
                 _ => {
                     if let Some(name) = path.strip_prefix("keys.") {
                         if let Some(text) = value.text() {
-                            self.keys.path(name, text, &mut warnings);
+                            self.keys.path(
+                                name,
+                                text,
+                                &mut warnings,
+                                &mut errors,
+                                document.position(path),
+                            );
                         } else {
                             warnings.push(format!("{path}: 需要字符串"));
                         }
@@ -1183,6 +1349,11 @@ impl Config {
                             Some(text) => custom.push((name.to_string(), text.to_string())),
                             None => warnings.push(format!("{path}: 需要颜色字符串")),
                         }
+                    } else {
+                        errors.push(Diagnostic::at(
+                            document.position(path),
+                            format!("未知配置键 {path}"),
+                        ));
                     }
                 }
             }
@@ -1191,17 +1362,29 @@ impl Config {
         let (theme, theme_warnings) = theme::source::apply(&theme_name, &theme_source, &custom);
         self.theme = theme;
         self.theme_source = theme_source;
+        self.theme_name_position = theme_name_position;
         self.theme_custom = custom;
         warnings.extend(theme_warnings);
-        self.parse_commands(document, &mut warnings);
+        self.parse_commands(document, &mut warnings, &mut errors);
         self.warnings.extend(warnings);
+        errors
     }
 }
 
 impl Config {
     /// 解析 `[[keys.command]]` 数组表。坏条目只警告，不影响其它条目。
-    fn parse_commands(&mut self, document: &Document, warnings: &mut Vec<String>) {
+    fn parse_commands(
+        &mut self,
+        document: &Document,
+        warnings: &mut Vec<String>,
+        errors: &mut Vec<Diagnostic>,
+    ) {
         for (index, (name, table)) in document.arrays.iter().enumerate() {
+            let position = document
+                .array_positions
+                .get(index)
+                .copied()
+                .unwrap_or_default();
             if name == "panels" {
                 if let (Some(name), Some(command)) = (
                     table.get("name").and_then(Value::text),
@@ -1223,7 +1406,7 @@ impl Config {
                 continue;
             }
             if name != "keys.command" {
-                warnings.push(format!("未知的数组表 [[{name}]]，已忽略"));
+                errors.push(Diagnostic::at(position, format!("未知的数组表 [[{name}]]")));
                 continue;
             }
             let position = index + 1;
@@ -1289,9 +1472,108 @@ impl Config {
 type Table = BTreeMap<String, Value>;
 
 /// 解析结果：`[section]` 里的键值，以及 `[[name]]` 数组表。
+#[derive(Debug)]
 struct Document {
     values: Table,
     arrays: Vec<(String, Table)>,
+    /// 数组表头部的位置，与 `arrays` 对齐。
+    array_positions: Vec<Position>,
+    /// 每个键在文件里的位置：键是 `section.key`。
+    positions: BTreeMap<String, Position>,
+    /// 重复定义的键：第二次出现的位置与原因。
+    duplicates: Vec<(Position, String)>,
+}
+
+impl Document {
+    /// 某个键在文件里的位置；没记下来时返回零位置。
+    fn position(&self, path: &str) -> Position {
+        self.positions.get(path).copied().unwrap_or_default()
+    }
+}
+
+/// `[keys]` 段的重置计划。
+#[derive(Debug, Clone)]
+pub struct KeysReset {
+    /// 替换后的全文。
+    pub text: String,
+    /// 被替换的第一行与最后一行（1 起算，含）。
+    pub first_line: usize,
+    pub last_line: usize,
+    /// 文件里其余的表名，按出现顺序。
+    pub sections: Vec<String>,
+}
+
+/// `[keys]` 段的默认内容：`preset` 加全部默认绑定。
+fn default_keys_section() -> String {
+    let mut out = String::from("[keys]\npreset = \"default\"   # default | zellij\n");
+    for (name, binding) in Keys::default().entries() {
+        out.push_str(&format!("{name} = {binding}\n"));
+    }
+    out
+}
+
+/// 一行是表头时返回表名（`[name]` 与 `[[name]]` 都算）。
+fn header_name(line: &str) -> Option<&str> {
+    let trimmed = strip_comment(line).trim();
+    let inner = if let Some(inner) = trimmed.strip_prefix("[[") {
+        inner.strip_suffix("]]")?
+    } else {
+        let inner = trimmed.strip_prefix('[')?;
+        inner.strip_suffix(']')?
+    };
+    Some(inner.trim())
+}
+
+/// 把 `[keys]` 段换成默认键位，其它行原样保留；没有 `[keys]` 段时返回 `None`。
+pub fn reset_keys(text: &str) -> Option<KeysReset> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let start = lines
+        .iter()
+        .position(|line| header_name(line) == Some("keys"))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| header_name(line).is_some())
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let sections: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != start)
+        .filter_map(|(_, line)| header_name(line).map(str::to_string))
+        .collect();
+    // 段尾的空行是段落分隔，不跟着换成默认键位。
+    let mut last = end;
+    while last > start + 1 && strip_comment(lines[last - 1]).trim().is_empty() {
+        last -= 1;
+    }
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut block = default_keys_section();
+    if eol == "\r\n" {
+        block = block.replace('\n', eol);
+    }
+    if last == lines.len() && !text.ends_with('\n') {
+        let keep = block.trim_end_matches(eol).len();
+        block.truncate(keep);
+    }
+    let mut output = String::new();
+    for line in &lines[..start] {
+        output.push_str(line);
+    }
+    if start > 0 && !output.ends_with('\n') {
+        output.push_str(eol);
+    }
+    output.push_str(&block);
+    for line in &lines[last..] {
+        output.push_str(line);
+    }
+    Some(KeysReset {
+        text: output,
+        first_line: start + 1,
+        last_line: last,
+        sections,
+    })
 }
 
 /// `--default-config` 的输出：当前支持的每个字段。
@@ -1459,10 +1741,8 @@ pub fn default_config_text() -> String {
     out.push_str("# request_path = \"/path/to/request.mp3\"\n");
     out.push_str("\n[session]\n");
     out.push_str(&format!("restore = {}\n", config.restore));
-    out.push_str("\n[keys]\npreset = \"default\"   # default | zellij\n");
-    for (name, binding) in config.keys.entries() {
-        out.push_str(&format!("{name} = {binding}\n"));
-    }
+    out.push('\n');
+    out.push_str(&default_keys_section());
     out.push_str(
         "\n# 自定义命令：key 支持 prefix+... 或 ctrl+alt+...；type 为 shell / pane / popup / action\n\
          # [[keys.command]]\n\
@@ -1558,69 +1838,115 @@ impl Value {
 }
 
 /// 解析 TOML 子集。`[section]` 的键合并成 `section.key`；`[[name]]` 每次开一条新表。
-fn parse_toml(text: &str) -> Result<Document, String> {
+fn parse_toml(text: &str) -> Result<Document, Diagnostic> {
     let mut values = Table::new();
     let mut arrays: Vec<(String, Table)> = Vec::new();
+    let mut array_positions: Vec<Position> = Vec::new();
+    let mut positions: BTreeMap<String, Position> = BTreeMap::new();
+    let mut duplicates: Vec<(Position, String)> = Vec::new();
     let mut section = String::new();
-    let mut current: Option<(String, Table)> = None;
+    let mut current: Option<(String, Table, Position)> = None;
     for (index, raw) in text.lines().enumerate() {
-        let line = strip_comment(raw).trim().to_string();
+        let without_comment = strip_comment(raw);
+        let line = without_comment.trim();
         if line.is_empty() {
             continue;
         }
+        let position = Position {
+            line: index + 1,
+            column: without_comment[..without_comment.len() - line.len()]
+                .chars()
+                .count()
+                + 1,
+        };
         if let Some(inner) = line.strip_prefix("[[") {
             let name = inner
                 .strip_suffix("]]")
-                .ok_or_else(|| format!("第 {} 行：数组表缺少 ]]", index + 1))?
+                .ok_or_else(|| Diagnostic::at(position, "数组表缺少 ]]"))?
                 .trim();
             if name.is_empty() {
-                return Err(format!("第 {} 行：数组表名为空", index + 1));
+                return Err(Diagnostic::at(position, "数组表名为空"));
             }
             if let Some(entry) = current.take() {
-                arrays.push(entry);
+                arrays.push((entry.0, entry.1));
+                array_positions.push(entry.2);
             }
-            current = Some((name.to_string(), Table::new()));
+            current = Some((name.to_string(), Table::new(), position));
             section.clear();
             continue;
         }
         if let Some(inner) = line.strip_prefix('[') {
             let name = inner
                 .strip_suffix(']')
-                .ok_or_else(|| format!("第 {} 行：section 缺少 ]", index + 1))?
+                .ok_or_else(|| Diagnostic::at(position, "section 缺少 ]"))?
                 .trim();
             if name.is_empty() {
-                return Err(format!("第 {} 行：section 名为空", index + 1));
+                return Err(Diagnostic::at(position, "section 名为空"));
             }
             if let Some(entry) = current.take() {
-                arrays.push(entry);
+                arrays.push((entry.0, entry.1));
+                array_positions.push(entry.2);
             }
             section = name.to_string();
             continue;
         }
         let (key, rest) = line
             .split_once('=')
-            .ok_or_else(|| format!("第 {} 行：缺少 =", index + 1))?;
+            .ok_or_else(|| Diagnostic::at(position, "缺少 ="))?;
         let key = key.trim().to_string();
+        let label = match &current {
+            Some((name, _, _)) => format!("{name}.{key}"),
+            None if section.is_empty() => key.clone(),
+            None => format!("{section}.{key}"),
+        };
+        let value_start = line.len() - rest.len() + (rest.len() - rest.trim_start().len());
+        let value_position = Position {
+            line: position.line,
+            column: position.column + line[..value_start].chars().count(),
+        };
         let value = parse_value(rest.trim())
-            .map_err(|error| format!("第 {} 行 {key}: {error}", index + 1))?;
+            .map_err(|error| Diagnostic::at(value_position, format!("{label}: {error}")))?;
         match &mut current {
-            Some((_, table)) => {
-                table.insert(key, value);
+            Some((name, table, header)) => {
+                if table.insert(key.clone(), value).is_some() {
+                    duplicates.push((
+                        value_position,
+                        format!(
+                            "[[{name}]]（第 {} 行开始）里的键 {key} 重复定义",
+                            header.line
+                        ),
+                    ));
+                }
             }
             None => {
                 let path = if section.is_empty() {
-                    key
+                    key.clone()
                 } else {
                     format!("{section}.{key}")
                 };
-                values.insert(path, value);
+                if values.insert(path.clone(), value).is_some() {
+                    let table = if section.is_empty() {
+                        "顶层".to_string()
+                    } else {
+                        format!("[{section}]")
+                    };
+                    duplicates.push((value_position, format!("{table} 里的键 {key} 重复定义")));
+                }
+                positions.insert(path, position);
             }
         }
     }
     if let Some(entry) = current.take() {
-        arrays.push(entry);
+        arrays.push((entry.0, entry.1));
+        array_positions.push(entry.2);
     }
-    Ok(Document { values, arrays })
+    Ok(Document {
+        values,
+        arrays,
+        array_positions,
+        positions,
+        duplicates,
+    })
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -2047,15 +2373,107 @@ mod tests {
     fn unknown_keys_are_reported_not_fatal() {
         let mut config = Config::default();
         let mut warnings = Vec::new();
-        config.keys.path("new_tab", "prefix+t", &mut warnings);
-        config.keys.path("nonsense", "prefix+y", &mut warnings);
-        config
-            .keys
-            .path("close_tab", "prefix+notakey", &mut warnings);
-        assert!(warnings.len() == 2);
+        let mut errors = Vec::new();
+        config.keys.path(
+            "new_tab",
+            "prefix+t",
+            &mut warnings,
+            &mut errors,
+            Position::default(),
+        );
+        config.keys.path(
+            "nonsense",
+            "prefix+y",
+            &mut warnings,
+            &mut errors,
+            Position::default(),
+        );
+        config.keys.path(
+            "close_tab",
+            "prefix+notakey",
+            &mut warnings,
+            &mut errors,
+            Position::default(),
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("未知动作 nonsense"));
         assert_eq!(
             config.keys.new_tab,
             Binding::Prefix(KeyCode::Char('t'), KeyModifiers::NONE)
         );
+    }
+
+    #[test]
+    fn syntax_errors_carry_line_and_column() {
+        let error = parse_toml("[theme]\nname = \"nord\n").unwrap_err();
+        assert_eq!((error.line, error.column), (2, 8), "{error}");
+        assert!(error.message.contains("结束引号"), "{error}");
+        let error = parse_toml("[ui\nsidebar = true\n").unwrap_err();
+        assert_eq!((error.line, error.column), (1, 1), "{error}");
+        assert!(error.message.contains("section 缺少 ]"), "{error}");
+    }
+
+    #[test]
+    fn unknown_and_duplicate_keys_are_errors() {
+        let path = temp_file("unknown", "[ui]\nsiderbar = false\n");
+        let config = Config::load(Some(path));
+        assert_eq!(config.errors.len(), 1, "{:?}", config.errors);
+        assert_eq!((config.errors[0].line, config.errors[0].column), (2, 1));
+        assert!(
+            config.errors[0].message.contains("未知配置键 ui.siderbar"),
+            "{:?}",
+            config.errors
+        );
+        // 运行时没有 `config check`：同一个问题进状态栏提示。
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert!(config.warnings[0].contains("未知配置键 ui.siderbar"));
+
+        let path = temp_file("duplicate", "[ui]\nsidebar = true\nsidebar = false\n");
+        let config = Config::load(Some(path));
+        assert_eq!(config.errors.len(), 1, "{:?}", config.errors);
+        assert_eq!((config.errors[0].line, config.errors[0].column), (3, 11));
+        assert!(
+            config.errors[0].message.contains("重复定义"),
+            "{:?}",
+            config.errors
+        );
+        // 重复键只报一次，不得连累运行时取值。
+        assert!(!config.sidebar);
+    }
+
+    #[test]
+    fn key_conflicts_name_the_introducing_binding() {
+        let path = temp_file("conflict", "[keys]\nnew_tab = \"prefix+q\"\n");
+        let config = Config::load(Some(path));
+        assert!(config.errors.is_empty(), "{:?}", config.errors);
+        let conflicts = config.key_conflicts();
+        assert_eq!(conflicts.len(), 1, "{:?}", conflicts);
+        assert!(conflicts[0].message.contains("prefix+q"), "{:?}", conflicts);
+        assert!(conflicts[0].message.contains("new_tab"), "{:?}", conflicts);
+        assert!(conflicts[0].message.contains("detach"), "{:?}", conflicts);
+        assert_eq!((conflicts[0].line, conflicts[0].column), (2, 1));
+
+        // 默认值里已知的三对重键不是配置引入的。
+        let path = temp_file("default-conflicts", &default_config_text());
+        assert!(Config::load(Some(path)).key_conflicts().is_empty());
+    }
+
+    #[test]
+    fn reset_keys_replaces_only_the_keys_section() {
+        let text = "[ui]\nsidebar = false\n\n[keys]\nnew_tab = \"prefix+q\"\npreset = \"zellij\"\n\n[theme]\nname = \"nord\"\n";
+        let plan = reset_keys(text).unwrap();
+        assert_eq!((plan.first_line, plan.last_line), (4, 6));
+        assert_eq!(plan.sections, vec!["ui", "theme"]);
+        assert!(plan.text.contains("sidebar = false"));
+        assert!(plan.text.contains("name = \"nord\""));
+        assert!(!plan.text.contains("new_tab = \"prefix+q\""));
+        assert!(plan.text.contains("new_tab = \"prefix+c\""));
+        assert!(plan.text.contains("preset = \"default\""));
+        assert!(plan.text.contains("\n\n[theme]"));
+        let document = parse_toml(&plan.text).unwrap();
+        assert!(document.values.contains_key("ui.sidebar"));
+        assert!(document.values.contains_key("theme.name"));
+        assert!(reset_keys("[ui]\nsidebar = true\n").is_none());
     }
 }
