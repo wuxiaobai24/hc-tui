@@ -1,0 +1,37 @@
+---
+import { getCollection, getEntry, render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import { href } from '../../lib/links';
+
+export async function getStaticPaths() {
+  const docs = await getCollection('docs');
+  return docs.map((entry) => ({
+    params: { slug: entry.id },
+    props: { id: entry.id },
+  }));
+}
+
+const entry = await getEntry('docs', Astro.props.id);
+const docs = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
+const { Content } = await render(entry);
+const p = (target: string) => href(Astro.url.pathname, target);
+---
+
+<Base title={`${entry.data.title} · hc-tui`} description={entry.data.summary}>
+  <article class="prose">
+    <nav class="doc-nav" aria-label="文档页">
+      {docs.map((doc) => (
+        <a
+          href={p(`docs/${doc.id}/`)}
+          aria-current={doc.id === entry.id ? 'page' : undefined}
+        >
+          {doc.data.title}
+        </a>
+      ))}
+    </nav>
+    <h1>{entry.data.title}</h1>
+    <p class="summary">{entry.data.summary}</p>
+    <Content />
+    <p class="spec">完整规格见 <code>docs/{entry.data.spec}.md</code>。</p>
+  </article>
+</Base>

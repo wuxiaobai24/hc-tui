@@ -1,0 +1,236 @@
+---
+import Base from '../layouts/Base.astro';
+import Term from '../components/Term.astro';
+import Feature from '../components/Feature.astro';
+import { href } from '../lib/links';
+
+const p = (target: string) => href(Astro.url.pathname, target);
+
+const docLinks = [
+  { target: 'docs/install/', title: '安装', text: '发行包、升级与源码构建。' },
+  { target: 'docs/packages/', title: '包与插件', text: '清单、动作、终端入口、常驻服务、界面模块。' },
+  { target: 'docs/cli/', title: 'CLI', text: 'commands / ls / do、事件流与 packages 子命令。' },
+  { target: 'docs/architecture/', title: '架构', text: 'core 与 TUI 的分工、共享布局、扩展沙箱。' },
+  { target: 'docs/faq/', title: 'FAQ', text: '常见问题与已知边界。' },
+];
+---
+
+<Base
+  title="hc-tui — 接 herdr-core 的终端工作台"
+  description="hc-tui 是接 herdr-core、与 herdr-app 共享布局的终端工作台。core 持有程序，TUI 负责界面。"
+>
+  <section class="hero">
+    <p class="eyebrow">herdr-core · 终端工作台</p>
+    <h1>hc-tui</h1>
+    <p class="lede">
+      接 herdr-core、与 herdr-app 共享布局的终端工作台。<strong>core 持有程序，TUI 负责界面</strong>；
+      远程传输直接复用 core 的 machine 链路。
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href={p('docs/install/')}>安装</a>
+      <a class="btn" href={p('docs/packages/')}>读包与插件</a>
+      <a class="btn" href={p('docs/architecture/')}>看架构</a>
+    </div>
+    <p class="cite">出处 <code>README.md:1-5</code></p>
+
+    <Term title="hc-tui · 本地控制通道" note="真实输出">
+<span class="p">$</span> hc-tui do pane.split '&#123;"direction":"right"&#125;'
+&#123;"accepted":true,"confirmation_pending":false&#125;
+
+<span class="p">$</span> hc-tui do pane.split not-json
+Error: unknown option: not-json
+    </Term>
+    <p class="cite">命令与输出：core 0.1.18 · hc-tui 0.4.3 本机实测</p>
+  </section>
+
+  <section id="manifest">
+    <h2>一份清单，四类能力</h2>
+    <p class="section-lede">
+      动作、终端入口、常驻服务和界面模块共用同一份清单、同一个存储代际与同一个注册表。
+      一个包可以只贡献其中一部分；能力标记由清单推导，不在清单里手写声明。
+    </p>
+    <div class="split">
+      <Term title="examples/packages/git-board/hctui.toml" note="节选">
+manifest_version = 2
+id = "dev.hctui.pkg.git-board"
+
+[[actions]]
+id = "summary"
+argv = ["sh", "./bin/summary.sh"]
+[actions.args]
+type = "object"
+properties = &#123; short = &#123; type = "boolean", default = true &#125; &#125;
+
+[[terminals]]
+id = "git-ui"
+argv = ["lazygit"]
+placement = "right"
+
+[module]
+title = "Git board"
+bundle = "dist/bundle.js"
+place = "right"
+size = 32
+      </Term>
+      <div class="grid-2">
+        <Feature title="动作" cite="docs/plugins.md:22, docs/plugins.md:80">
+          <p><code>[[actions]]</code> 进入命令目录、命令面板与 Pane 右键菜单；<code>args</code> 是 JSON Schema 子集。</p>
+        </Feature>
+        <Feature title="终端入口" cite="docs/plugins.md:175-183">
+          <p><code>[[terminals]]</code> 由 core 在 Space 的机器上创建真实 PTY，再按 <code>placement</code> 放进 Tab、分屏、浮动或 popup。</p>
+        </Feature>
+        <Feature title="常驻服务" cite="docs/plugins.md:190-211">
+          <p><code>[[services]]</code> 物化成 core 的 keep 终端，是需要活过窗口的进程。</p>
+        </Feature>
+        <Feature title="界面模块" cite="docs/plugins.md:99-110">
+          <p><code>[module]</code> 的 bundle 相对代际目录解析，停靠外框并随启用状态加载或撤下。</p>
+        </Feature>
+      </div>
+    </div>
+    <p class="cite">
+      git-board 示例同时声明动作、终端入口与界面模块；常驻服务的真实清单片段在
+      <code>docs/plugins.md:192-200</code>。出处 <code>examples/packages/git-board/hctui.toml:1-31</code>
+    </p>
+  </section>
+
+  <section id="no-window">
+    <h2>无窗口路径：动作不经过表单</h2>
+    <p class="section-lede">
+      动作不必在界面里点选。<code>hc-tui commands</code> 读取命令目录不需要运行中的 TUI；
+      <code>hc-tui do</code> 通过本地控制 socket 把动作交给已运行的客户端。
+      命令面板、快捷键与 <code>do</code> 用同一个分发器，<code>do</code> 与无窗口路径不经过参数表单。
+    </p>
+    <Term title="hc-tui · do">
+<span class="p">$</span> hc-tui do pane.split '&#123;"direction":"right"&#125;'
+&#123;"accepted":true,"confirmation_pending":false&#125;
+    </Term>
+    <div class="stat-row">
+      <div class="stat">
+        <b>28–47 ms</b>
+        <span>成功派发，10 次实测</span>
+      </div>
+      <div class="stat">
+        <b>6–12 ms</b>
+        <span>参数在 CLI 层被拒，10 次实测</span>
+      </div>
+    </div>
+    <p class="cite">
+      出处 <code>docs/commands.md:10-20</code>、<code>docs/plugins.md:284</code>；耗时在 tmux 内连续 10 次本机实测
+    </p>
+  </section>
+
+  <section id="form">
+    <h2>动作表单按 args schema 长出来</h2>
+    <p class="section-lede">
+      选中带参数 schema 的插件动作时，宿主按 schema 递归展开表单：
+      <code>string</code> 单行输入、<code>string</code> + <code>enum</code> 单选菜单、<code>boolean</code> 开关、
+      <code>integer</code>/<code>number</code> 数字输入、嵌套 <code>object</code> 分组缩进、标量 <code>array</code> 逐项增删。
+    </p>
+    <div class="split">
+      <Term title="examples/packages/git-board/hctui.toml" note="节选">
+[actions.args]
+type = "object"
+properties = &#123; short = &#123; type = "boolean", default = true &#125; &#125;
+additionalProperties = false
+      </Term>
+      <ul class="list-plain">
+        <li><strong>提交复用宿主校验。</strong>填默认值、递归校验、错误贴到对应行并聚焦。</li>
+        <li><strong>错误内联显示，不派发。</strong>非法值留在表单里，动作不会进入队列。</li>
+        <li><strong>表单打开期间。</strong>控制通道对同名动作回 <code>confirmation_pending = true</code>；关闭后 <code>do</code> 照旧直接派发。</li>
+      </ul>
+    </div>
+    <p class="cite">
+      出处 <code>docs/plugins.md:279-284</code>、<code>src/app/form.rs:678-717</code>（布局与校验接线见 <code>docs/m9-gap.md:128-136</code>）
+    </p>
+  </section>
+
+  <section id="lifecycle">
+    <h2>服务活过窗口，停用一次三类入口一起消失</h2>
+    <p class="section-lede">
+      常驻服务被物化成 core 的 keep 终端，窗口关掉程序继续跑。<code>packages disable</code> 只改写记录：
+      动作从命令目录消失、终端入口返回 <code>disabled</code>、模块表面从外框撤下，正在跑的终端不 kill。
+    </p>
+    <div class="split">
+      <Term title="hc-tui · disable 实测">
+<span class="p">$</span> hc-tui packages disable dev.hctui.pkg.git-board
+disabled dev.hctui.pkg.git-board
+
+<span class="p">$</span> hc-tui plugins action list
+no plugin actions
+
+<span class="p">$</span> hc-tui plugins pane open dev.hctui.pkg.git-board.git-ui
+&#123;
+  "error": "plugin dev.hctui.pkg.git-board is disabled",
+  "error_kind": "disabled"
+&#125;
+Error: plugin dev.hctui.pkg.git-board is disabled
+      </Term>
+      <Term title="docs/plugins.md · 常驻服务" note="节选">
+[[services]]
+id = "watch"
+title = "Watcher"
+argv = ["sh", "./bin/watch.sh"]
+cwd = "."
+on = "install"
+log = "services/watch.log"
+      </Term>
+    </div>
+    <p class="cite">
+      同一次实测里模块区域也随 disable 撤下、enable 后恢复；出处 <code>docs/mods.md:117</code>、<code>docs/plugins.md:190-211</code>
+    </p>
+  </section>
+
+  <section id="contracts">
+    <h2>三条契约</h2>
+    <div class="grid-3">
+      <Feature title="代码寿命" cite="docs/plugins.md:130, docs/plugins.md:326">
+        <p>更新写入新代际，旧调用与旧终端继续使用旧代际的代码，直到没有任何 pin 指向它才回收。</p>
+      </Feature>
+      <Feature title="进程寿命" cite="docs/plugins.md:435-447">
+        <p>动作进程组跟随 hc-tui 客户端回收，终端继续由 core 保留。</p>
+      </Feature>
+      <Feature title="目标冻结" cite="docs/plugins.md:171-172">
+        <p>调用时把 Space、Tab、机器与 cwd 解析成不可变的 <code>ExecutionTarget</code>；焦点变化不改目标，目标消失报 <code>target_gone</code>。</p>
+      </Feature>
+    </div>
+  </section>
+
+  <section id="not-pluggable">
+    <h2>不该插件化的部分</h2>
+    <p class="section-lede">
+      终端仿真、复制模式、输入法组合和 Kitty 图片留在宿主里，不交给插件进程。
+    </p>
+    <div class="grid-4">
+      <Feature title="终端仿真" cite="docs/adr/0001-ghostty-vt.md:12-30, docs/mods.md:207">
+        <p>VT 解析落在 TUI 的 <code>term-view</code> 内，单表面 8 ms 的渲染预算不允许每次按键多一跳进程间通信。</p>
+      </Feature>
+      <Feature title="复制模式" cite="docs/mods.md:59, docs/usage.md:67">
+        <p>选区和历史是 TUI 自己的视口缓冲，插件只拿到规范化快照，拿不到逐格缓冲。</p>
+      </Feature>
+      <Feature title="输入法组合" cite="docs/mods.md:14, docs/mods.md:219">
+        <p>输入仲裁在宿主，模块只收到已组合的按键；输入法状态不跨进程暴露。</p>
+      </Feature>
+      <Feature title="Kitty 图片" cite="docs/mods.md:201">
+        <p>图片输出与覆盖层遮挡由宿主统一计算，插件没有终端画布，也不承担 128 MiB 沙箱外的图像内存。</p>
+      </Feature>
+    </div>
+    <p class="cite">
+      预算与沙箱数字：单表面 8 ms、整帧 32 ms（<code>docs/mods.md:207</code>）；模块内存 128 MiB、调用 500 ms（<code>docs/mods.md:345</code>）
+    </p>
+  </section>
+
+  <section id="docs">
+    <h2>文档</h2>
+    <p class="section-lede">每页是介绍性质，末尾给完整规格的文件路径。</p>
+    <ul class="docs-links">
+      {docLinks.map((doc) => (
+        <li>
+          <a href={p(doc.target)}>
+            <strong>{doc.title}</strong>
+            <span>{doc.text}</span>
+          </a>
+        </li>
+      ))}
+    </ul>
+  </section>
+</Base>

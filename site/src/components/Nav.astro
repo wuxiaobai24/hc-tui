@@ -1,0 +1,31 @@
+---
+import { href } from '../lib/links';
+
+const path = Astro.url.pathname;
+const items = [
+  { label: '首页', target: '' },
+  { label: '安装', target: 'docs/install/' },
+  { label: '包', target: 'docs/packages/' },
+  { label: 'CLI', target: 'docs/cli/' },
+  { label: '架构', target: 'docs/architecture/' },
+  { label: 'FAQ', target: 'docs/faq/' },
+];
+
+const isCurrent = (target: string) => {
+  const clean = target.replace(/\/$/, '');
+  const current = path.replace(/\/$/, '');
+  return clean ? current.endsWith(`/${clean}`) : current === '';
+};
+---
+
+<nav class="site-nav" aria-label="站点导航">
+  <ul>
+    {items.map((item) => (
+      <li>
+        <a href={href(path, item.target)} aria-current={isCurrent(item.target) ? 'page' : undefined}>
+          {item.label}
+        </a>
+      </li>
+    ))}
+  </ul>
+</nav>

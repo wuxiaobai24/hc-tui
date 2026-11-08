@@ -1,0 +1,14 @@
+---
+interface Props {
+  title: string;
+  cite: string;
+}
+
+const { title, cite } = Astro.props;
+---
+
+<article class="feature">
+  <h3>{title}</h3>
+  <div class="feature-body"><slot /></div>
+  <p class="cite">出处 <code>{cite}</code></p>
+</article>

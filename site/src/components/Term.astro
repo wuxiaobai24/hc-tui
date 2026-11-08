@@ -1,0 +1,19 @@
+---
+interface Props {
+  title?: string;
+  note?: string;
+}
+
+const { title = 'hc-tui', note } = Astro.props;
+---
+
+<figure class="term">
+  <div class="term-bar">
+    <span class="term-dots" aria-hidden="true">
+      <i class="dot dot-r"></i><i class="dot dot-y"></i><i class="dot dot-g"></i>
+    </span>
+    <span class="term-title">{title}</span>
+    {note && <span class="term-note">{note}</span>}
+  </div>
+  <pre class="term-body"><code><slot /></code></pre>
+</figure>
