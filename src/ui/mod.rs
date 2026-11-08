@@ -42,6 +42,7 @@ use mods_bind::Plan as ModsBindPlan;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.screen = area;
     app.pointer_targets.clear();
     app.menu_hit = Rect::default();
     app.toast_hit = Rect::default();

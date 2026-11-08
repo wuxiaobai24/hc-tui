@@ -46,6 +46,7 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
     }
     // 提示层与 region/pane 同层，同层内排在最后，仍低于任何模态覆盖层。
     order.sort_by_key(|(z, layer, _, _)| (*z, *layer));
+    let content = app.content;
     let mut spent = Duration::ZERO;
     for (_, _, id, rect) in order {
         if spent >= FRAME_BUDGET {
@@ -56,7 +57,10 @@ pub fn draw_surfaces(app: &mut crate::app::App, frame: &mut Frame) {
         };
         if surface.place == SurfacePlace::Dialog {
             let theme = app.config.theme.clone();
-            crate::ui::clear_area(frame, app.content, &theme);
+            match surface.clear {
+                crate::mods::ClearArea::Content => crate::ui::clear_area(frame, content, &theme),
+                crate::mods::ClearArea::Surface => crate::ui::clear_area(frame, rect, &theme),
+            }
         }
         if !matches!(surface.state, SurfaceState::Loading | SurfaceState::Running) {
             if let Some(error) = surface.last_error.clone() {

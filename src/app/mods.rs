@@ -1754,6 +1754,12 @@ impl App {
             if let Some(click_through) = data.get("clickThrough").and_then(Value::as_bool) {
                 surface.click_through = click_through;
             }
+            if let Some(clear) = data.get("clear").and_then(Value::as_str) {
+                surface.clear = match clear {
+                    "surface" => crate::mods::ClearArea::Surface,
+                    _ => crate::mods::ClearArea::Content,
+                };
+            }
         }
         if unfocus && self.focused_mod.as_deref() == Some(surface_id) {
             self.focus_mod_surface(None);
@@ -2288,27 +2294,7 @@ impl App {
 
     /// 待确认授予：列出每一项，确认后追加授予。
     pub fn prompt_mod_grants(&mut self, mod_id: &str) {
-        let pending = self.mods.pending_grants_for(mod_id);
-        if pending.is_empty() {
-            return;
-        }
-        let mut items: Vec<super::ChooserItem> = pending
-            .iter()
-            .map(|name| super::ChooserItem {
-                label: t1("Approve {}", name),
-                value: json!({"mod": mod_id, "name": name}).to_string(),
-            })
-            .collect();
-        items.push(super::ChooserItem {
-            label: t("Approve all").to_string(),
-            value: json!({"mod": mod_id}).to_string(),
-        });
-        self.open_chooser(super::Chooser {
-            title: t1("Grants for {}", mod_id),
-            selected: 0,
-            kind: super::ChooserKind::Grants,
-            items,
-        });
+        self.open_grants_picker(mod_id);
     }
 
     /// 批准一条或全部授予申请，并发 `grant.changed`。

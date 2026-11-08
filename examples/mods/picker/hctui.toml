@@ -1,0 +1,10 @@
+[mod]
+id = "picker"
+title = "Picker"
+place = "dialog"
+focusable = true
+host_api = 1
+
+[grants]
+host = ["run", "overlay", "focus", "state", "theme", "setProps"]
+events = ["props.changed", "action.finished", "focus.changed"]

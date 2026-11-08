@@ -350,7 +350,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `notify` | `notify` | `{ title, body?, level?, timeout?, action?, target?, surface?, status? }` | `{ id }`，`id` 可被 `dismiss` 撤销；`timeout` 以秒计（默认 4）；`surface` 指定投递到哪条提示表面（表面 ID 或模块 ID），未指定走默认提示表面；没有提示表面时 `status: true` 走状态行，其余走内置 toast |
 | `dismiss` | `dismiss` | `{ id }` | `{}`，按 `id` 撤销一条已登记的通知；文本只用于显示 |
 | `theme` | `theme` | `{}` | `{ name, tokens, palette }` |
-| `overlay` | `overlay` | `{ mod?, props?, kind, width?, height?, at?, key?, modal?, autofocus?, onEsc?, clickThrough? }` | `{ surface }` |
+| `overlay` | `overlay` | `{ mod?, props?, kind, width?, height?, at?, key?, modal?, autofocus?, onEsc?, clickThrough?, clear? }` | `{ surface }` |
 | `closeOverlay` | `overlay` | `{ surface }` | `{}` |
 | `focus` | `overlay` | `{ surface }` | `{}` |
 | `setProps` | `setProps` | `{ surface, props }` | `{}`，给已打开表面推 `props.changed` |
@@ -362,12 +362,27 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 
 - 提示表面通过 `props.changed` 收到 `{ toasts, max }`：`toasts` 是 `{ id, level, text, action?, target?, created_ms, timeout_ms }` 数组，按登记顺序排列，只保留最新 `max` 条；`max` 来自配置 `notifications.toast_limit`（默认 3）。宿主自己产生的提醒（Agent 进入 blocked/done、`notify { status: true }`）与模块通知进同一条队列；超时由宿主计时并撤销，模块只负责显示。
 - `ask` 带 `surface` 时把 `props` 交给该表面，带 `mod` 时先按 `kind` 打开一条新表面；两者都不给时打开调用方的覆盖层。回答到达后 `ask` 返回 `{ value }`。
-- `overlay` 与 `mods.open` 的静态参数：`modal`（默认 `true`，`false` 时鼠标事件继续传给下层）、`autofocus`（默认 `true`，`false` 时不抢键盘焦点）、`onEsc`（`host` 默认先关覆盖层，`module` 交给表面自己处理）、`clickThrough`（默认 `false`，`true` 时不参与鼠标命中）。
+- `overlay` 与 `mods.open` 的静态参数：`modal`（默认 `true`，`false` 时鼠标事件继续传给下层）、`autofocus`（默认 `true`，`false` 时不抢键盘焦点）、`onEsc`（`host` 默认先关覆盖层，`module` 交给表面自己处理）、`clickThrough`（默认 `false`，`true` 时不参与鼠标命中）、`clear`（默认 `content`：`dialog` 清整个内容区；`surface` 只清表面自己的矩形，供占满整屏 inset、自带完整背景的浮层使用）。
 - `run` 的 `request` 由宿主生成；`accepted` 只表示动作已被受理。`confirmation_pending` 在动作打开了确认框或表单时为 `true`，此后的终态在用户确认（`done`）、取消（`cancelled`）时经 `action.finished` 投递。发起 core RPC 的动作先返回 `accepted`，应答到达后才投递 `done` 或带 `error` 的 `failed`；`request` 查询读到同一状态。
 - 所有回复带 `generation`；与当前实例不符的迟到回复由宿主丢弃，模块也应忽略。
 - 错误统一为 `{ code, message }`：`forbidden`、`offline`、`unavailable`、`target_gone`、`not_found`、`invalid`、`timeout`、`busy`、`conflict`、`staging`。
 - `exec` 单表面并发上限 4 条，超出返回 `busy`；默认 `cwd` 与 `on` 取启动参数里的 `folder` 与 `workspace`，显式值优先。
 - 未授予的方法返回 `forbidden`，不产生副作用。
+
+### `picker` 的候选行
+
+宿主把九种选择来源（动作菜单与其子菜单、工作区、移动 Pane、Resize、Swap Pane、终端菜单与插件菜单、模板、机器、授予确认）归一成同一份 `props.rows`，再用 `state`/`mods.open` 交给 `picker` 模块；模块不解析 `group:`/`binding:`/`custom:` 这类字符串协议。每行：
+
+```json
+{ "id": "…", "label": "…", "section": false, "right": "…",
+  "context": "…", "cwd": "…", "enabled": true,
+  "action": { "name": "…", "args": {} } }
+```
+
+- `section: true` 的行是分组标题，`action` 为 `null`；过滤、选中与滚动由模块自持。
+- `action` 直接交给 `run`（`{ name, args }` 就是 `execute_action` 的入参）；机器面板的 `a`/`c`/`r`/`d`/`n` 由模块组合 `picker.machine` 调用。
+- 两种形态：`form: "chooser"`（固定 64 宽居中，`rowHeight` 与 `visible` 决定窗口）与 `form: "goto"`（占满清屏，按 `filter` 字段过滤 `label+id` 或 `label+context`）。标题、按钮、面包屑与提示文案由宿主本地化后放进 props。
+- `keys.goto` 与 `app.palette` 在 `picker` 模块可用时改走模块；`--no-mods`、模块未安装或停用时每个来源保留原来的 Rust 选择器。
 
 ## 8. 权限与安全
 
@@ -467,7 +482,7 @@ TUI 内动作：
 
 | 动作 | 参数 |
 |---|---|
-| `mods.open` | `name` 必填；`props`、`place`（`pane`/`left`/`right`/`top`/`bottom`/`dialog`/`popup`/`window`）、`size`、`at`、`key`、`modal`、`autofocus`、`onEsc`、`clickThrough` |
+| `mods.open` | `name` 必填；`props`、`place`（`pane`/`left`/`right`/`top`/`bottom`/`dialog`/`popup`/`window`）、`size`、`at`、`key`、`modal`、`autofocus`、`onEsc`、`clickThrough`、`clear` |
 | `mods.close` | `name` 或 `surface` |
 | `mods.reload` | 可选 `name` |
 | `mods.dock` | `name`、`place`、`size`、`index`、`replace` |

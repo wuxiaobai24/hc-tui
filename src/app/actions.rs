@@ -128,6 +128,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
 impl App {
     pub fn open_palette(&mut self) {
         self.palette = true;
+        if self.open_goto_picker(true) {
+            self.dirty = true;
+            return;
+        }
         self.goto = Some(GotoOverlay {
             query: String::new(),
             selected: 0,
@@ -176,6 +180,10 @@ impl App {
 
     pub fn execute_action(&mut self, name: &str, args: Value) -> Result<()> {
         anyhow::ensure!(args.is_object(), t("command arguments must be an object"));
+        // picker 内部动作不出现在命令目录里，先于插件与模块命令解析。
+        if let Some(rest) = name.strip_prefix("picker.") {
+            return self.execute_picker_action(rest, args);
+        }
         // 插件动作与内置动作共用分发器；内置名不可被覆盖。
         if !COMMANDS.iter().any(|(builtin, _)| *builtin == name) {
             if self.plugins.owns(name) {
@@ -1474,54 +1482,7 @@ impl App {
 
 impl App {
     pub(super) fn open_terminal_menu(&mut self, address: &str) {
-        let pinned = self
-            .terminals
-            .iter()
-            .find(|t| t.address == address)
-            .is_some_and(|t| t.pinned);
-        let items = [
-            (t("Rename"), "agent.rename", json!({"terminal":address})),
-            (t("Peek"), "terminal.peek", json!({"terminal":address})),
-            (
-                t("Keep as tab"),
-                "terminal.keep",
-                json!({"terminal":address}),
-            ),
-            (
-                t("Park (keep running)"),
-                "terminal.park",
-                json!({"terminal":address}),
-            ),
-            (
-                if pinned { t("Unpin") } else { t("Pin") },
-                "terminal.pin",
-                json!({"terminal":address,"pinned":!pinned}),
-            ),
-            (
-                t("End program and sub-agents"),
-                "terminal.kill",
-                json!({"terminal":address}),
-            ),
-        ]
-        .into_iter()
-        .map(|(label, name, args)| ChooserItem {
-            label: label.into(),
-            value: format!("{name} {args}"),
-        })
-        .collect::<Vec<_>>();
-        let mut items = items;
-        let pane = self
-            .panes
-            .iter()
-            .find(|(_, state)| state.terminal.as_deref() == Some(address))
-            .map(|(pane, _)| *pane);
-        items.extend(self.plugin_menu_items("pane", json!({"pane": pane, "terminal": address})));
-        self.open_chooser(Chooser {
-            title: format!("{} · {address}", t("Terminal")),
-            items,
-            selected: 0,
-            kind: ChooserKind::Commands,
-        });
+        self.open_terminal_picker_menu(address);
     }
 }
 

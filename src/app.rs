@@ -50,6 +50,9 @@ mod mouse_resize;
 #[cfg(test)]
 mod package_tests;
 mod panels;
+mod picker;
+#[cfg(test)]
+mod picker_tests;
 mod plugin;
 mod renaming;
 pub mod services;
@@ -399,6 +402,8 @@ pub struct App {
     pub slots: Vec<Slot>,
     /// 上一次绘制算出的 Pane 区域（不含 Tab 栏、侧栏、状态栏）。
     pub content: Rect,
+    /// 上一次绘制的整个终端区域；Go to 形态按它算外框。
+    pub screen: Rect,
     /// 外框树：本机区域布局，模块区域与内置界面的排列。
     pub chrome: crate::mods::chrome::Chrome,
     /// `window` 覆盖层位置与 `key`；schema 4 起随本地状态保存。
@@ -643,6 +648,7 @@ impl App {
             hover_link: None,
             slots: Vec::new(),
             content: Rect::new(0, 0, 80, 24),
+            screen: Rect::new(0, 0, 80, 24),
             chrome: crate::mods::chrome::Chrome::default_tree(&config),
             mod_regions: Vec::new(),
             mod_toasts: None,
@@ -6075,31 +6081,7 @@ impl App {
                         })
                         .unwrap_or_default();
                     self.bump_mod_revision_domains(&["templates"]);
-                    let items = self
-                        .mod_templates
-                        .iter()
-                        .filter_map(|template| {
-                            let name = template.get("name")?.as_str()?.to_string();
-                            let description = template
-                                .get("description")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
-                            Some(ChooserItem {
-                                label: if description.is_empty() {
-                                    name.clone()
-                                } else {
-                                    format!("{name} — {description}")
-                                },
-                                value: name,
-                            })
-                        })
-                        .collect();
-                    self.open_chooser(Chooser {
-                        title: "templates（Enter 在新 tab 里运行）".to_string(),
-                        items,
-                        selected: 0,
-                        kind: ChooserKind::Templates,
-                    });
+                    self.open_templates_picker();
                 }
                 Err(error) => self.note = t1("templates failed: {}", error.message),
             },
@@ -6157,24 +6139,7 @@ impl App {
             "machines" => match result {
                 Ok(value) => {
                     self.machines = parse_machines(&value);
-                    let items = self
-                        .machines
-                        .iter()
-                        .map(|machine| ChooserItem {
-                            label: format!(
-                                "{} [{}] {}",
-                                machine.name, machine.state, machine.target
-                            ),
-                            value: machine.name.clone(),
-                        })
-                        .collect();
-                    self.open_chooser(Chooser {
-                        title: t("machines · Enter/n 新 pane · a 添加 · c 连接 · r 改名 · d 移除")
-                            .to_string(),
-                        items,
-                        selected: 0,
-                        kind: ChooserKind::Machines,
-                    });
+                    self.open_machines_picker();
                 }
                 Err(error) => self.note = t1("machine list failed: {}", error.message),
             },

@@ -17,6 +17,7 @@
 `--no-mods` 下三块全部由 Rust 绘制。这三个模块只负责绘制，键盘与鼠标仍由 Rust
 侧处理。
 | `settings` | dialog 覆盖层 | 段、项与按键/鼠标交互；写配置走 `app.theme` 等动作 |
+| `picker` | dialog 覆盖层 | 宿主归一的候选行（动作菜单、工作区、Pane、终端菜单、模板、机器、授予、Go to、命令面板）；模块内过滤、`1`-`9` 快选、`j`/`k`、滚轮、`Esc`/`q` |
 
 每个目录的 `hctui.toml` 声明挂载位置与宿主授予，`nsh.json` 的 `capabilities.host`
 声明同一份方法名；`dist/` 由构建生成，不进入版本库。

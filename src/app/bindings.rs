@@ -82,10 +82,12 @@ impl App {
             }
             "goto" => {
                 self.palette = false;
-                self.goto = Some(GotoOverlay {
-                    query: String::new(),
-                    selected: 1,
-                });
+                if !self.open_goto_picker(false) {
+                    self.goto = Some(GotoOverlay {
+                        query: String::new(),
+                        selected: 1,
+                    });
+                }
                 self.dirty = true;
             }
             "open_notification_target" => {
