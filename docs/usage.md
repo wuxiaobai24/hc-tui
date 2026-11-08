@@ -1,6 +1,326 @@
 # 使用指南
 
-[返回 README](../README.md) · [配置](configuration.md) · [命令](commands.md)
+[返回 README](../README.md) · [配置](configuration.md) · [命令](commands.md) · [包与插件](plugins.md)
+
+站点与这里互为入口：在 `site/` 里执行 `npm run build` 后，站点入口是 `site/dist/index.html`
+（仓库中的页面源码是 [site/src/pages/index.astro](../site/src/pages/index.astro)）；
+站点五篇文档逐节标注了摘录自哪份 `docs/` 文件。
+
+## 安装与首次运行
+
+```console
+$ cargo build --release
+    Finished `release` profile [optimized] target(s) in 4m 32s
+
+$ ./target/release/hc-tui --version
+hc-tui 0.4.3
+```
+
+运行前提是 PATH 里有 `hc`（herdr-core），本仓库实测的协议基线是 core 0.1.18。
+直接运行 `./target/release/hc-tui` 打开窗口；要独立会话就带 `HC_SESSION`：
+`HC_SESSION=hcp-docs2 ./target/release/hc-tui`（会话隔离的做法见[配置说明](configuration.md#会话隔离)）。
+
+首次运行装一个包。`examples/packages/git-board` 同时贡献动作、终端入口与界面模块：
+
+```console
+$ ./target/release/hc-tui packages install examples/packages/git-board --enable --yes
+package dev.hctui.pkg.git-board (Git board 0.1.0)
+  provides ATM
+  actions dev.hctui.pkg.git-board.summary
+  terminal dev.hctui.pkg.git-board.git-ui (right)
+    requires lazygit
+  module dist/bundle.js (right)
+  platforms linux, macos
+  grants state, exec, notify, state.changed, grant.changed, terminal.status
+installed dev.hctui.pkg.git-board generation 1 (enabled)
+```
+
+安装默认不启用，`--enable` 才打开动作、终端入口与模块表面。没有终端（管道、CI、脚本）
+时还要 `--yes`，否则只报 `Error: pass --yes to install without a terminal`。
+发行包的安装与升级见[安装与升级](#安装与升级)。
+
+## 包与安装类命令
+
+`packages` 是包注册与代际管理的唯一入口。`plugins <子命令>` 与
+`mods install|update|uninstall|link|unlink|enable|disable` 是别名：行为与退出码一致，
+只在 stderr 多一行提示；`plugins action` 与 `plugins pane` 是动作与终端专用入口，名字不变。
+
+```console
+$ hc-tui plugins list
+note: `plugins list` is deprecated, use `packages list`
+dev.hctui.demo.form              local     gen 1   enabled  A
+```
+
+| 子命令 | 作用 |
+|---|---|
+| `packages list [--json]` | 一行一个包；启用状态后是能力徽章 `A`（动作）/`T`（终端入口）/`M`（界面模块），有服务时跟 `s:在跑/总数` |
+| `packages info <id\|来源> [--json]` | id、名字、版本、来源、代际、能力、模块、服务、授予、安装时间与来源端版本 |
+| `packages install <来源> [--enable\|--disable] [--yes]` | 校验清单后复制到新代际并切 `current`，默认不启用 |
+| `packages update [<id>] <来源>` | 写入新代际，保留记录里已有的启用状态 |
+| `packages update --check [<id>] [--json]` | 只读比较记录里的版本与来源端版本 |
+| `packages link <目录>` | 注册开发来源，代码原地读取，清单变化后重载 |
+| `packages unlink <id>` | 移除开发注册，目录原样保留 |
+| `packages enable\|disable <id>` | 只改记录里的启用状态，动作、终端入口与模块表面同时生效 |
+| `packages gc` | 回收没有记录指向、也没有 pin 的代际 |
+| `packages log <id> [--service <服务>] [-n 行数]` | 读 `engine.log` 或服务清单里 `log` 声明的文件尾部 |
+| `packages uninstall <id>` | 删记录与 `current` 指针；有 pin 的代际留给 `gc` |
+
+```console
+$ hc-tui packages list
+dev.hctui.pkg.git-board          local     gen 1   enabled  ATM
+    dev.hctui.pkg.git-board.git-ui           right · Git UI
+    dist/bundle.js                           module · Git board
+```
+
+```console
+$ hc-tui packages info dev.hctui.pkg.git-board
+dev.hctui.pkg.git-board (Git board 0.1.0)
+  source       examples/packages/git-board
+  generation   1 · enabled
+  path         /tmp/hcp-docs2/xdg/state/hc-tui/plugins/store/dev.hctui.pkg.git-board/1
+  capabilities ATM
+  module       dist/bundle.js · right · Git board
+  services     none
+  installed    1794124380 (unix)
+  update       up to date (0.1.0)
+```
+
+```console
+$ hc-tui packages update dev.hctui.pkg.git-board examples/packages/git-board --yes
+  terminal dev.hctui.pkg.git-board.git-ui (right)
+    requires lazygit
+installed dev.hctui.pkg.git-board generation 2 (enabled)
+```
+
+`--check` 只读，两种状态的退出码都是 0：
+
+```console
+$ hc-tui packages update --check
+dev.hctui.demo.svc up to date (0.1.0)
+dev.hctui.pkg.git-board local 0.2.0 → remote 0.3.0
+```
+
+```console
+$ hc-tui packages link /tmp/hcp-docs2/dev-board --yes
+linked dev.hctui.pkg.git-board (enabled)
+
+$ hc-tui packages list
+dev.hctui.pkg.git-board          linked    gen 1   enabled  ATM
+
+$ hc-tui packages unlink dev.hctui.pkg.git-board
+unlinked dev.hctui.pkg.git-board
+```
+
+`link` 的包在 `packages list` 里来源列是 `linked`，`info` 的 `path` 直接指向那个目录。
+
+```console
+$ hc-tui packages disable dev.hctui.demo.svc
+disabled dev.hctui.demo.svc
+
+$ hc-tui packages enable dev.hctui.demo.svc
+enabled dev.hctui.demo.svc
+```
+
+停用只改记录：已排队的调用跑完，已开的终端不结束，新的动作、终端入口与模块表面被拒绝（`error_kind = "disabled"`）。
+
+```console
+$ hc-tui packages gc
+dev.hctui.pkg.git-board: 1
+
+$ hc-tui packages gc
+no generations to reclaim
+```
+
+```console
+$ hc-tui packages log dev.hctui.demo.svc --service watch
+watcher up
+watcher up
+
+$ hc-tui packages log dev.hctui.demo.svc --service nope
+Error: dev.hctui.demo.svc declares no service nope
+```
+
+日志文件还不存在时打印 `no log for <id>: No such file or directory` 并退出 0；服务日志的落点见[配置说明](configuration.md#文件与优先级)。
+
+```console
+$ hc-tui packages uninstall dev.hctui.pkg.git-board
+uninstalled dev.hctui.pkg.git-board
+```
+
+### 从来源安装
+
+三种来源按输入形态判定：
+
+| 来源 | 判据 | 落地方式 |
+|---|---|---|
+| 本地目录 | 路径是目录 | 直接复制到新代际 |
+| git 仓库 | `https://`、`http://`、`ssh://`、`file://`、`git://`、`git@` 开头或 `.git` 结尾 | `git clone --depth 1` 到临时目录 |
+| 归档 | `.tar.gz` / `.tgz` | `tar -xzf` 解到临时目录 |
+
+暂存目录按「有 `hctui.toml` / `plugin.toml` 的那一层」判根，最多下行三层；校验清单后才发到
+新代际，失败时记录与 `current` 指针不动。`.nshpkg` 走签名包校验，见[包与插件 §9](plugins.md#9-安装更新与卸载)。
+
+```console
+$ hc-tui packages install file:///tmp/hcp-docs2/repo.git --enable --yes
+package dev.hctui.pkg.git-board (Git board 0.2.0)
+  provides ATM
+  ...
+  source file:///tmp/hcp-docs2/repo.git
+installed dev.hctui.pkg.git-board generation 1 (enabled)
+```
+
+```console
+$ hc-tui packages install /tmp/hcp-docs2/archive/git-board-0.1.0.tar.gz --yes
+  grants state, exec, notify, state.changed, grant.changed, terminal.status
+  source /tmp/hcp-docs2/archive/git-board-0.1.0.tar.gz
+installed dev.hctui.pkg.git-board generation 1 (disabled)
+```
+
+`packages list` 的来源列只区分 `local`（从来源装出来的代际）与 `linked`（开发来源）；
+真实来源记在记录的 `origin` 里，`packages info` 与 `update --check` 都按它回读。
+
+### 常驻服务
+
+清单里的 `[[services]]` 是要活过窗口的进程，宿主把它物化成 core 的 keep 终端，
+同一 `(包, 服务)` 至多一个活终端。`on = "install"` 只在安装、更新后拉起，
+`on = "enable"`（默认）在启用与窗口重开时补齐；没有 `restart`，已结束的终端记录不会被自动重起。
+字段与不变量见[包与插件 §5.1](plugins.md#51-常驻服务)。
+
+`packages list` 的状态由 core 的终端清单推出：`running`（还没拿到 pid 时是 `starting`）、
+`exited`、`failed`（启动后 1 秒内非 0 退出或 `argv` 程序缺失）、`stopped`（没有终端记录）：
+
+```console
+$ hc-tui packages list
+dev.hctui.demo.form              local     gen 1   enabled  A
+dev.hctui.demo.svc               local     gen 1   enabled  - s:1/1
+    dev.hctui.demo.svc.watch                 service · running · t4 · pid 622005
+dev.hctui.pkg.git-board          local     gen 2   enabled  ATM
+    dev.hctui.pkg.git-board.git-ui           right · Git UI
+    dist/bundle.js                           module · Git board
+```
+
+没有 core 时这一行会先打印 `no core for this session; service state comes from declarations only`，
+只按声明推状态，不按需拉起 core。
+
+## 无窗口 `do`
+
+控制 socket 连不上（没有窗口）时，`do` 直接读改本地 core 的布局文档，
+写入走 `hctui-layout-v1` 的 CAS 与三方合并。参数顺序是
+`do <动作名> [<终端地址>] [JSON 对象] [--session] [--config]`，省略 JSON 按 `{}` 处理。
+
+```console
+$ hc-tui do space.new '{"name":"backend"}'
+{"accepted":true,"confirmation_pending":false}
+```
+
+```console
+$ hc-tui do space.rename '{"name":"api"}'
+{"accepted":true,"confirmation_pending":false}
+```
+
+寻址终端的动作可以把终端地址写成裸位置参数：
+
+```console
+$ hc-tui do terminal.park t1
+{"accepted":true,"confirmation_pending":false}
+```
+
+`accepted` 只表示已受理，拒绝都带 `error_kind`：
+
+```console
+$ hc-tui do pane.zoom
+{"error":"pane.zoom needs a TUI window","error_kind":"needs_window","method":"pane.zoom"}
+```
+
+```console
+$ hc-tui do tab.close '{"id":"1"}'
+{"error":"tab.close needs input; pass it in the arguments","error_kind":"needs_input","method":"tab.close"}
+```
+
+```console
+$ hc-tui do terminal.park t1 --session hcp-docs2-nocore
+{"error":"no core for session hcp-docs2-nocore","error_kind":"no_core","method":"terminal.park"}
+```
+
+- `needs_window`：只改当前窗口屏幕的动作，焦点、缩放、方向移动、`space/tab/agent` 的浏览式切换、
+  侧栏与覆盖层、需要本地 VT 的滚动与搜索、模块面板、`chat.*`。
+- `needs_input`：动作要一行输入。确认类只认 `confirmed: true`（等价于窗口里敲 `y`），
+  改名与新建类只认 `name`，给不出就拒绝，不把提问丢掉。
+- `no_core`：这个 session 没有 core。无窗口路径不按需拉起 core；先在有窗口的客户端里连上，
+  或按[配置说明](configuration.md#会话隔离)起一个自己的会话。
+- `layout_error`：布局 CAS 冲突或写入没在超时内完成；冲突要先在有窗口时用 `layout.reload` 接受共享版本。
+
+写入的效果在下次开窗口时可见，下面这一屏就是上面两次调用之后再打开窗口的侧栏：
+
+```console
+$ tmux capture-pane -p -t hcpdocs2 -S 0 -E 4 | cut -c1-25
+ Spaces                + 
+                         
+ ▾ This computer      ●  
+  A  api        hcp/docs2
+  1  1                   
+```
+
+有窗口但界面不应答时报错返回，不转交无窗口路径，避免两个写入者同时改布局文档。
+
+## 动作表单
+
+命令面板或 Pane 右键菜单选中带 `args` schema 的插件动作时，先按 schema 弹表单：
+`string` 单行输入、`string` + `enum` 单选菜单、`boolean` 开关、`integer` / `number` 数字输入、
+嵌套 `object` 分组缩进、标量 `array` 逐项增删。底部提示是
+`↵ submit  ⇥ next  esc cancel  ^a add  ^d remove`。
+
+```console
+$ tmux send-keys C-b : deploy Enter   # 命令面板里选中带参数的动作
+$ tmux capture-pane -p -S 16 -E 20
+                         ││              ┌──────────────────────────────────────────────────────────────┐              │
+                         ││              │ 部署  dev.hctui.demo.form.deploy                             │              │
+                         ││              │  count: 1▏                                                   │              │
+                         │└──────────────│  mode: —  ◂ ▸                                                │──────────────┘
+```
+
+提交复用调度端同一套递归校验：非法值留在表单里，错误贴在出错行下面，焦点落到那一行，动作不派发。
+
+```console
+$ tmux send-keys BSpace abc Enter     # 把 count 改成非法值并提交
+$ tmux capture-pane -p -S 16 -E 20
+                         ││              ┌──────────────────────────────────────────────────────────────┐              │
+                         ││              │ 部署  dev.hctui.demo.form.deploy                             │              │
+                         ││              │  count: abc▏                                                 │              │
+                         │└──────────────│    args.count must be integer                                │──────────────┘
+```
+
+表单打开期间，控制通道对同名动作回 `confirmation_pending = true`；`hc-tui do` 与无窗口路径不经过表单，
+直接派发并返回真实 `request`。
+
+## 事件订阅与 `--no-mods`
+
+`hc-tui events` 是控制 socket 上的长连接，按行输出 NDJSON；`--plugin <id>` 只看该包的终端事件，
+`--kinds a,b` 只看列出的 kind，`--count N` 收到 N 条后退出。每个订阅者 256 条队列，溢出补发
+`events.dropped`。
+
+```console
+$ hc-tui events --kinds terminal.opened --count 1
+（另一个终端）
+$ hc-tui do terminal.open '{"argv":["sleep","300"],"place":"down"}'
+{"accepted":true,"confirmation_pending":false}
+（订阅端随后打印）
+{"at_ms":1794124496755,"data":{},"kind":"terminal.opened","machine":"local","terminal":"t3","turn":0}
+```
+
+`--no-mods` 只跳过模块表面：动作目录、终端入口与已安装的包照常可用，外框回落到内置界面。
+同一个 session、同一个已启用模块的包，两种启动方式的右栏：
+
+```console
+$ tmux capture-pane  # 默认启动（模块运行，右侧是 Git board）
+ Spaces                + │Git board                          1      +                                            menu
+                         │recent commits                  ┌───────────────────────────────────────────────── :: ─[...]─┐
+
+$ hc-tui --no-mods
+$ tmux capture-pane  # --no-mods
+ Spaces                + │   1      +                                                                            menu
+                         │┌───────────────────────────────────────────────────────────────────────────────── :: ─[...]─┐
+```
 
 ## 工作区、Tab 与 Pane
 
@@ -242,8 +562,8 @@ Agent 处于 `blocked` 或 `error` 时顶栏变红，提示需要回终端处理
 - **Agents 没有我的 shell？** 这是预期行为。只有上报状态的会话进入 Agents；用 Space 或 Go to 找普通终端。
 - **为什么 Pane 的某些颜色仍与 UI 不一样？** 显式真彩色和程序 OSC 改色属于程序；检查程序自己的主题。
 - **无法拖动分隔线？** 检查 mouse_capture、宿主鼠标转发、是否按住 Shift，以及是否处于 zoom/手机/浮层状态。
-- **`hc-tui ls/do` 连接不上？** 要先运行同一 session 的 TUI，并保持同一 XDG_STATE_HOME；自定义 session 要每次传入。
-- **看到 another TUI already accepts commands？** 同一状态目录和 session 只允许一个控制 socket 服务；第二个客户端可能仍可打开，但 CLI 控制对应首个服务。
+- **`hc-tui ls/do` 连接不上？** `ls` 要有运行中的窗口；`do` 在没有窗口时走无窗口路径，依赖同一 session 已有的 core（没有就报 `no_core`，不按需拉起）。两者都要保持同一 XDG_STATE_HOME，自定义 session 每次传入。
+- **看到 another TUI already accepts commands？** 同一状态目录和 session 只有一个控制 socket 服务；第二个客户端仍可打开，但 CLI 控制的是首个。首个窗口的终端已经关掉、进程还在时，`ls`/`do` 会等满超时并报 `UI did not answer`，先结束那个进程再重开窗口。
 - **英文输入或滚动时疑似重复？** 本版加入真实后端回放和整帧同步输出，尚未稳定复现该报告。区分程序输出实际重复与显示暂留；保留程序名、宿主和复现步骤便于继续定位。
 - **退出再进布局变了？** 检查 session、restore 配置、core 文档和是否同时有 GUI 写入；同字段冲突用 layout.reload 明确接受共享版本。
 
