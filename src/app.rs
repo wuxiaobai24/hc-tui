@@ -152,6 +152,7 @@ pub enum PromptKind {
     CloseTab(usize),
     CloseWorkspace(usize),
     KillPane(u32),
+    OpenLink(String),
     Command,
 }
 
@@ -175,6 +176,7 @@ impl PromptKind {
             Self::CloseTab(_) => "close tab",
             Self::CloseWorkspace(_) => "close workspace",
             Self::KillPane(_) => "kill terminal",
+            Self::OpenLink(_) => "open link",
         })
     }
 
@@ -182,7 +184,7 @@ impl PromptKind {
     pub fn needs_confirm(&self) -> bool {
         matches!(
             self,
-            Self::CloseTab(_) | Self::CloseWorkspace(_) | Self::KillPane(_)
+            Self::CloseTab(_) | Self::CloseWorkspace(_) | Self::KillPane(_) | Self::OpenLink(_)
         )
     }
 }
@@ -374,6 +376,14 @@ pub enum MobileAction {
     Detach,
 }
 
+/// 鼠标最后停在的链接格。URI 在消费时现取，避免滚动后留下旧地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoverLink {
+    pub pane: u32,
+    pub x: u16,
+    pub y: u16,
+}
+
 pub struct App {
     pub config: Config,
     pub connection: Connection,
@@ -384,6 +394,8 @@ pub struct App {
     pub sidebar: bool,
     pub sidebar_width: u16,
     pub note: String,
+    /// 鼠标悬停的链接格；状态行显示目标地址，键盘动作用它定位。
+    pub hover_link: Option<HoverLink>,
     pub slots: Vec<Slot>,
     /// 上一次绘制算出的 Pane 区域（不含 Tab 栏、侧栏、状态栏）。
     pub content: Rect,
@@ -622,6 +634,7 @@ impl App {
             panes: HashMap::new(),
             terminals: Vec::new(),
             note,
+            hover_link: None,
             slots: Vec::new(),
             content: Rect::new(0, 0, 80, 24),
             chrome: crate::mods::chrome::Chrome::default_tree(&config),
@@ -836,6 +849,9 @@ impl App {
         }
         if let Some(line) = self.zellij_mode_line() {
             return Some(line);
+        }
+        if let Some(uri) = self.hover_link.and_then(|cell| self.link_uri_at(cell)) {
+            return Some((String::new(), crate::link::hint(&uri)));
         }
         if !self.note.is_empty() {
             return Some((String::new(), self.note.clone()));
@@ -1690,6 +1706,9 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        if mouse.kind == MouseEventKind::Moved {
+            self.update_hover_link(mouse);
+        }
         if self.on_pointer_mouse(mouse) {
             return;
         }
@@ -1948,6 +1967,17 @@ impl App {
         else {
             return;
         };
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && mouse.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            if let Some(uri) = self
+                .link_cell(slot, mouse)
+                .and_then(|cell| self.link_uri_at(cell))
+            {
+                self.open_link(uri);
+                return;
+            }
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
             if let Some(pane) = self.panes.get(&slot.pane) {
                 if let Some(address) = pane.terminal.clone() {
@@ -2973,17 +3003,7 @@ impl App {
                     .get(&copy.pane)
                     .and_then(|pane| pane.view.link_at(copy.cursor.0, u32::from(copy.cursor.1)))
                 {
-                    let opener = if cfg!(target_os = "macos") {
-                        "open"
-                    } else {
-                        "xdg-open"
-                    };
-                    let _ = std::process::Command::new(opener)
-                        .arg(&uri)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn();
-                    self.note = t1("opening {}", uri);
+                    self.open_link(uri);
                 } else {
                     self.note = t("no link under cursor").to_string();
                 }
@@ -3981,6 +4001,7 @@ impl App {
                     self.note = t("this pane has no terminal yet").to_string();
                 }
             }
+            PromptKind::OpenLink(uri) => self.launch_link(&uri),
         }
         self.dirty = true;
     }
@@ -4445,32 +4466,106 @@ impl App {
         self.dirty = true;
     }
 
-    /// 打开光标位置的链接。
+    /// 鼠标移动时记下悬停的链接格：状态行显示目标，键盘动作也用它定位。
+    fn update_hover_link(&mut self, mouse: MouseEvent) {
+        let overlay = self.prompt.is_some()
+            || self.form.is_some()
+            || self.chooser.is_some()
+            || self.goto.is_some()
+            || self.settings.is_some()
+            || self.help.is_some()
+            || self.reader.is_some()
+            || self.popup.is_some()
+            || self.chat.is_some()
+            || self.copy.is_some();
+        let hover = if overlay {
+            None
+        } else {
+            self.slots
+                .iter()
+                .rev()
+                .find(|slot| contains(slot.outer, mouse.column, mouse.row))
+                .and_then(|slot| self.link_cell(*slot, mouse))
+        };
+        if hover != self.hover_link {
+            self.hover_link = hover;
+            self.dirty = true;
+        }
+    }
+
+    /// 鼠标位置命中 Pane 内容区里的链接时返回那一格。
+    fn link_cell(&self, slot: Slot, mouse: MouseEvent) -> Option<HoverLink> {
+        if slot.collapsed || !contains(slot.inner, mouse.column, mouse.row) {
+            return None;
+        }
+        let cell = HoverLink {
+            pane: slot.pane,
+            x: mouse.column - slot.inner.x,
+            y: mouse.row - slot.inner.y,
+        };
+        self.link_uri_at(cell).map(|_| cell)
+    }
+
+    /// 指定格子的目标 URI；URI 在消费时现取。
+    fn link_uri_at(&self, cell: HoverLink) -> Option<String> {
+        self.panes
+            .get(&cell.pane)
+            .and_then(|pane| pane.view.link_at(cell.x, u32::from(cell.y)))
+    }
+
+    /// 打开链接：优先悬停格，其次 VT 光标格，最后扫描可见区域的第一个链接。
     fn open_link_at_cursor(&mut self) {
         let pane = self.input_pane();
-        let Some(state) = self.panes.get(&pane) else {
-            return;
-        };
-        let position = state.view.cursor().unwrap_or((0, 0));
-        let Some(uri) = state.view.link_at(position.0, u32::from(position.1)) else {
-            self.note = t("no link under cursor").to_string();
-            self.dirty = true;
-            return;
-        };
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        match std::process::Command::new(opener)
-            .arg(&uri)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => self.note = t1("opening {}", uri),
-            Err(error) => self.note = t1("cannot open link: {}", error),
+        match self.link_cell_at(pane) {
+            Some(uri) => self.open_link(uri),
+            None => {
+                self.note = t("no link under cursor").to_string();
+                self.dirty = true;
+            }
         }
+    }
+
+    /// 焦点 Pane 里当前指向的链接目标。
+    fn link_cell_at(&self, pane: u32) -> Option<String> {
+        let state = self.panes.get(&pane)?;
+        if let Some(cell) = self.hover_link.filter(|cell| cell.pane == pane) {
+            if let Some(uri) = self.link_uri_at(cell) {
+                return Some(uri);
+            }
+        }
+        if let Some((x, y)) = state.view.cursor() {
+            if let Some(uri) = state.view.link_at(x, u32::from(y)) {
+                return Some(uri);
+            }
+        }
+        let (width, height) = self
+            .slots
+            .iter()
+            .find(|slot| slot.pane == pane)
+            .map(|slot| (slot.inner.width, slot.inner.height))?;
+        (0..height).find_map(|y| (0..width).find_map(|x| state.view.link_at(x, u32::from(y))))
+    }
+
+    /// 按配置决定先确认还是直接交给系统 opener。
+    fn open_link(&mut self, uri: String) {
+        // 打开后让位给结果提示：否则悬停的 URL 一直盖住拒绝或失败原因。
+        self.hover_link = None;
+        if self.config.confirm_open_link {
+            self.ask(
+                PromptKind::OpenLink(uri.clone()),
+                &t1("open {}?", crate::link::hint(&uri)),
+            );
+            return;
+        }
+        self.launch_link(&uri);
+    }
+
+    /// 校验并打开链接，把结果写进状态行。
+    fn launch_link(&mut self, uri: &str) {
+        self.note = match crate::link::open(uri) {
+            Ok(()) => t1("opening {}", uri),
+            Err(message) => message,
+        };
         self.dirty = true;
     }
 
@@ -8303,6 +8398,66 @@ mod tests {
         app.move_focus(crate::layout::split::Direction::Right);
         assert_eq!(app.focused(), focused);
         assert!(app.focused_mod.is_none());
+    }
+
+    #[test]
+    fn hovering_a_link_shows_its_target_and_ctrl_click_rejects_file_schemes() {
+        let mut app = offline_app();
+        let pane = app.focused();
+        app.reflow(Rect::new(0, 0, 80, 24));
+        let slot = app
+            .slots
+            .iter()
+            .find(|slot| slot.pane == pane)
+            .copied()
+            .unwrap();
+        app.panes.get_mut(&pane).unwrap().view.write(
+            b"\x1b]8;;file:///a\x1b\\AAA\x1b]8;;\x1b\\ \x1b]8;;file:///b\x1b\\BBB\x1b]8;;\x1b\\",
+        );
+        let second = slot.inner.x + 4;
+        let row = slot.inner.y;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: second,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.hover_link.map(|cell| cell.x), Some(4));
+        assert_eq!(app.mode_line().unwrap().1, "file:///b");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: second,
+            row,
+            modifiers: KeyModifiers::CONTROL,
+        });
+        assert!(app.note.contains("file"), "{}", app.note);
+        assert!(app.mode_line().unwrap().1.contains("file"));
+    }
+
+    #[test]
+    fn the_open_link_action_falls_back_to_the_first_visible_link() {
+        let mut app = offline_app();
+        let pane = app.focused();
+        app.reflow(Rect::new(0, 0, 80, 24));
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .view
+            .write(b"\r\n\x1b]8;;file:///etc/passwd\x1b\\passwd\x1b]8;;\x1b\\");
+        app.run_named_binding("open_link");
+        assert!(app.note.contains("file"), "{}", app.note);
+    }
+
+    #[test]
+    fn confirm_open_link_asks_before_touching_the_opener() {
+        let mut app = offline_app();
+        app.config.confirm_open_link = true;
+        app.open_link("https://example.com".into());
+        match app.prompt.as_ref().map(|prompt| &prompt.kind) {
+            Some(PromptKind::OpenLink(uri)) => assert_eq!(uri, "https://example.com"),
+            other => panic!("expected a confirmation prompt, got {other:?}"),
+        }
+        assert!(app.note.is_empty() || !app.note.contains("opening"));
     }
 }
 

@@ -15,6 +15,7 @@ pub mod copy;
 pub mod hc;
 pub mod i18n;
 pub mod layout;
+pub mod link;
 pub mod model;
 pub mod mods;
 pub mod pkg;

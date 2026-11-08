@@ -584,7 +584,7 @@ impl Default for Keys {
             interrupt: bind("prefix+shift+c"),
             toggle_keep: bind("prefix+shift+o"),
             remove_terminal: bind("prefix+shift+u"),
-            open_link: Binding::Off,
+            open_link: bind("prefix+u"),
             edit_history: bind("prefix+e"),
             read_pane: bind("prefix+slash"),
             send_keys: bind("prefix+shift+i"),
@@ -804,6 +804,8 @@ pub struct Config {
     pub mouse_capture: bool,
     pub mouse_scroll_lines: usize,
     pub copy_on_select: bool,
+    /// 打开 OSC 8 链接前先让用户输入 `y` 确认。
+    pub confirm_open_link: bool,
     pub confirm_close: bool,
     pub collapsed_sidebar: CollapsedSidebar,
     pub host_cursor: HostCursor,
@@ -983,6 +985,7 @@ impl Default for Config {
             mouse_capture: true,
             mouse_scroll_lines: 3,
             copy_on_select: false,
+            confirm_open_link: false,
             confirm_close: true,
             collapsed_sidebar: CollapsedSidebar::Compact,
             host_cursor: HostCursor::Native,
@@ -1241,6 +1244,11 @@ impl Config {
                     self.copy_on_select = value
                         .boolean(&mut warnings, path)
                         .unwrap_or(self.copy_on_select)
+                }
+                "ui.confirm_open_link" => {
+                    self.confirm_open_link = value
+                        .boolean(&mut warnings, path)
+                        .unwrap_or(self.confirm_open_link)
                 }
                 "ui.sidebar_collapsed_mode" => match value.text() {
                     Some("compact") => self.collapsed_sidebar = CollapsedSidebar::Compact,
@@ -1716,6 +1724,10 @@ pub fn default_config_text() -> String {
         config.mouse_scroll_lines
     ));
     out.push_str(&format!("copy_on_select = {}\n", config.copy_on_select));
+    out.push_str(&format!(
+        "confirm_open_link = {}\n",
+        config.confirm_open_link
+    ));
     out.push_str(&format!("confirm_close = {}\n", config.confirm_close));
     out.push_str("sidebar_collapsed_mode = \"compact\" # compact | hidden\n");
     out.push_str("host_cursor = \"native\"      # native | drawn\n");
