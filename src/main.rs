@@ -593,6 +593,7 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
     let mut json = false;
     let mut yes = false;
     let mut lines = 100usize;
+    let mut service: Option<String> = None;
     let mut policy = hc_tui::plugin::registry::EnablePolicy::Keep;
     let mut targets: Vec<String> = Vec::new();
     let mut index = 0;
@@ -608,6 +609,14 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
             }
             "--json" => json = true,
             "--yes" | "-y" => yes = true,
+            "--service" => {
+                index += 1;
+                service = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!(t("--service needs a value")))?,
+                );
+            }
             "-n" => {
                 index += 1;
                 lines = args
@@ -714,6 +723,9 @@ fn packages_manage(group: &str, args: &[String], alias: Option<&str>) -> Result<
         }
         "log" => {
             let id = package_target(&targets, "log")?;
+            if let Some(service) = &service {
+                return print_service_log(&config, id, service, lines);
+            }
             let store = if plugin_record(&config, id).is_some() {
                 hc_tui::store::Store::open(config.plugins_state_dir())
             } else {
@@ -753,7 +765,21 @@ fn plugin_record(config: &hc_tui::config::Config, id: &str) -> Option<hc_tui::st
 /// `packages list`：安装记录一行一个包，前缀徽章标出能力（A/T/M）。
 fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
     let registry = hc_tui::plugin::registry::Registry::load(config);
-    let entries = registry.entries(config);
+    let terminals = service_terminals(config);
+    let mut entries = registry.entries(config);
+    for entry in &mut entries {
+        entry.services = registry
+            .services_of(&entry.id)
+            .iter()
+            .map(|info| {
+                if entry.enabled {
+                    hc_tui::plugin::service::status(info, terminals.as_deref().unwrap_or(&[]))
+                } else {
+                    hc_tui::plugin::service::ServiceStatus::stopped(info)
+                }
+            })
+            .collect();
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
@@ -761,8 +787,14 @@ fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
     if entries.is_empty() {
         println!("{}", t("no plugins installed"));
     }
+    if terminals.is_none() && entries.iter().any(|entry| !entry.services.is_empty()) {
+        eprintln!(
+            "{}",
+            t("no core for this session; service state comes from declarations only")
+        );
+    }
     for entry in &entries {
-        println!(
+        let mut line = format!(
             "{:<32} {:<9} gen {:<3} {:<8} {}",
             entry.id,
             entry.source,
@@ -770,6 +802,11 @@ fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
             if entry.enabled { "enabled" } else { "disabled" },
             entry.capabilities.badges()
         );
+        if let Some(summary) = service_summary(&entry.services) {
+            line.push(' ');
+            line.push_str(&summary);
+        }
+        println!("{line}");
         if let Some(plugin) = registry.get(&entry.id) {
             for terminal in &plugin.manifest.terminals {
                 println!(
@@ -780,12 +817,102 @@ fn packages_list(config: &hc_tui::config::Config, json: bool) -> Result<()> {
                 );
             }
         }
+        for service in &entry.services {
+            println!(
+                "    {:<40} service · {}",
+                service.id,
+                service_detail(service)
+            );
+        }
         if let Some(module) = &entry.module {
             println!("    {:<40} module · {}", module.bundle, module.title);
         }
         for issue in &entry.issues {
             println!("    {:<40} issue · {}", "", issue);
         }
+    }
+    Ok(())
+}
+
+/// 已存在 core 的终端清单（含已结束的记录）；`None` 表示本会话没有 core。
+///
+/// 不按需拉起 core：`hc connect` 在没有 core 时会启动一个。
+fn service_terminals(config: &hc_tui::config::Config) -> Option<Vec<serde_json::Value>> {
+    if !hc_tui::app::winless::core_alive(config) {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let mut conn = hc_tui::hc::client::Conn::connect(config.session.as_deref())
+            .await
+            .ok()?;
+        let reply = conn
+            .call("terminal.list", serde_json::json!({ "all": true }))
+            .await
+            .ok()?;
+        let terminals = reply.get("terminals")?.as_array()?;
+        Some(terminals.clone())
+    })
+}
+
+/// 一行里的服务状态摘要：在跑的 / 声明的总数，有失败时带 `✗`。
+fn service_summary(services: &[hc_tui::plugin::service::ServiceStatus]) -> Option<String> {
+    if services.is_empty() {
+        return None;
+    }
+    let running = services
+        .iter()
+        .filter(|service| {
+            service.state == hc_tui::plugin::service::RUNNING
+                || service.state == hc_tui::plugin::service::STARTING
+        })
+        .count();
+    let failed = services
+        .iter()
+        .any(|service| service.state == hc_tui::plugin::service::FAILED);
+    Some(if failed {
+        format!("s:{running}/{} ✗", services.len())
+    } else {
+        format!("s:{running}/{}", services.len())
+    })
+}
+
+/// 一条服务的明细行：状态、终端地址、PID、原因。
+fn service_detail(service: &hc_tui::plugin::service::ServiceStatus) -> String {
+    let mut detail = service.state.to_string();
+    if let Some(terminal) = &service.terminal {
+        detail.push_str(&format!(" · {terminal}"));
+    }
+    if let Some(pid) = service.pid {
+        detail.push_str(&format!(" · pid {pid}"));
+    }
+    if let Some(reason) = &service.reason {
+        detail.push_str(&format!(" · {reason}"));
+    }
+    detail
+}
+
+/// `packages log <package> --service <id>`：读服务声明的日志文件尾部。
+fn print_service_log(
+    config: &hc_tui::config::Config,
+    id: &str,
+    service: &str,
+    lines: usize,
+) -> Result<()> {
+    let registry = hc_tui::plugin::registry::Registry::load(config);
+    let info = registry
+        .services_of(id)
+        .into_iter()
+        .find(|info| info.service == service || info.name == service)
+        .ok_or_else(|| anyhow::anyhow!(t2("{} declares no service {}", id, service)))?;
+    let path = hc_tui::plugin::service::log_path(&info, &config.plugins_state_dir())
+        .ok_or_else(|| anyhow::anyhow!(t1("service {} declares no log", info.name.clone())))?;
+    match hc_tui::plugin::service::log_tail(&path, lines) {
+        Ok(text) => println!("{text}"),
+        Err(error) => println!("{}", t2("no log for {}: {}", info.name, error)),
     }
     Ok(())
 }

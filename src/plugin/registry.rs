@@ -149,6 +149,8 @@ pub struct PackageEntry {
     pub module: Option<ModuleInfo>,
     /// 这个包的加载问题。
     pub issues: Vec<String>,
+    /// 这个包声明的服务及其状态；`packages list` 取到 core 终端清单后填入。
+    pub services: Vec<super::service::ServiceStatus>,
 }
 
 /// 加载失败的插件或跳过原因。
@@ -430,8 +432,25 @@ impl Registry {
 
     /// 已启用包声明的常驻服务。
     pub fn services(&self) -> Vec<ServiceInfo> {
+        self.service_infos(true)
+    }
+
+    /// 一个包声明的服务（含已停用的包）：`packages list` 与 `packages log` 使用。
+    pub fn services_of(&self, package: &str) -> Vec<ServiceInfo> {
+        self.service_infos(false)
+            .into_iter()
+            .filter(|info| info.package == package)
+            .collect()
+    }
+
+    /// 声明 → [`ServiceInfo`]；`enabled_only` 决定是否包含已停用的包。
+    fn service_infos(&self, enabled_only: bool) -> Vec<ServiceInfo> {
         let mut services = Vec::new();
-        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+        for plugin in self
+            .plugins
+            .iter()
+            .filter(|plugin| !enabled_only || plugin.enabled)
+        {
             for service in plugin.manifest.services() {
                 services.push(ServiceInfo {
                     name: format!("{}.{}", plugin.id, service.id()),
@@ -549,20 +568,6 @@ impl Registry {
             .collect()
     }
 
-    /// 加载问题加上服务物化前能判定的缺失程序：`packages list` 不静默。
-    fn service_issues(&self, id: &str) -> Vec<String> {
-        let mut issues = self.issues_for(id);
-        for info in self.services().iter().filter(|info| info.package == id) {
-            if let Some(error) = super::service::missing_program(info) {
-                issues.push(format!(
-                    "service {}: {}: {}",
-                    info.name, error.kind, error.message
-                ));
-            }
-        }
-        issues
-    }
-
     /// `packages list` 的数据：两个 store 的记录按 id 合并，能力恒有。
     ///
     /// 旧记录没有 `capabilities` 字段时按清单回填，不进 `issues`。
@@ -607,7 +612,8 @@ impl Registry {
                     enabled: record.enabled,
                     capabilities,
                     module,
-                    issues: self.service_issues(&record.id),
+                    issues: self.issues_for(&record.id),
+                    services: Vec::new(),
                 }
             })
             .collect()
