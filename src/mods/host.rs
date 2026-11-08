@@ -29,6 +29,10 @@ pub const METHODS: &[&str] = &[
     "surface",
     "setAgentOrder",
     "requestGrants",
+    "ask",
+    "answer",
+    "setProps",
+    "dismiss",
 ];
 
 /// 一条从引擎线程搬来的调用；`reply` 为 `None` 表示 post。
