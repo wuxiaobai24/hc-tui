@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod config;
 pub mod config_dump;
 pub mod copy;
+pub mod diag;
 pub mod hc;
 pub mod i18n;
 pub mod layout;

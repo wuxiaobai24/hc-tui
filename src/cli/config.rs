@@ -68,10 +68,19 @@ fn check(args: &[String]) -> Result<()> {
         println!("    文件不存在，全部使用默认值");
     }
     if !config.errors.is_empty() {
+        println!(
+            "Error: 配置文件非法 {}（{} 处）",
+            path.display(),
+            config.errors.len()
+        );
         for error in &config.errors {
-            println!("{}", config::describe(&path, error));
+            println!("  {}", config::describe(&path, error));
         }
-        println!("{} 个错误", config.errors.len());
+        println!("  你的情况：这个文件不符合 config.toml 的语法或字段约束，hc-tui 按默认值启动");
+        println!(
+            "Possible fix: cp {path} {path}.bak && hc-tui --default-config > {path}",
+            path = path.display()
+        );
         std::process::exit(1);
     }
     let theme = match config.theme_name_position {

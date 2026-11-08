@@ -99,7 +99,7 @@ fn session_name(config: &Config) -> String {
 }
 
 /// core 的 unix socket：`$XDG_RUNTIME_DIR/herdr-core/<session>.sock`。
-fn core_socket(config: &Config) -> Option<std::path::PathBuf> {
+pub fn core_socket_path(config: &Config) -> Option<std::path::PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())?;
     Some(socket_in(
         std::path::Path::new(&runtime),
@@ -113,7 +113,8 @@ fn socket_in(runtime: &std::path::Path, session: &str) -> std::path::PathBuf {
 
 /// 本会话已经有一个可连的 core；不按需拉起。
 pub fn core_alive(config: &Config) -> bool {
-    core_socket(config).is_some_and(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
+    core_socket_path(config)
+        .is_some_and(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
 }
 
 /// prompt 需要的输入从 argv 取：确认类只认 `confirmed: true`（等价于窗口里敲

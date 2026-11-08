@@ -118,6 +118,8 @@ _hc-tui() {
     'session-hook:install, remove or inspect the chat hook'
     'completion:print a shell completion script'
     'config:check the config file, reset [keys], dump or init'
+    'config:check the config file or reset the [keys] section'
+    'doctor:run the sectioned self-check'
   )
   _arguments -C \
     '1:command:->command' \
@@ -175,7 +177,7 @@ _hc_tui() {
     esac
   done
   if [[ -z "$sub" ]]; then
-    COMPREPLY=($(compgen -W "packages plugins do events commands mods update probe session-hook completion config" -- "$cur"))
+    COMPREPLY=($(compgen -W "packages plugins do events commands mods update probe session-hook completion config doctor" -- "$cur"))
     return 0
   fi
   index=$((COMP_CWORD - i))
@@ -263,6 +265,8 @@ complete -c hc-tui -n '__fish_use_subcommand' -a probe -d 'probe the core'
 complete -c hc-tui -n '__fish_use_subcommand' -a session-hook -d 'install or remove the chat hook'
 complete -c hc-tui -n '__fish_use_subcommand' -a completion -d 'print a shell completion script'
 complete -c hc-tui -n '__fish_use_subcommand' -a config -d 'check the config file, reset [keys], dump or init'
+complete -c hc-tui -n '__fish_use_subcommand' -a config -d 'check the config file or reset the [keys] section'
+complete -c hc-tui -n '__fish_use_subcommand' -a doctor -d 'run the sectioned self-check'
 
 complete -c hc-tui -f -n '__hc_tui_packages_subcommand' -a list -d 'list installed packages'
 complete -c hc-tui -f -n '__hc_tui_packages_subcommand' -a install -d 'install from a directory, .nshpkg, git url or .tar.gz'

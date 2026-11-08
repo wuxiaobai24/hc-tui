@@ -578,9 +578,25 @@ pub fn load_dir(dir: &Path) -> Result<Loaded, ManifestError> {
     }
 }
 
+/// 清单读不过去时的三段式错误块；`target` 是用户传入的 token，原样回显。
+pub fn manifest_error(target: &str, error: &ManifestError) -> String {
+    crate::diag::detail(
+        &format!(
+            "{target}: 清单非法 {}:{}:{}: {}",
+            error.path.display(),
+            error.line,
+            error.column,
+            error.message
+        ),
+        "这个包目录的清单不符合 hctui.toml 的语法或字段约束，hc-tui 拒绝加载",
+        &format!("sed -n '{}p' {}", error.line, error.path.display()),
+    )
+}
+
 /// 安装前检查：清单合法，且声明了模块时 bundle 存在、非空。
 pub fn install_ready(dir: &Path) -> Result<Loaded, String> {
-    let loaded = load_dir(dir).map_err(|error| error.to_string())?;
+    let target = dir.display().to_string();
+    let loaded = load_dir(dir).map_err(|error| manifest_error(&target, &error))?;
     if let Some(module) = &loaded.manifest.module {
         let bundle = dir.join(module.bundle());
         match std::fs::metadata(&bundle) {
