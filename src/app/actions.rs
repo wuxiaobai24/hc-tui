@@ -162,6 +162,88 @@ impl App {
         self.dirty = true;
     }
 
+    /// 打开键位帮助：装了 `help` 模块就开模块浮层，否则用内置浮层。
+    pub fn open_help(&mut self) {
+        if self.help_module_available() {
+            let data = self.help_overlay_data();
+            match self.open_mod_overlay("help", crate::mods::SurfacePlace::Popup, data) {
+                Ok(_) => {
+                    self.dirty = true;
+                    return;
+                }
+                Err(error) => self.note = error,
+            }
+        }
+        self.help = Some(HelpOverlay {
+            query: String::new(),
+            selected: 0,
+            scroll: 0,
+        });
+        self.dirty = true;
+    }
+
+    /// 模块浮层的打开参数：表面矩形要正好等于内容区，所以用 `popup` 形态
+    /// 配一个内容区左上角减一的锚点（`popup_rect` 把锚点向右下让一格）。
+    fn help_overlay_data(&self) -> Value {
+        let content = self.content;
+        json!({
+            "width": content.width,
+            "height": content.height,
+            "at": [
+                content.x.saturating_sub(1),
+                content.y.saturating_sub(1),
+            ],
+            "onEsc": "module",
+            "props": self.help_props(),
+        })
+    }
+
+    /// 帮助模块的 props：键位表、copy-mode 固定行、预设与已本地化文案。
+    fn help_props(&self) -> Value {
+        let groups: Vec<Value> = self
+            .help_groups()
+            .into_iter()
+            .map(|group| {
+                json!({
+                    "group": group.section,
+                    "label": t(group.section),
+                    "rows": group
+                        .rows
+                        .iter()
+                        .map(|(key, title)| json!({"key": key, "title": title}))
+                        .collect::<Vec<Value>>(),
+                })
+            })
+            .collect();
+        let copy_mode: Vec<Value> = crate::app::COPY_MODE_ROWS
+            .iter()
+            .map(|&(key, title)| json!({"key": key, "title": t(title)}))
+            .collect();
+        json!({
+            "title": t(" keybinds"),
+            "preset": t1("preset {}", self.keys_preset()),
+            "filter": t(" press / to filter by command or shortcut"),
+            "footer": t("search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter"),
+            "matches": t("matches"),
+            "groups": groups,
+            "copyMode": {
+                "group": "copy mode",
+                "label": t("copy mode"),
+                "rows": copy_mode,
+            },
+        })
+    }
+
+    /// `--no-mods`、停用或未安装时不走模块。
+    fn help_module_available(&self) -> bool {
+        !self.config.no_mods
+            && self.mods.is_enabled("help")
+            && matches!(
+                crate::pkg::resolve(&self.config, "help"),
+                Ok(Some(package)) if package.enabled && package.module.is_some()
+            )
+    }
+
     /// `--no-mods`、停用或未安装时不走模块。
     fn settings_module_available(&self) -> bool {
         !self.config.no_mods
@@ -846,13 +928,7 @@ impl App {
             }
             "app.palette" => self.open_palette(),
             "app.settings" => self.open_settings(),
-            "app.help" => {
-                self.help = Some(HelpOverlay {
-                    query: String::new(),
-                    selected: 0,
-                    scroll: 0,
-                })
-            }
+            "app.help" => self.open_help(),
             "app.theme" => {
                 let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
                 let theme = crate::theme::builtin(&name)

@@ -69,11 +69,7 @@ impl App {
     pub(super) fn run_named_binding(&mut self, name: &str) {
         match name {
             "help" => {
-                self.help = Some(HelpOverlay {
-                    query: String::new(),
-                    selected: 0,
-                    scroll: 0,
-                });
+                self.open_help();
                 self.dirty = true;
             }
             "settings" => {

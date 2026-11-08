@@ -1,0 +1,9 @@
+{
+  "name": "Keybindings",
+  "id": "dev.hctui.mods.help",
+  "version": "1.0.0",
+  "build": 1,
+  "capabilities": {
+    "host": ["closeOverlay"]
+  }
+}

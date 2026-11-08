@@ -303,7 +303,7 @@ fn draw_region(region: Region, app: &mut App, frame: &mut Frame, rect: Rect, the
         Region::Help => {
             if let Some(help) = app.help.as_ref() {
                 let rows = app.help_view();
-                render_help(frame, help, &rows, rect, theme);
+                render_help(frame, help, &rows, rect, theme, app.keys_preset());
             }
         }
         Region::Toast => {

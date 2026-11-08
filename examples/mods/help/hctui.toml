@@ -1,0 +1,12 @@
+[mod]
+id = "help"
+title = "Keybindings"
+place = "none"
+host_api = 1
+
+[overlay]
+kind = "popup"
+
+[grants]
+host = ["closeOverlay"]
+events = ["props.changed", "theme.changed"]
