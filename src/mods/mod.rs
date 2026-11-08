@@ -23,6 +23,7 @@ pub const EVENTS: &[&str] = &[
     "command",
     "grant.changed",
     "action.finished",
+    "overlay.result",
     "app.ready",
 ];
 
@@ -131,6 +132,16 @@ pub struct ModSurface {
     pub fails: u32,
     /// `window` 覆盖层的位置记忆 key。
     pub key: Option<String>,
+    /// 打开时的 props 副本；`setProps` 热更新。
+    pub props: Value,
+    /// `modal` / `autofocus` / `onEsc` / `clickThrough` 的打开参数。
+    pub modal: bool,
+    /// 打开后是否索取键盘焦点。
+    pub autofocus: bool,
+    /// `Esc` 归谁处理：`true` 为宿主先关覆盖层，`false` 交给表面。
+    pub esc_to_host: bool,
+    /// 覆盖层之外的鼠标事件是否穿透到下层。
+    pub click_through: bool,
     /// 最近一次错误摘要，写日志并标注在失败表面顶部。
     pub last_error: Option<String>,
     /// 引擎回调收集的运行期错误，绘制后由宿主取走并计数。
@@ -169,6 +180,39 @@ pub struct ModRequest {
     pub error: Option<String>,
     /// 记录时间，超时回收。
     pub since: Instant,
+}
+
+/// 一次 `ask` 的待答记录：props 已交给目标表面，等它的 `answer`。
+pub struct ModAsk {
+    /// 请求 ID。
+    pub id: String,
+    /// 等待回答的表面。
+    pub surface: String,
+    /// 发起方模块。
+    pub asker: String,
+    /// 发起方的应答通道。
+    pub reply: Option<nsh_engine::HostReply>,
+    /// 超时时刻；到时返回 `timeout`。
+    pub deadline: Instant,
+}
+
+/// 一条已登记的通知；`dismiss` 按 id 撤销。
+#[derive(Debug, Clone)]
+pub struct ModNotification {
+    /// 通知 ID，`notify` 的返回值。
+    pub id: String,
+    /// `info` / `warn` / `error`。
+    pub level: String,
+    /// 合并后的标题与正文。
+    pub text: String,
+    /// 点击时要执行的动作。
+    pub action: Option<Value>,
+    /// 动作目标 Pane 或终端。
+    pub target: Option<String>,
+    /// 归属表面。
+    pub surface: Option<String>,
+    /// 创建时刻（Unix 秒）。
+    pub created: u64,
 }
 
 /// `window` 覆盖层的位置记忆。
@@ -423,6 +467,11 @@ impl ModRuntime {
             state: SurfaceState::Loading,
             fails: 0,
             key,
+            props: Value::Null,
+            modal: true,
+            autofocus: true,
+            esc_to_host: true,
+            click_through: false,
             last_error: None,
             errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });

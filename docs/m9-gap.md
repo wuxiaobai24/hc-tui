@@ -303,21 +303,35 @@
 
 **G1 选择与输入的结果回传。** 计划承诺 `overlay.result`（`docs/plan-extensions.md:159`），代码里没有（`src/mods/host.rs:17-33`、`src/mods/mod.rs:14-27`）。模块打开另一个模块的选择器后拿不到选中值，宿主发起的输入也只能靠模块自己 `run` 结束。建议：**新增宿主方法 `ask`**（宿主→模块带 `props` 与超时，模块用 `answer` 回复），并**新增事件 `overlay.result`** 供打开方接收；只扩 props 无法闭环。
 
+已由 base 票解决：新增宿主方法 `ask`/`answer` 与事件 `overlay.result`，超时返回 `timeout`。
+
 **G2 输入法组合事件。** 宿主只翻译按键、粘贴、焦点、鼠标（`src/mods/input.rs:7-57`），`Input` 枚举没有预编辑/组合项（nsh 固定提交 `951556d`，`~/.cargo/git/checkouts/nsh-9218b667fc8c8325/951556d/crates/nsh-platform-tui/src/input.rs:85-108`）；项目文档也把 IME 列为未验证（`docs/plan-v1.1.md:286`）。建议：**扩输入通道**（nsh `Input` 增加组合事件，`src/mods/input.rs` 加翻译，`docs/mods.md:222-229` 表同步），不塞进 props，也不新增宿主方法。
 
 **G3 滚动位置的双向同步。** 不需要。命中测试按表面矩形在宿主侧完成（`src/app/mods.rs:1166-1224`），模块滚动是模块内部状态；三个 Rust 浮层的滚动都是每帧从 `selected` 推出的局部值（`src/ui/mod.rs:1783-1787`、`src/ui/mod.rs:1920-1923`、`src/ui/mod.rs:2072-2076`、`src/ui/mod.rs:2277-2283`）。宿主已通过 `surface` 返回 cols/rows（`src/app/mods.rs:77-90`），每帧也会刷新 `surface.area`（`src/mods/render.rs:37-40`）。结论：不新增能力。
 
 **G4 模态所有权。** `Esc` 在宿主侧先关覆盖层（`src/app.rs:1470-1477`），模块无法先处理「返回上一层过滤」。打开参数里没有「模态/不抢焦点/是否响应外部点击」。建议：**扩 `overlay` 与 `mods.open` 的参数**（`modal`、`autofocus`、`onEsc: "host"|"module"`、`clickThrough`），属打开时的静态属性，不新增方法。
 
+已由 base 票解决：`overlay` 与 `mods.open` 增加 `modal`/`autofocus`/`onEsc`/`clickThrough`。
+
 **G5 已打开表面的 props 热更新。** 只有打开瞬间的 `props.changed`（`src/app/mods.rs:1049-1051`）。toast 队列、settings 的当前值变化都需要推送。建议：**新增宿主方法 `setProps {surface, props}`**；`notify` 也可以路由到指定表面，但语义混淆，单独方法更清楚。
+
+已由 base 票解决：新增宿主方法 `setProps {surface, props}`。
 
 **G6 提醒通道。** `notify` 丢 `level`（`src/app/mods.rs:285-296`），返回的 id 没登记（`src/app/mods.rs:685-698`），没有撤销方法，宿主自身生成的提醒不进模块（`src/app/mods.rs:691`）。状态行 `note` 也没有模块写入口（`src/app.rs:531`）。建议：**扩 `notify` 参数**（`level`、`action`、`target`、`surface`），**新增 `dismiss {id}`**，并把 `note` 并入 `notify {status: true}`。
 
+已由 base 票解决：`notify` 扩 `level`/`action`/`target`/`surface`/`status`，新增 `dismiss {id}`，宿主自身提示走 `status: true`。
+
 **G7 动作覆盖与确认语义。** 补 5 个动作：`terminal.send`、`terminal.keys`、`terminal.wait`、`terminal.put`、`machine.rename`（对照 `src/app.rs:3816-3903` 与 `src/app/actions.rs:6-100`）。`run` 的 `confirmation_pending` 恒 `false`（`src/app/mods.rs:166`），返回即 `done`（`src/app/mods.rs:146-178`），异步失败不回传。建议：**扩 `run` 的语义**（如实置 `confirmation_pending`，异步动作在 `action.finished` 里带终态），不新增方法。
+
+已由 base 票解决：补 `terminal.send`/`terminal.keys`/`terminal.wait`/`terminal.put`/`machine.rename`；`run` 的 `confirmation_pending` 如实，异步动作在 `action.finished` 里带终态。
 
 **G8 命令事件未投递。** `command` 在 `EVENTS` 里（`src/mods/mod.rs:14-27`），文档承诺 `<mod>.<command>` 经它投递（`docs/mods.md:236`），实际没有发送点（§0.2）。命令面板接入模块命令依赖这条通道。建议：**补发送点**，不新增方法。
 
+已由 base 票解决：分发器把 `<mod>.<command>` 经 `command` 事件投递给该模块表面。
+
 **G9 快照域不完整且粒度过粗。** 缺 `commands`、`keybindings`、`settings`、`machineInfo`、`templates`、`notifications`；`panes` 缺归属与显示字段（`src/app/mods.rs:573-587`）；`state` 的 `space` 参数被忽略（`docs/mods.md:312` 与 `src/app/mods.rs:134-140`）；`state.changed` 固定广播 7 个域且不含 `theme`（`src/app/mods.rs:1105-1116`）。建议：**扩 props**（新增域与字段，`domains` 如实反映变化），不新增方法。
+
+已由 base 票解决：新增 `commands`/`keybindings`/`settings`/`machineInfo`/`templates`/`notifications` 六域，`panes` 补归属与显示字段，`state` 支持 `space`，`state.changed` 的 `domains` 如实反映变化并包含 `theme`。
 
 **G10 模态的默认入口。** 默认键位与三个动作都指向 Rust 实现：`keys.help`/`keys.settings`/`keys.goto`（`src/app/bindings.rs:69-94`）、`app.help`/`app.settings`/`app.palette`（`src/app/actions.rs:667-680`）、`overlay.close`（`src/app/actions.rs:829-841`）。可配置绑定表是固定的 `Keys` 结构（`src/config.rs:395-460`），不能把某个名字改指向模块。建议：**扩 props/配置**（新增「绑定名 → 表面」的表，或让三个 `app.*` 动作优先派发到已绑定的模块），不新增方法。
 

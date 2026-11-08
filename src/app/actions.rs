@@ -43,6 +43,19 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("terminal.scroll", "Scroll history; lines, pages, to"),
     ("terminal.search", "Search terminal history"),
     ("terminal.right_click", "Right click to program or menu"),
+    ("terminal.send", "Send text to a terminal; terminal, text"),
+    (
+        "terminal.keys",
+        "Send named keys to a terminal; terminal, keys",
+    ),
+    (
+        "terminal.wait",
+        "Wait for output in a terminal; terminal, output",
+    ),
+    (
+        "terminal.put",
+        "Upload a local file to a terminal; terminal, path",
+    ),
     ("agent.rename", "Rename an agent terminal"),
     ("agent.focus", "Focus agent, including sub-agents"),
     ("agent.next", "Next agent in displayed order"),
@@ -51,6 +64,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("machine.connect", "Connect a machine"),
     ("machine.add", "Add a machine"),
     ("machine.remove", "Remove a machine"),
+    ("machine.rename", "Rename a machine; machine, name"),
     ("mod.open", "Open a built-in or configured script panel"),
     ("files.open", "Browse files on this space's machine"),
     (
@@ -118,6 +132,22 @@ impl App {
             // 键位与菜单走同一道闸门：停用后的包里动作报 disabled。
             if let Some(package) = crate::plugin::registry::disabled_package(&self.config, name) {
                 anyhow::bail!(t1("plugin {} is disabled", &package));
+            }
+            // 模块命令：`<mod>.<command>` 经 `command` 事件投递给该模块的表面。
+            if let Some((mod_id, command)) = name.split_once('.') {
+                if self
+                    .mods
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface.mod_id == mod_id)
+                {
+                    anyhow::ensure!(
+                        self.mods.granted(mod_id, "command"),
+                        t1("method {} not granted", "command")
+                    );
+                    self.send_mod_event(mod_id, "command", &json!({"name": command, "args": args}));
+                    return Ok(());
+                }
             }
         }
         let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
@@ -459,6 +489,75 @@ impl App {
                 );
                 self.open_terminal(&address);
             }
+            "terminal.send" => {
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
+                let text = text("text").ok_or_else(|| anyhow::anyhow!(t("text required")))?;
+                self.call_rpc(
+                    "send",
+                    "terminal.send",
+                    json!({"terminal": address, "text": text}),
+                );
+            }
+            "terminal.keys" => {
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
+                let keys: Vec<String> = match args.get("keys") {
+                    Some(Value::Array(list)) => list
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                    Some(Value::String(line)) => line
+                        .split(|character: char| character == ',' || character.is_whitespace())
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                anyhow::ensure!(!keys.is_empty(), t("keys required"));
+                self.call_rpc(
+                    "keys",
+                    "terminal.keys",
+                    json!({"terminal": address, "keys": keys}),
+                );
+            }
+            "terminal.wait" => {
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
+                let output = text("output").ok_or_else(|| anyhow::anyhow!(t("output required")))?;
+                self.call_rpc(
+                    "wait",
+                    "terminal.wait",
+                    json!({"terminal": address, "output": output}),
+                );
+            }
+            "terminal.put" => {
+                let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
+                let path = text("path").ok_or_else(|| anyhow::anyhow!(t("path required")))?;
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| anyhow::anyhow!(t1("read failed: {}", error)))?;
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".to_string());
+                self.call_rpc(
+                    "put",
+                    "terminal.put",
+                    json!({
+                        "terminal": address,
+                        "name": name,
+                        "data": crate::clipboard::base64(&bytes),
+                    }),
+                );
+            }
+            "machine.rename" => {
+                let machine =
+                    text("machine").ok_or_else(|| anyhow::anyhow!(t("machine required")))?;
+                let name = text("name").ok_or_else(|| anyhow::anyhow!(t("name required")))?;
+                self.call_rpc(
+                    "machine.rename",
+                    "machine.rename",
+                    json!({"machine": machine, "name": name}),
+                );
+            }
             "terminal.pin" => {
                 let address = terminal().ok_or_else(|| anyhow::anyhow!(t("terminal required")))?;
                 let pinned = args["pinned"].as_bool().unwrap_or(true);
@@ -683,7 +782,7 @@ impl App {
                 self.config.theme = crate::theme::builtin(&name)
                     .ok_or_else(|| anyhow::anyhow!(t("unknown theme")))?;
                 self.notify_mods_theme();
-                self.bump_mod_revision();
+                self.bump_mod_revision_domains(&["theme"]);
                 crate::config::write_setting(
                     &self.config.config_path,
                     "theme.name",
@@ -771,8 +870,10 @@ impl App {
                 });
                 let props = args.get("props").cloned().unwrap_or_else(|| json!({}));
                 let key = text("key");
-                self.mods_open(&name, place, props, size, at, key)
+                let surface = self
+                    .mods_open(&name, place, props, size, at, key)
                     .map_err(anyhow::Error::msg)?;
+                self.apply_surface_options(&surface, &args);
             }
             "mods.close" => {
                 let target = text("surface")
@@ -815,7 +916,7 @@ impl App {
                 self.send_mod_event(&name, "grant.changed", &json!({ "grants": grants }));
                 self.persist_mod_grants(&name);
                 self.seen_dirty = true;
-                self.bump_mod_revision();
+                self.bump_mod_revision_domains(&[]);
             }
             "mods.enable" | "mods.disable" => {
                 let enable = name == "mods.enable";
@@ -828,6 +929,7 @@ impl App {
             }
             "overlay.close" => {
                 self.prompt = None;
+                self.settle_mod_confirm("cancelled");
                 self.goto = None;
                 self.reader = None;
                 self.chooser = None;

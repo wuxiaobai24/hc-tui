@@ -232,8 +232,8 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 - 模块内部的 Tab 导航由 nsh 处理；离开模块用宿主命令（`pane.go` 或绑定动作）。
 - `Ctrl+B` 在模块文本输入中仍先被前缀消费；连按两次把字面 `Ctrl+B` 交给表面。
 - 鼠标按 z 序选择表面；拖动目标从按下到释放保持不变；覆盖层内操作不穿透。
-- `Esc` 关闭顶层 dialog 或 popup；`window` 由自身控件关闭。
-- `<mod>.<command>` 通过 `host.on("command", { name, args })` 投递，命令面板、`[[keys.command]]` 与 `hc-tui do` 都能触发。
+- `Esc` 关闭顶层 dialog 或 popup；`window` 由自身控件关闭。打开时声明 `onEsc: "module"` 的表面自己处理 `Esc`，宿主不抢先关闭。
+- `<mod>.<command>` 通过 `host.on("command", { name, args })` 投递，命令面板、`[[keys.command]]` 与 `hc-tui do` 都能触发；分发器把它交给该模块已授予 `command` 事件的表面，未授予返回 `forbidden`。
 
 ## 7. 宿主通道
 
@@ -270,19 +270,44 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
   "generation": 4,
   "revision": 812,
   "connection": "ready",
-  "machines": [],
+  "machines": ["box"],
+  "machineInfo": [],
   "spaces": [],
   "tabs": [],
   "panes": [],
   "agents": [],
   "terminals": [],
   "focused": {},
-  "theme": {}
+  "theme": {},
+  "commands": [],
+  "keybindings": [],
+  "settings": {},
+  "templates": [],
+  "notifications": []
 }
 ```
 
+`domains` 省略时给全部域；`space` 省略时不给 Space 过滤。给了 `space`（形如 `sp1`）后，`spaces`/`tabs`/`panes` 只留该 Space 的项，`agents`/`terminals` 只留该 Space 里 Pane 持有的终端。
+
+| 域 | 内容 | 量级（80 列、约 6 个 Pane 的机器） |
+|---|---|---|
+| `machines` | 工作区出现过的机器名，排序去重 | 每台约 10 字节 |
+| `machineInfo` | 机器对象：`name`、`state`、`address`、`host` | 每台约 70 字节 |
+| `spaces` | `id`/`name`/`machine`/`folder`/`tabs` | 每个约 65 字节 |
+| `tabs` | `id`/`space`/`name`/`settled` | 每个约 55 字节 |
+| `panes` | `id`/`terminal`/`title`/`space`/`tab`/`label`/`cwd`/`live`，上限 512 条 | 每个约 110 字节 |
+| `agents` | `address`/`name`/`title`/`cwd`/`turn`/`pinned` | 每个约 120 字节 |
+| `terminals` | `address`/`title`/`cwd`/`seq` | 每个约 90 字节 |
+| `focused` | `space`/`tab`/`pane`/`mod` | 约 50 字节 |
+| `theme` | 名称、约 36 个 token、16 色调色板 | 约 1 KB |
+| `commands` | 动作名、标题、来源（`builtin` 或 `plugin:<id>`）、`contexts`、`args` 摘要 | 内置 79 条，约 6 KB |
+| `keybindings` | 名称、按键串、标题、分组、是否停用 | 默认 58 条，约 6 KB |
+| `settings` | 段与项（值、文案、是否当前生效）加当前值 | 4 段 19 项，约 1 KB |
+| `templates` | `name`/`title`/`description`；首次 `templates.list` 应答前为空 | 每条约 60 字节 |
+| `notifications` | 队列条目 `id`/`level`/`text`/`created`/`action`/`target`/`surface`，保留最近 200 条 | 每条约 120 字节，随正文长度增长 |
+
 - `revision` 在任何被订阅的数据变化时递增。
-- `state.changed` 的负载是 `{ revision, domains }`，不带差异补丁。
+- `state.changed` 的负载是 `{ revision, domains }`，`domains` 只列本轮真正变化的域（例如切换主题只报 `theme`，终端事件报 `agents`/`terminals`，外框与 Pane 结构报 `spaces`/`tabs`/`panes`）；重连与整体重载时给全部域，不带差异补丁。
 - 模块记录 `revision`；发现跳号或断线重连后重新调用 `state`，不按事件逐条重放。
 - 读取领域由模块显式请求；宿主不追踪每次读取的依赖，也不因模块未读而停发事件。
 - 目标在请求时冻结：`run` 与文件方法使用调用时解析出的稳定 ID 与机器，后续焦点变化不影响。
@@ -302,7 +327,8 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `props.changed` | `{ props }` |
 | `command` | `{ name, args }` |
 | `grant.changed` | `{ grants }` |
-| `action.finished` | `{ request, status, error? }` |
+| `action.finished` | `{ request, status, error? }`；`status` 为 `done`/`failed`/`cancelled`，异步动作在应答或确认结束时才投递 |
+| `overlay.result` | `{ surface, value }`，被 `ask` 的表面调用 `answer` 后投递 |
 | `app.ready` | `{ revision }`，首次连上 core 或重连完成后投递 |
 
 ### 调用 `host.call(name, data)`
@@ -315,16 +341,22 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `exec` | `exec` | `{ argv, cwd?, on?, env?, timeout_s? }` | `{ code, stdout, stderr, timed_out, truncated }`，30 秒、8 MiB |
 | `readFile` | `files` | `{ path, cwd?, on?, max_bytes? }` | `{ data, truncated }`，1 MiB |
 | `writeFile` | `files` | `{ path, data, cwd?, on?, expected? }` | `{ written }`，1 MiB |
-| `notify` | `notify` | `{ title, body?, level?, timeout? }` | `{ id }` |
+| `notify` | `notify` | `{ title, body?, level?, timeout?, action?, target?, surface?, status? }` | `{ id }`，`id` 可被 `dismiss` 撤销；`status: true` 走状态行而不是 toast |
+| `dismiss` | `dismiss` | `{ id }` | `{}`，撤销一条已登记的通知 |
 | `theme` | `theme` | `{}` | `{ name, tokens, palette }` |
-| `overlay` | `overlay` | `{ mod?, props?, kind, width?, height?, at? }` | `{ surface }` |
+| `overlay` | `overlay` | `{ mod?, props?, kind, width?, height?, at?, key?, modal?, autofocus?, onEsc?, clickThrough? }` | `{ surface }` |
 | `closeOverlay` | `overlay` | `{ surface }` | `{}` |
 | `focus` | `overlay` | `{ surface }` | `{}` |
+| `setProps` | `setProps` | `{ surface, props }` | `{}`，给已打开表面推 `props.changed` |
+| `ask` | `ask` | `{ surface?, mod?, props, timeout_ms?, kind?, width?, height?, at? }` | `{ value }`，超时返回 `timeout`，目标关闭返回 `target_gone` |
+| `answer` | `answer` | `{ value }` | `{}`，回答一次 `ask` 并向全部已授予表面投递 `overlay.result` |
 | `surface` | 无 | `{}` | `{ id, generation, place, cols, rows }` |
 | `setAgentOrder` | `order` | `{ addresses }` | `{}` |
 | `requestGrants` | 无 | `{ grants }` | `{ granted }`，触发授予流程 |
 
-- `run` 的 `request` 由宿主生成；`accepted` 只表示动作已被受理。完成状态通过 `request` 查询或 `action.finished` 事件得到；`confirmation_pending` 表示仍需用户在界面确认。
+- `ask` 带 `surface` 时把 `props` 交给该表面，带 `mod` 时先按 `kind` 打开一条新表面；两者都不给时打开调用方的覆盖层。回答到达后 `ask` 返回 `{ value }`。
+- `overlay` 与 `mods.open` 的静态参数：`modal`（默认 `true`，`false` 时鼠标事件继续传给下层）、`autofocus`（默认 `true`，`false` 时不抢键盘焦点）、`onEsc`（`host` 默认先关覆盖层，`module` 交给表面自己处理）、`clickThrough`（默认 `false`，`true` 时不参与鼠标命中）。
+- `run` 的 `request` 由宿主生成；`accepted` 只表示动作已被受理。`confirmation_pending` 在动作打开了确认框或表单时为 `true`，此后的终态在用户确认（`done`）、取消（`cancelled`）时经 `action.finished` 投递。发起 core RPC 的动作先返回 `accepted`，应答到达后才投递 `done` 或带 `error` 的 `failed`；`request` 查询读到同一状态。
 - 所有回复带 `generation`；与当前实例不符的迟到回复由宿主丢弃，模块也应忽略。
 - 错误统一为 `{ code, message }`：`forbidden`、`offline`、`unavailable`、`target_gone`、`not_found`、`invalid`、`timeout`、`busy`、`conflict`、`staging`。
 - `exec` 单表面并发上限 4 条，超出返回 `busy`；默认 `cwd` 与 `on` 取启动参数里的 `folder` 与 `workspace`，显式值优先。
@@ -335,7 +367,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | 层 | 声明位置 | 执行者 | 内容 |
 |---|---|---|---|
 | nsh 能力 | `nsh.json` 的 `capabilities` | nsh 引擎 | 网络主机与端口、文件读写路径、可执行程序、环境变量、剪贴板、通知、打开 URL、选择器 |
-| 宿主授予 | `hctui.toml` 的 `[grants]` | hc-tui | 上表全部方法与 12 个事件名 |
+| 宿主授予 | `hctui.toml` 的 `[grants]` | hc-tui | 上表全部方法与 13 个事件名 |
 
 - 加载时计算 `needed = 声明的 nsh 能力 ∪ 宿主授予`；与上次批准不一致时弹出确认，逐项可拒绝；结果存 `state.json` 的 `mods_grants`。授予的权威是安装记录的 `Record.grants`，清单只在安装与旧记录回填时读。
 - 引擎的 `Policy { declared, granted }` 用批准后的集合收窄；宿主方法在 hc-tui 侧再次校验，未授予返回 `forbidden`。
@@ -428,7 +460,7 @@ TUI 内动作：
 
 | 动作 | 参数 |
 |---|---|
-| `mods.open` | `name` 必填；`props`、`place`（`pane`/`left`/`right`/`top`/`bottom`/`dialog`/`popup`/`window`）、`size` |
+| `mods.open` | `name` 必填；`props`、`place`（`pane`/`left`/`right`/`top`/`bottom`/`dialog`/`popup`/`window`）、`size`、`at`、`key`、`modal`、`autofocus`、`onEsc`、`clickThrough` |
 | `mods.close` | `name` 或 `surface` |
 | `mods.reload` | 可选 `name` |
 | `mods.dock` | `name`、`place`、`size`、`index`、`replace` |

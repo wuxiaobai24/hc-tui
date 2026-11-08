@@ -399,6 +399,20 @@ pub struct App {
     pub mod_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 外框与表面已同步的树快照，避免每轮重建。
     pub mod_chrome_sync: Option<String>,
+    /// 本轮 `state.changed` 涉及的域；`mod_all_domains` 为真时给全集。
+    pub mod_changed_domains: std::collections::BTreeSet<&'static str>,
+    /// 下一轮 `state.changed` 报全部域（重连、结构整体变化时使用）。
+    pub mod_all_domains: bool,
+    /// 待答的 `ask` 调用：宿主已把 props 交付目标表面。
+    pub mod_asks: Vec<crate::mods::ModAsk>,
+    /// 已登记的通知队列，供 `notifications` 域与 `dismiss` 使用。
+    pub mod_notifications: Vec<crate::mods::ModNotification>,
+    /// 最近一次 `templates.list` 的结果缓存。
+    pub mod_templates: Vec<serde_json::Value>,
+    /// `run` 打开确认或表单时记下的 (request, 模块)。
+    pub mod_confirm: Option<(String, String)>,
+    /// `run` 发起后仍在飞的 core RPC：tag → (request, 模块)。
+    pub mod_action_rpc: std::collections::BTreeMap<String, (String, String)>,
     /// 插件注册表：配置目录与安装存储的当前代际。
     pub plugins: crate::plugin::registry::Registry,
     /// 服务作业台账：写进布局文档 `services` 段，旧读者忽略。
@@ -624,6 +638,13 @@ impl App {
             mod_revision: 0,
             mod_wake: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mod_chrome_sync: None,
+            mod_changed_domains: std::collections::BTreeSet::new(),
+            mod_all_domains: false,
+            mod_asks: Vec::new(),
+            mod_notifications: Vec::new(),
+            mod_templates: Vec::new(),
+            mod_confirm: None,
+            mod_action_rpc: std::collections::BTreeMap::new(),
             mods_dirty: false,
             mod_agent_order: None,
             pending_mod_rpc: std::collections::HashMap::new(),
@@ -2728,6 +2749,7 @@ impl App {
             KeyCode::Esc => {
                 self.prompt = None;
                 self.note = t("cancelled").to_string();
+                self.settle_mod_confirm("cancelled");
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 prompt.buffer.clear();
@@ -2735,6 +2757,8 @@ impl App {
             }
             KeyCode::Enter => {
                 let prompt = self.prompt.take().expect("prompt exists");
+                let confirmed = !prompt.kind.needs_confirm()
+                    || matches!(prompt.buffer.trim(), "y" | "Y" | "yes");
                 if !prompt.kind.needs_confirm()
                     && !prompt.buffer.trim().is_empty()
                     && self.prompt_history.last() != Some(&prompt.buffer)
@@ -2745,6 +2769,7 @@ impl App {
                     }
                 }
                 self.commit_prompt(prompt);
+                self.settle_mod_confirm(if confirmed { "done" } else { "cancelled" });
             }
             KeyCode::Backspace => {
                 if prompt.cursor > 0 {
@@ -3010,89 +3035,92 @@ impl App {
 
     // ------------------------------------------------------------- 浮层面板
 
+    /// 键位分组：组标题与绑定名顺序；帮助面板与 `keybindings` 域共用。
+    pub const HELP_GROUPS: [(&'static str, &'static [&'static str]); 5] = [
+        (
+            "global",
+            &[
+                "prefix",
+                "help",
+                "settings",
+                "detach",
+                "reload_config",
+                "open_notification_target",
+            ],
+        ),
+        ("navigation", &["goto", "workspace_picker"]),
+        (
+            "panes",
+            &[
+                "split_vertical",
+                "split_horizontal",
+                "focus_pane_left",
+                "focus_pane_down",
+                "focus_pane_up",
+                "focus_pane_right",
+                "cycle_pane_next",
+                "cycle_pane_previous",
+                "last_pane",
+                "zoom",
+                "stack_panes",
+                "layout_next",
+                "layout_previous",
+                "float_pane",
+                "float_pin",
+                "float_hide",
+                "resize_mode",
+                "close_pane",
+                "rename_pane",
+                "kill_pane",
+                "move_pane",
+                "copy_mode",
+                "edit_history",
+                "toggle_sidebar",
+            ],
+        ),
+        (
+            "tabs and workspaces",
+            &[
+                "new_tab",
+                "rename_tab",
+                "next_tab",
+                "previous_tab",
+                "move_tab_previous",
+                "move_tab_next",
+                "close_tab",
+                "new_workspace",
+                "rename_workspace",
+                "close_workspace",
+                "next_workspace",
+                "previous_workspace",
+            ],
+        ),
+        (
+            "agents and terminals",
+            &[
+                "next_agent",
+                "chat",
+                "send_text",
+                "send_keys",
+                "wait_output",
+                "put_file",
+                "paste_image",
+                "interrupt",
+                "read_pane",
+                "open_link",
+                "templates",
+                "machines",
+                "toggle_keep",
+                "remove_terminal",
+            ],
+        ),
+    ];
+
     /// Keybinds 面板的全部行，按 herdr 的分组分好。
     pub fn help_rows(&self) -> Vec<HelpRow> {
         let bindings = self.config.keys.entries();
         let text = Self::binding_title;
-        let groups: [(&str, &[&str]); 5] = [
-            (
-                "global",
-                &[
-                    "prefix",
-                    "help",
-                    "settings",
-                    "detach",
-                    "reload_config",
-                    "open_notification_target",
-                ],
-            ),
-            ("navigation", &["goto", "workspace_picker"]),
-            (
-                "panes",
-                &[
-                    "split_vertical",
-                    "split_horizontal",
-                    "focus_pane_left",
-                    "focus_pane_down",
-                    "focus_pane_up",
-                    "focus_pane_right",
-                    "cycle_pane_next",
-                    "cycle_pane_previous",
-                    "last_pane",
-                    "zoom",
-                    "stack_panes",
-                    "layout_next",
-                    "layout_previous",
-                    "float_pane",
-                    "float_pin",
-                    "float_hide",
-                    "resize_mode",
-                    "close_pane",
-                    "rename_pane",
-                    "kill_pane",
-                    "move_pane",
-                    "copy_mode",
-                    "edit_history",
-                    "toggle_sidebar",
-                ],
-            ),
-            (
-                "tabs and workspaces",
-                &[
-                    "new_tab",
-                    "rename_tab",
-                    "next_tab",
-                    "previous_tab",
-                    "move_tab_previous",
-                    "move_tab_next",
-                    "close_tab",
-                    "new_workspace",
-                    "rename_workspace",
-                    "close_workspace",
-                    "next_workspace",
-                    "previous_workspace",
-                ],
-            ),
-            (
-                "agents and terminals",
-                &[
-                    "next_agent",
-                    "chat",
-                    "send_text",
-                    "send_keys",
-                    "wait_output",
-                    "put_file",
-                    "paste_image",
-                    "interrupt",
-                    "read_pane",
-                    "open_link",
-                    "templates",
-                    "machines",
-                    "toggle_keep",
-                    "remove_terminal",
-                ],
-            ),
-        ];
+        let groups = Self::HELP_GROUPS;
         let by_name: std::collections::HashMap<&str, crate::config::Binding> =
             bindings.into_iter().collect();
         let mut rows = Vec::new();
@@ -4489,7 +4517,7 @@ impl App {
         self.last_pane = Some(previous);
         self.mark_seen(pane);
         self.mark_layout();
-        self.bump_mod_revision();
+        self.bump_mod_revision_domains(&["focused"]);
         self.send_focus_changed();
     }
 
@@ -5658,6 +5686,20 @@ impl App {
         tag: &str,
         result: std::result::Result<Value, crate::hc::net::RpcFailure>,
     ) {
+        // `run` 发起的异步动作：先把终态写回请求记录并投递 `action.finished`。
+        let outcome = result
+            .as_ref()
+            .cloned()
+            .map_err(|error| error.message.clone());
+        self.settle_mod_action_rpc(tag, &outcome);
+        self.on_reply_inner(tag, result);
+    }
+
+    fn on_reply_inner(
+        &mut self,
+        tag: &str,
+        result: std::result::Result<Value, crate::hc::net::RpcFailure>,
+    ) {
         let request = self.inflight.remove(tag);
         let chat_request = tag
             .starts_with("chat:")
@@ -5838,7 +5880,8 @@ impl App {
             },
             "templates" => match result {
                 Ok(value) => {
-                    let items = value
+                    // 模块快照的 `templates` 域与选择器读同一份缓存。
+                    self.mod_templates = value
                         .get("templates")
                         .and_then(Value::as_array)
                         .map(|templates| {
@@ -5847,22 +5890,41 @@ impl App {
                                 .filter_map(|template| {
                                     let name =
                                         template.get("name").and_then(Value::as_str)?.to_string();
-                                    let description = template
-                                        .get("description")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default();
-                                    Some(ChooserItem {
-                                        label: if description.is_empty() {
-                                            name.clone()
-                                        } else {
-                                            format!("{name} — {description}")
-                                        },
-                                        value: name,
-                                    })
+                                    Some(json!({
+                                        "name": name,
+                                        "title": template
+                                            .get("title")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or(&name),
+                                        "description": template
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default(),
+                                    }))
                                 })
                                 .collect()
                         })
                         .unwrap_or_default();
+                    self.bump_mod_revision_domains(&["templates"]);
+                    let items = self
+                        .mod_templates
+                        .iter()
+                        .filter_map(|template| {
+                            let name = template.get("name")?.as_str()?.to_string();
+                            let description = template
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            Some(ChooserItem {
+                                label: if description.is_empty() {
+                                    name.clone()
+                                } else {
+                                    format!("{name} — {description}")
+                                },
+                                value: name,
+                            })
+                        })
+                        .collect();
                     self.open_chooser(Chooser {
                         title: "templates（Enter 在新 tab 里运行）".to_string(),
                         items,
@@ -6038,6 +6100,7 @@ impl App {
         self.layout_dirty = true;
         self.layout_since = Some(Instant::now());
         self.dirty = true;
+        self.bump_mod_revision_domains(&["spaces", "tabs", "panes"]);
     }
 
     pub fn snapshot(&self) -> SavedState {

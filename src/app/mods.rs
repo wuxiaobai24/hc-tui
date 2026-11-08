@@ -18,6 +18,24 @@ use crate::i18n::{t, t1, t2};
 use crate::mods::host::{self, ModHost, ParamsContext, PendingCall};
 use crate::mods::{ModRuntime, SurfacePlace, SurfaceState, WindowPos};
 
+/// 快照的全部域；`state.changed` 的全集与 `state` 的 `domains` 过滤共用。
+pub const MOD_DOMAINS: &[&str] = &[
+    "machines",
+    "machineInfo",
+    "spaces",
+    "tabs",
+    "panes",
+    "agents",
+    "terminals",
+    "focused",
+    "theme",
+    "commands",
+    "keybindings",
+    "settings",
+    "templates",
+    "notifications",
+];
+
 impl App {
     /// 每轮循环：分发积压的宿主调用，发送待发事件。
     pub fn pump_mods(&mut self) {
@@ -25,6 +43,7 @@ impl App {
             return;
         }
         self.mods.prune_requests();
+        self.expire_mod_asks();
         // 先取 ID 再分发：调用的副作用可能打开或关闭表面。
         let ids: Vec<(String, String)> = self
             .mods
@@ -133,7 +152,8 @@ impl App {
             }
             "state" => {
                 let domains = self.mod_state_domains(&data);
-                let snapshot = self.mod_state_snapshot(&domains);
+                let space = data.get("space").and_then(Value::as_str);
+                let snapshot = self.mod_state_snapshot_in(&domains, space);
                 if let Some(reply) = reply {
                     reply.resolve(snapshot);
                 }
@@ -150,30 +170,54 @@ impl App {
                 };
                 let args = data.get("args").cloned().unwrap_or_else(|| json!({}));
                 let request = self.mods.begin_request(surface_id, action, args.clone());
+                // 动作若发起 core RPC，应答前不能报 done；新出现的 inflight 就是它发的。
+                let before: std::collections::BTreeSet<String> =
+                    self.inflight.keys().cloned().collect();
                 let result = self.execute_action(action, args);
-                let status = match &result {
-                    Ok(()) => "done",
-                    Err(_) => "failed",
+                let in_flight: Vec<String> = self
+                    .inflight
+                    .keys()
+                    .filter(|tag| !before.contains(*tag))
+                    .cloned()
+                    .collect();
+                let confirmation_pending = self.prompt.is_some() || self.form.is_some();
+                let error = result.as_ref().err().map(|error| error.to_string());
+                let status = match (&result, confirmation_pending, in_flight.is_empty()) {
+                    (Err(_), _, _) => "failed",
+                    (Ok(()), true, _) => "confirmation",
+                    (Ok(()), false, false) => "running",
+                    (Ok(()), false, true) => "done",
                 };
                 if let Some(record) = self.mods.requests.get_mut(&request) {
                     record.status = status.into();
-                    record.error = result.as_ref().err().map(|e| e.to_string());
+                    record.error = error.clone();
+                }
+                if confirmation_pending {
+                    self.mod_confirm = Some((request.clone(), mod_id.to_string()));
+                }
+                if status == "running" {
+                    for tag in in_flight {
+                        self.mod_action_rpc
+                            .insert(tag, (request.clone(), mod_id.to_string()));
+                    }
                 }
                 if let Some(reply) = reply {
                     reply.resolve(json!({
                         "request": request,
                         "accepted": result.is_ok(),
-                        "confirmation_pending": false,
+                        "confirmation_pending": confirmation_pending,
                     }));
                 }
-                if let Err(error) = result {
-                    self.note = error.to_string();
+                if let Some(error) = &error {
+                    self.note = error.clone();
                 }
-                self.send_mod_event(
-                    mod_id,
-                    "action.finished",
-                    &json!({"request": request, "status": status}),
-                );
+                if matches!(status, "done" | "failed") {
+                    let mut payload = json!({"request": request, "status": status});
+                    if let Some(error) = &error {
+                        payload["error"] = json!(error);
+                    }
+                    self.send_mod_event(mod_id, "action.finished", &payload);
+                }
                 self.mods_dirty = true;
             }
             "request" => {
@@ -289,9 +333,130 @@ impl App {
                 };
                 let body = data.get("body").and_then(Value::as_str).unwrap_or("");
                 let timeout = data.get("timeout").and_then(Value::as_u64).unwrap_or(4);
-                let id = self.push_mod_toast(title, body, timeout);
+                let level = data.get("level").and_then(Value::as_str).unwrap_or("info");
+                let id = self.push_mod_notification(
+                    title,
+                    body,
+                    level,
+                    timeout,
+                    data.get("action").cloned(),
+                    data.get("target").and_then(Value::as_str),
+                    data.get("surface").and_then(Value::as_str),
+                    data.get("status").and_then(Value::as_bool).unwrap_or(false),
+                );
                 if let Some(reply) = reply {
                     reply.resolve(json!({"id": id}));
+                }
+            }
+            "dismiss" => {
+                let Some(id) = data.get("id").and_then(Value::as_str) else {
+                    host::reject(reply, "invalid", "id required");
+                    return;
+                };
+                let Some(index) = self.mod_notifications.iter().position(|item| item.id == id)
+                else {
+                    host::reject(reply, "not_found", "unknown notification");
+                    return;
+                };
+                let entry = self.mod_notifications.remove(index);
+                if self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.text == entry.text)
+                {
+                    self.toast = None;
+                }
+                self.dirty = true;
+                if let Some(reply) = reply {
+                    reply.resolve(json!({}));
+                }
+            }
+            "setProps" => {
+                let (Some(target), Some(props)) = (
+                    data.get("surface").and_then(Value::as_str),
+                    data.get("props"),
+                ) else {
+                    host::reject(reply, "invalid", "surface and props required");
+                    return;
+                };
+                let props = props.clone();
+                let Some(surface) = self.mods.surface_mut(target) else {
+                    host::reject(reply, "not_found", "no such surface");
+                    return;
+                };
+                surface.props = props.clone();
+                surface.host.send("props.changed", json!({"props": props}));
+                self.dirty = true;
+                if let Some(reply) = reply {
+                    reply.resolve(json!({}));
+                }
+            }
+            "ask" => {
+                let props = data.get("props").cloned().unwrap_or_else(|| json!({}));
+                let timeout_ms = data
+                    .get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30_000)
+                    .clamp(1, 600_000);
+                let target = match data.get("surface").and_then(Value::as_str) {
+                    Some(target) => {
+                        let Some(surface) = self.mods.surface_mut(target) else {
+                            host::reject(reply, "not_found", "no such surface");
+                            return;
+                        };
+                        surface.props = props.clone();
+                        surface.host.send("props.changed", json!({"props": props}));
+                        target.to_string()
+                    }
+                    None => {
+                        let target_mod = data
+                            .get("mod")
+                            .and_then(Value::as_str)
+                            .unwrap_or(mod_id)
+                            .to_string();
+                        let place = data
+                            .get("kind")
+                            .or_else(|| data.get("place"))
+                            .and_then(Value::as_str)
+                            .and_then(crate::mods::SurfacePlace::parse)
+                            .unwrap_or(crate::mods::SurfacePlace::Dialog);
+                        match self.open_mod_overlay(&target_mod, place, data.clone()) {
+                            Ok(id) => id,
+                            Err(error) => {
+                                host::reject(reply, "invalid", &error);
+                                return;
+                            }
+                        }
+                    }
+                };
+                let id = format!("a{}", self.mods.next_request_id());
+                self.mod_asks.push(crate::mods::ModAsk {
+                    id,
+                    surface: target,
+                    asker: mod_id.to_string(),
+                    reply,
+                    deadline: std::time::Instant::now()
+                        + std::time::Duration::from_millis(timeout_ms),
+                });
+                self.dirty = true;
+            }
+            "answer" => {
+                let value = data.get("value").cloned().unwrap_or(Value::Null);
+                if let Some(index) = self
+                    .mod_asks
+                    .iter()
+                    .position(|ask| ask.surface == surface_id)
+                {
+                    let ask = self.mod_asks.remove(index);
+                    if let Some(pending) = ask.reply {
+                        pending.resolve(json!({"value": value.clone()}));
+                    }
+                }
+                let payload = json!({"surface": surface_id, "value": value});
+                self.emit_mod_event("overlay.result", &payload);
+                self.dirty = true;
+                if let Some(reply) = reply {
+                    reply.resolve(json!({}));
                 }
             }
             "overlay" => {
@@ -367,7 +532,7 @@ impl App {
                     .unwrap_or_default();
                 self.mod_agent_order = (!addresses.is_empty()).then_some(addresses);
                 self.dirty = true;
-                self.bump_mod_revision();
+                self.bump_mod_revision_domains(&["agents"]);
                 if let Some(reply) = reply {
                     reply.resolve(json!({}));
                 }
@@ -515,12 +680,19 @@ impl App {
 
     /// 状态快照：按领域裁剪；panes 上限 512。
     pub fn mod_state_snapshot(&self, domains: &[&str]) -> Value {
+        self.mod_state_snapshot_in(domains, None)
+    }
+
+    /// 带 Space 过滤的快照；`space` 为 `sp<n>` 时只给该 Space 的归属项。
+    pub fn mod_state_snapshot_in(&self, domains: &[&str], space: Option<&str>) -> Value {
         let want = |domain: &str| domains.is_empty() || domains.contains(&domain);
         let connection = match &self.connection {
             crate::app::Connection::Ready { .. } => "ready",
             crate::app::Connection::Connecting => "connecting",
             _ => "offline",
         };
+        let in_space = |id: &str| space.is_none_or(|filter| filter == id);
+        let owners = self.mod_pane_owners();
         let mut snapshot = json!({
             "generation": self.mods.generations.values().copied().max().unwrap_or(0),
             "revision": self.mod_revision,
@@ -537,10 +709,26 @@ impl App {
             machines.dedup();
             map.insert("machines".into(), json!(machines));
         }
+        if want("machineInfo") {
+            let machines: Vec<Value> = self
+                .machines
+                .iter()
+                .map(|machine| {
+                    json!({
+                        "name": machine.name,
+                        "state": machine.state,
+                        "address": machine.target,
+                        "host": machine.host,
+                    })
+                })
+                .collect();
+            map.insert("machineInfo".into(), json!(machines));
+        }
         if want("spaces") {
             let spaces: Vec<Value> = self
                 .workspaces
                 .iter()
+                .filter(|ws| in_space(&format!("sp{}", ws.id)))
                 .map(|ws| {
                     json!({
                         "id": format!("sp{}", ws.id),
@@ -557,6 +745,7 @@ impl App {
             let tabs: Vec<Value> = self
                 .workspaces
                 .iter()
+                .filter(|ws| in_space(&format!("sp{}", ws.id)))
                 .flat_map(|ws| {
                     ws.tabs.iter().map(move |tab| {
                         json!({
@@ -574,21 +763,47 @@ impl App {
             let panes: Vec<Value> = self
                 .panes
                 .iter()
+                .filter(|(id, _)| {
+                    owners
+                        .get(id)
+                        .map(|(space_id, _)| in_space(space_id))
+                        .unwrap_or(true)
+                })
                 .take(512)
                 .map(|(id, pane)| {
+                    let (space_id, tab_id) = owners.get(id).cloned().unwrap_or_default();
                     json!({
                         "id": format!("{id}"),
                         "terminal": pane.terminal,
                         "title": pane.title,
+                        "space": (!space_id.is_empty()).then_some(space_id),
+                        "tab": (!tab_id.is_empty()).then_some(tab_id),
+                        "label": pane.label(),
+                        "cwd": pane.cwd,
+                        "live": pane.is_live(),
                     })
                 })
                 .collect();
             map.insert("panes".into(), json!(panes));
         }
+        // Space 过滤时，终端类域只留该 Space 里 Pane 持有的终端。
+        let allowed: Option<std::collections::BTreeSet<String>> = space.map(|filter| {
+            self.panes
+                .iter()
+                .filter(|(id, _)| {
+                    owners
+                        .get(id)
+                        .is_some_and(|(space_id, _)| space_id == filter)
+                })
+                .filter_map(|(_, pane)| pane.terminal.clone())
+                .collect()
+        });
+        let keep = |address: &str| allowed.as_ref().is_none_or(|set| set.contains(address));
         if want("agents") {
             let agents: Vec<Value> = self
                 .terminals
                 .iter()
+                .filter(|terminal| keep(&terminal.address))
                 .map(|terminal| {
                     json!({
                         "address": terminal.address,
@@ -606,6 +821,7 @@ impl App {
             let terminals: Vec<Value> = self
                 .terminals
                 .iter()
+                .filter(|terminal| keep(&terminal.address))
                 .map(|terminal| {
                     json!({
                         "address": terminal.address,
@@ -634,33 +850,154 @@ impl App {
         if want("theme") {
             map.insert("theme".into(), self.mod_theme_value());
         }
+        if want("commands") {
+            let mut commands: Vec<Value> = super::actions::COMMANDS
+                .iter()
+                .map(|(name, title)| json!({"name": name, "title": title, "source": "builtin"}))
+                .collect();
+            for action in self.plugins.actions() {
+                commands.push(json!({
+                    "name": action.name,
+                    "title": action.title,
+                    "source": format!("plugin:{}", action.package),
+                    "description": action.description,
+                    "contexts": action.contexts,
+                    "args": action.args,
+                }));
+            }
+            map.insert("commands".into(), json!(commands));
+        }
+        if want("keybindings") {
+            let bindings: std::collections::HashMap<&str, crate::config::Binding> =
+                self.config.keys.entries().into_iter().collect();
+            let mut rows = Vec::new();
+            for (group, names) in App::HELP_GROUPS {
+                for name in names {
+                    let Some(binding) = bindings.get(name) else {
+                        continue;
+                    };
+                    rows.push(json!({
+                        "name": name,
+                        "keys": binding.to_string().trim_matches('"'),
+                        "title": App::binding_title(name),
+                        "group": group,
+                        "off": binding.is_off(),
+                    }));
+                }
+            }
+            map.insert("keybindings".into(), json!(rows));
+        }
+        if want("settings") {
+            let mut sections = Vec::new();
+            for (index, name) in App::SETTINGS_SECTIONS.iter().enumerate() {
+                let items: Vec<Value> = (0..self.settings_len(index))
+                    .map(|item| {
+                        let (label, active) = self.mod_setting_item(index, item);
+                        json!({"value": item, "label": label, "active": active})
+                    })
+                    .collect();
+                sections.push(json!({"name": name, "items": items}));
+            }
+            let delivery = match self.config.notifications {
+                crate::config::Delivery::Off => "off",
+                crate::config::Delivery::Toast => "toast",
+                crate::config::Delivery::System => "system",
+            };
+            map.insert(
+                "settings".into(),
+                json!({
+                    "sections": sections,
+                    "current": {
+                        "theme": self.config.theme.name,
+                        "indicators": if self.config.indicators == crate::config::Indicators::Symbols { "symbols" } else { "dots" },
+                        "notifications": delivery,
+                        "sound": self.config.sound,
+                        "zellij_keys": self.config.zellij_keys,
+                    },
+                }),
+            );
+        }
+        if want("templates") {
+            map.insert("templates".into(), json!(self.mod_templates));
+        }
+        if want("notifications") {
+            let items: Vec<Value> = self
+                .mod_notifications
+                .iter()
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "level": item.level,
+                        "text": item.text,
+                        "created": item.created,
+                        "action": item.action,
+                        "target": item.target,
+                        "surface": item.surface,
+                    })
+                })
+                .collect();
+            map.insert("notifications".into(), json!(items));
+        }
         snapshot
+    }
+
+    /// Pane 归属：pane 编号 → (space ID, tab ID)；外框内与浮动 Pane 都算。
+    fn mod_pane_owners(&self) -> BTreeMap<u32, (String, String)> {
+        let mut owners = BTreeMap::new();
+        for ws in &self.workspaces {
+            let space = format!("sp{}", ws.id);
+            for tab in &ws.tabs {
+                let tab_id = format!("tb{}", tab.id);
+                for pane in tab.panes() {
+                    owners.insert(pane.0, (space.clone(), tab_id.clone()));
+                }
+            }
+        }
+        owners
+    }
+
+    /// 设置项文案与生效状态；与内置设置面板、模块拿到的域保持同一口径。
+    fn mod_setting_item(&self, section: usize, index: usize) -> (String, bool) {
+        match section {
+            0 => {
+                let name = crate::theme::names()[index];
+                (name.to_string(), name == self.config.theme.name)
+            }
+            1 => {
+                let symbols = index == 1;
+                (
+                    t(if symbols { "symbols" } else { "dots" }).to_string(),
+                    (self.config.indicators == crate::config::Indicators::Symbols) == symbols,
+                )
+            }
+            2 => {
+                let names = ["off", "toast", "system"];
+                let value = names[index.min(2)];
+                let active = matches!(
+                    (self.config.notifications, value),
+                    (crate::config::Delivery::Off, "off")
+                        | (crate::config::Delivery::Toast, "toast")
+                        | (crate::config::Delivery::System, "system")
+                );
+                (t(value).to_string(), active)
+            }
+            _ => {
+                let on = index == 1;
+                (
+                    t(if on { "on" } else { "off" }).to_string(),
+                    self.config.sound == on,
+                )
+            }
+        }
     }
 
     /// `state` 调用的领域过滤。
     fn mod_state_domains(&self, data: &Value) -> Vec<&'static str> {
-        const KNOWN: &[&str] = &[
-            "machines",
-            "spaces",
-            "tabs",
-            "panes",
-            "agents",
-            "terminals",
-            "focused",
-            "theme",
-        ];
         match data.get("domains").and_then(Value::as_array) {
             Some(list) => list
                 .iter()
                 .filter_map(Value::as_str)
-                .filter(|domain| KNOWN.contains(domain))
-                .map(|domain| {
-                    KNOWN
-                        .iter()
-                        .copied()
-                        .find(|known| *known == domain)
-                        .unwrap_or("machines")
-                })
+                .filter_map(|domain| MOD_DOMAINS.iter().copied().find(|known| *known == domain))
                 .collect(),
             None => Vec::new(),
         }
@@ -681,19 +1018,107 @@ impl App {
         json!({"name": theme.name, "tokens": tokens, "palette": palette})
     }
 
-    /// 通知队列：宿主 notify 落到现有 toast。
-    fn push_mod_toast(&mut self, title: &str, body: &str, timeout: u64) -> String {
+    /// 通知队列：登记条目并写进现有 toast 或状态行。
+    #[allow(clippy::too_many_arguments)]
+    fn push_mod_notification(
+        &mut self,
+        title: &str,
+        body: &str,
+        level: &str,
+        timeout: u64,
+        action: Option<Value>,
+        target: Option<&str>,
+        surface: Option<&str>,
+        status: bool,
+    ) -> String {
         let text = if body.is_empty() {
             title.to_string()
         } else {
             format!("{title} · {body}")
         };
-        self.toast = Some(crate::app::Toast {
-            text,
-            until: std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1)),
+        let id = format!("n{}", self.mods.next_request_id());
+        self.mod_notifications.push(crate::mods::ModNotification {
+            id: id.clone(),
+            level: level.to_string(),
+            text: text.clone(),
+            action,
+            target: target.map(str::to_string),
+            surface: surface.map(str::to_string),
+            created: crate::store::now_unix(),
         });
+        // 队列只保留最近 200 条，旧条目被挤掉后 `dismiss` 返回 `not_found`。
+        while self.mod_notifications.len() > 200 {
+            self.mod_notifications.remove(0);
+        }
+        if status {
+            self.note = text;
+        } else {
+            self.toast = Some(crate::app::Toast {
+                text,
+                until: std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1)),
+            });
+        }
         self.dirty = true;
-        format!("n{}", self.mods.next_request_id())
+        id
+    }
+
+    /// `ask` 超时或目标表面已关：应答错误，不静默丢弃。
+    fn expire_mod_asks(&mut self) {
+        if self.mod_asks.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut kept = Vec::new();
+        for ask in std::mem::take(&mut self.mod_asks) {
+            if now >= ask.deadline {
+                host::reject(ask.reply, "timeout", "ask timed out");
+            } else if self.mods.surface(&ask.surface).is_none() {
+                host::reject(ask.reply, "target_gone", "ask surface closed");
+            } else {
+                kept.push(ask);
+            }
+        }
+        self.mod_asks = kept;
+    }
+
+    /// `run` 打开的确认结束：写终态并发 `action.finished`。
+    pub(crate) fn settle_mod_confirm(&mut self, status: &str) {
+        let Some((request, mod_id)) = self.mod_confirm.take() else {
+            return;
+        };
+        if let Some(record) = self.mods.requests.get_mut(&request) {
+            record.status = status.to_string();
+        }
+        self.send_mod_event(
+            &mod_id,
+            "action.finished",
+            &json!({"request": request, "status": status}),
+        );
+        self.dirty = true;
+    }
+
+    /// `run` 发起的 core RPC 应达：写终态并发 `action.finished`。
+    pub(crate) fn settle_mod_action_rpc(&mut self, tag: &str, result: &Result<Value, String>) {
+        let Some((request, mod_id)) = self.mod_action_rpc.remove(tag) else {
+            return;
+        };
+        // 同一动作可能有并发 RPC：一条应答就收尾，其余 tag 一并丢弃。
+        self.mod_action_rpc.retain(|_, (id, _)| id != &request);
+        let (status, error) = match result {
+            Ok(_) => ("done".to_string(), None),
+            Err(message) => ("failed".to_string(), Some(message.clone())),
+        };
+        if let Some(record) = self.mods.requests.get_mut(&request) {
+            record.status = status.clone();
+            record.error = error.clone();
+        }
+        let mut payload = json!({"request": request, "status": status});
+        if let Some(error) = &error {
+            payload["error"] = json!(error);
+            self.note = error.clone();
+        }
+        self.send_mod_event(&mod_id, "action.finished", &payload);
+        self.dirty = true;
     }
 
     /// 把焦点交给一条模块表面（`None` 回到 Pane）。
@@ -720,7 +1145,7 @@ impl App {
             }
         }
         self.dirty = true;
-        self.bump_mod_revision();
+        self.bump_mod_revision_domains(&["focused"]);
         self.send_focus_changed();
     }
 
@@ -757,7 +1182,7 @@ impl App {
             surface: id.clone(),
             generation,
             place: place.as_str(),
-            props,
+            props: props.clone(),
             space: self
                 .workspace()
                 .map(|ws| {
@@ -811,6 +1236,7 @@ impl App {
         surface.errors = errors;
         surface.state = SurfaceState::Running;
         surface.store_generation = store_generation;
+        surface.props = props;
         self.focus_mod_surface(Some(id.clone()));
         self.dirty = true;
         Ok(id)
@@ -847,7 +1273,7 @@ impl App {
                 self.focus_mod_surface(None);
             }
             self.dirty = true;
-            self.bump_mod_revision();
+            self.bump_mod_revision_domains(&["focused"]);
             for mod_id in closed_mods {
                 self.prune_mod_generations(&mod_id);
             }
@@ -1009,6 +1435,30 @@ impl App {
         }
     }
 
+    /// 打开参数：`modal`、`autofocus`、`onEsc`、`clickThrough`；默认与既有行为一致。
+    pub fn apply_surface_options(&mut self, surface_id: &str, data: &Value) {
+        let mut unfocus = false;
+        if let Some(surface) = self.mods.surface_mut(surface_id) {
+            if let Some(modal) = data.get("modal").and_then(Value::as_bool) {
+                surface.modal = modal;
+            }
+            if let Some(autofocus) = data.get("autofocus").and_then(Value::as_bool) {
+                surface.autofocus = autofocus;
+                unfocus = !autofocus;
+            }
+            if let Some(on_esc) = data.get("onEsc").and_then(Value::as_str) {
+                surface.esc_to_host = on_esc != "module";
+            }
+            if let Some(click_through) = data.get("clickThrough").and_then(Value::as_bool) {
+                surface.click_through = click_through;
+            }
+        }
+        if unfocus && self.focused_mod.as_deref() == Some(surface_id) {
+            self.focus_mod_surface(None);
+        }
+        self.dirty = true;
+    }
+
     /// `mods.open` 的覆盖层入口（dialog/popup/window）。
     pub fn open_mod_overlay(
         &mut self,
@@ -1046,6 +1496,7 @@ impl App {
             at,
             key,
         )?;
+        self.apply_surface_options(&id, &data);
         if let (Some(props), Some(surface)) = (props, self.mods.surface(&id)) {
             surface.host.send("props.changed", json!({"props": props}));
         }
@@ -1054,6 +1505,14 @@ impl App {
 
     /// 数据变化：递增 revision，节流发送 `state.changed`。
     pub fn bump_mod_revision(&mut self) {
+        self.mod_all_domains = true;
+        self.mod_revision += 1;
+        self.mods_dirty = true;
+    }
+
+    /// 只有部分域变化：递增 revision 并记下域，`state.changed` 如实上报。
+    pub fn bump_mod_revision_domains(&mut self, domains: &[&'static str]) {
+        self.mod_changed_domains.extend(domains.iter().copied());
         self.mod_revision += 1;
         self.mods_dirty = true;
     }
@@ -1107,9 +1566,16 @@ impl App {
             return;
         }
         self.mods_dirty = false;
+        let domains: Vec<&str> = if self.mod_all_domains {
+            MOD_DOMAINS.to_vec()
+        } else {
+            self.mod_changed_domains.iter().copied().collect()
+        };
+        self.mod_all_domains = false;
+        self.mod_changed_domains.clear();
         let payload = json!({
             "revision": self.mod_revision,
-            "domains": ["machines", "spaces", "tabs", "panes", "agents", "terminals", "focused"],
+            "domains": domains,
         });
         self.emit_mod_event("state.changed", &payload);
     }
@@ -1167,7 +1633,7 @@ impl App {
         if self.config.no_mods || self.mods.surfaces.is_empty() {
             return false;
         }
-        let mut overlays: Vec<(u8, String, Rect)> = self
+        let mut overlays: Vec<(u8, String, Rect, bool, bool)> = self
             .mods
             .surfaces
             .iter()
@@ -1183,17 +1649,27 @@ impl App {
                     SurfacePlace::Popup => 2,
                     _ => 3,
                 };
-                (z, surface.id.clone(), surface.area)
+                (
+                    z,
+                    surface.id.clone(),
+                    surface.area,
+                    surface.modal,
+                    surface.click_through,
+                )
             })
             .collect();
-        overlays.sort_by_key(|(z, _, _)| std::cmp::Reverse(*z));
-        for (_, id, area) in overlays {
-            if super::contains(area, mouse.column, mouse.row) {
-                self.focus_mod_surface(Some(id.clone()));
-                self.deliver_mouse(&id, mouse);
+        overlays.sort_by_key(|(z, _, _, _, _)| std::cmp::Reverse(*z));
+        for (_, id, area, modal, click_through) in overlays {
+            if click_through || !super::contains(area, mouse.column, mouse.row) {
+                continue;
+            }
+            self.focus_mod_surface(Some(id.clone()));
+            self.deliver_mouse(&id, mouse);
+            if modal {
                 return true;
             }
         }
+        // 非模态覆盖层结束传播后，继续按外框区域命中。
         let hit = self
             .mod_regions
             .iter()
@@ -1232,7 +1708,8 @@ impl App {
         }
     }
 
-    /// 关闭 z 序最高的覆盖层（window > popup > dialog）；返回是否关闭。
+    /// 关闭 z 序最高的覆盖层（window > popup > dialog）；`onEsc: "module"` 的不由宿主关。
+    /// 返回是否关闭。
     pub fn close_top_mod_overlay(&mut self) -> bool {
         let target = self
             .mods
@@ -1240,6 +1717,7 @@ impl App {
             .iter()
             .filter(|surface| {
                 surface.interactive()
+                    && surface.esc_to_host
                     && matches!(
                         surface.place,
                         SurfacePlace::Dialog | SurfacePlace::Popup | SurfacePlace::Window
@@ -1498,7 +1976,7 @@ impl App {
             self.send_mod_event(mod_id, "grant.changed", &json!({"grants": grants}));
             self.persist_mod_grants(mod_id);
             self.seen_dirty = true;
-            self.bump_mod_revision();
+            self.bump_mod_revision_domains(&[]);
         }
         self.dirty = true;
     }
@@ -1581,7 +2059,7 @@ impl App {
             )),
             _ => None,
         };
-        self.bump_mod_revision();
+        self.bump_mod_revision_domains(&["agents", "terminals"]);
         if let Some((name, payload)) = event {
             self.emit_mod_event(name, &payload);
         }
@@ -1681,6 +2159,9 @@ fn client_host() -> String {
             .unwrap_or_default()
     })
 }
+
+#[cfg(test)]
+mod base_tests;
 
 #[cfg(test)]
 mod tests {
