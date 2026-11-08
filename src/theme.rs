@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 
 use ratatui_core::style::Color;
 
+pub mod ghostty;
+pub mod omarchy;
+pub mod source;
+
 /// 全部 token 及默认主题的取值。顺序即 `default-config` 的输出顺序。
 const DEFAULTS: &[(&str, Color)] = &[
     ("bg", Color::Rgb(18, 18, 18)),
@@ -52,6 +56,79 @@ const DEFAULTS: &[(&str, Color)] = &[
 pub struct Theme {
     pub name: String,
     tokens: BTreeMap<String, Color>,
+    /// 来源文件；内置主题为 `None`。
+    pub source: Option<source::Source>,
+}
+
+/// 来源无关的配色输入：六个语义色加 ANSI 16 色。
+///
+/// Omarchy 与 Ghostty 只负责把自己的文件解析成 Surface，token 映射集中在这里。
+pub struct Surface {
+    pub bg: Color,
+    pub fg: Color,
+    pub dim: Color,
+    pub border: Color,
+    /// 面板背景：Tab 栏、状态栏、侧栏。
+    pub panel: Color,
+    /// 抬起一层：选中项、toast。
+    pub raised: Color,
+    pub accent: Color,
+    pub selection_bg: Color,
+    pub selection_fg: Color,
+    pub ansi: [Color; 16],
+}
+
+impl Surface {
+    /// 映射成全套 token；`name` 是配置里的主题名。
+    pub fn theme(&self, name: &str) -> Theme {
+        let mut theme = base();
+        theme.name = name.to_string();
+        let tokens = [
+            ("bg", self.bg),
+            ("fg", self.fg),
+            ("dim", self.dim),
+            ("border", self.border),
+            ("border_focused", self.accent),
+            ("accent", self.accent),
+            ("tab_bar_bg", self.panel),
+            ("tab_bar_fg", self.fg),
+            ("tab_active_bg", self.accent),
+            ("tab_active_fg", self.bg),
+            ("status_bar_bg", self.panel),
+            ("status_bar_fg", self.fg),
+            ("sidebar_bg", self.panel),
+            ("sidebar_selected_bg", self.raised),
+            ("sidebar_title", self.accent),
+            ("space_teal", self.ansi[6]),
+            ("space_green", self.ansi[2]),
+            ("space_blue", self.ansi[4]),
+            ("space_pink", self.ansi[13]),
+            ("space_orange", self.ansi[3]),
+            ("space_purple", self.ansi[5]),
+            ("space_icon_fg", self.fg),
+            ("selection_bg", self.selection_bg),
+            ("selection_fg", self.selection_fg),
+            ("cursor_bg", self.fg),
+            ("cursor_fg", self.bg),
+            ("agent_blocked", self.ansi[1]),
+            ("agent_error", self.ansi[1]),
+            ("agent_working", self.ansi[3]),
+            ("agent_done", self.ansi[2]),
+            ("agent_idle", self.dim),
+            ("agent_unknown", self.dim),
+            ("badge_bg", self.ansi[3]),
+            ("badge_fg", self.bg),
+            ("toast_bg", self.raised),
+            ("toast_fg", self.fg),
+        ];
+        for (token, color) in tokens {
+            theme.set(token, color);
+        }
+        for (index, color) in self.ansi.iter().enumerate() {
+            theme.set(&format!("ansi_{index}"), *color);
+        }
+        theme
+    }
 }
 
 impl Theme {
@@ -141,6 +218,7 @@ fn base() -> Theme {
             .iter()
             .map(|(name, color)| (name.to_string(), *color))
             .collect(),
+        source: None,
     }
 }
 
@@ -155,6 +233,13 @@ fn themed(name: &str, palette: &[(&str, Color)]) -> Theme {
 }
 
 pub fn builtin(name: &str) -> Option<Theme> {
+    // 跟随终端主题：读盘失败时退回内置默认 token，名字保持配置值，
+    // 让配置写回与设置面板保持一致。
+    match name {
+        omarchy::NAME => return Some(source::borrow(source::Kind::Omarchy, omarchy::load(), name)),
+        ghostty::NAME => return Some(source::borrow(source::Kind::Ghostty, ghostty::load(), name)),
+        _ => {}
+    }
     let rgb = Color::Rgb;
     Some(match name {
         "default" | "terminal" => base(),
@@ -546,6 +631,14 @@ pub fn parse_color(text: &str) -> Option<Color> {
         "lightcyan" => Color::LightCyan,
         _ => return None,
     })
+}
+
+/// 颜色的 `#rrggbb` 展示。
+pub fn hex(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        other => format!("{other:?}"),
+    }
 }
 
 /// 设置面板里列出的内置主题，按 herdr 的顺序。

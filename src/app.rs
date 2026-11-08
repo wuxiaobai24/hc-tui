@@ -999,6 +999,7 @@ impl App {
     /// 防抖持久化、toast 过期、恢复超时。
     pub fn tick(&mut self) {
         let now = Instant::now();
+        crate::theme::source::poll(self);
         self.sync_package_modules();
         self.sync_mod_surfaces();
         self.pump_mods();

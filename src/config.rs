@@ -686,6 +686,10 @@ pub struct Config {
     pub zellij_keys: bool,
     pub keys: Keys,
     pub theme: Theme,
+    /// `[theme] source`：`auto` / `ghostty` / `omarchy` / `builtin`。
+    pub theme_source: String,
+    /// `[theme.custom]` 的原始键值，热重载来源后重新套用。
+    pub theme_custom: Vec<(String, String)>,
     pub mouse_capture: bool,
     pub mouse_scroll_lines: usize,
     pub copy_on_select: bool,
@@ -815,6 +819,8 @@ impl Default for Config {
             zellij_keys: false,
             keys: Keys::default(),
             theme: theme::builtin("default").expect("default theme exists"),
+            theme_source: theme::source::AUTO.to_string(),
+            theme_custom: Vec::new(),
             mouse_capture: true,
             mouse_scroll_lines: 3,
             copy_on_select: false,
@@ -881,6 +887,10 @@ impl Config {
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                config.apply(&Document {
+                    values: Table::new(),
+                    arrays: Vec::new(),
+                });
                 config.load_panel_files();
                 return config;
             }
@@ -938,6 +948,7 @@ impl Config {
     fn apply(&mut self, document: &Document) {
         let mut warnings = Vec::new();
         let mut theme_name = self.theme.name.clone();
+        let mut theme_source = self.theme_source.clone();
         let mut custom: Vec<(String, String)> = Vec::new();
 
         for (key, value) in &document.values {
@@ -1114,6 +1125,14 @@ impl Config {
                     Some(name) => theme_name = name.to_string(),
                     None => warnings.push(format!("{path}: 需要字符串")),
                 },
+                "theme.source" => match value.text() {
+                    Some(text @ ("auto" | "ghostty" | "omarchy" | "builtin")) => {
+                        theme_source = text.to_string()
+                    }
+                    _ => {
+                        warnings.push(format!("{path}: 只支持 auto / ghostty / omarchy / builtin"))
+                    }
+                },
                 "notifications.delivery" => match value.text() {
                     Some("off") => self.notifications = Delivery::Off,
                     Some("toast" | "herdr") => self.notifications = Delivery::Toast,
@@ -1169,16 +1188,11 @@ impl Config {
             }
         }
 
-        self.theme = theme::builtin(&theme_name).unwrap_or_else(|| {
-            warnings.push(format!("未知主题 {theme_name}，使用 default"));
-            theme::builtin("default").expect("default theme exists")
-        });
-        for (token, value) in custom {
-            match theme::parse_color(&value) {
-                Some(color) => self.theme.set(&token, color),
-                None => warnings.push(format!("[theme.custom] {token}: 无法解析颜色 {value}")),
-            }
-        }
+        let (theme, theme_warnings) = theme::source::apply(&theme_name, &theme_source, &custom);
+        self.theme = theme;
+        self.theme_source = theme_source;
+        self.theme_custom = custom;
+        warnings.extend(theme_warnings);
         self.parse_commands(document, &mut warnings);
         self.warnings.extend(warnings);
     }
@@ -1431,7 +1445,10 @@ pub fn default_config_text() -> String {
     ));
     out.push_str(&format!("default_shell = \"{}\"\n", config.default_shell));
     out.push_str("\n[theme]\n");
+    out.push_str("# name 是内置主题名，或 auto / omarchy / ghostty 跟随终端主题。\n");
     out.push_str(&format!("name = \"{}\"\n", config.theme.name));
+    out.push_str("# source 只在 name = \"default\" 时生效：auto 先 Ghostty 后 Omarchy。\n");
+    out.push_str(&format!("source = \"{}\"\n", config.theme_source));
     out.push_str("# [theme.custom]\n# accent = \"#89b4fa\"\n");
     out.push_str("\n[notifications]\n");
     out.push_str("delivery = \"toast\"   # off | toast | system\n");
@@ -1474,6 +1491,7 @@ pub fn default_config_text() -> String {
         .join(", "),
     );
     out.push('\n');
+    out.push_str("# 跟随终端主题：name = \"auto\" / \"omarchy\" / \"ghostty\"\n");
     out.push_str("# 主题 token：");
     out.push_str(
         &config
