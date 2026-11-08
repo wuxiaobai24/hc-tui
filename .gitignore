@@ -16,3 +16,5 @@
 .vscode
 vendor/libghostty-vt/.zig-cache
 vendor/libghostty-vt/zig-pkg
+site/node_modules/
+site/dist/

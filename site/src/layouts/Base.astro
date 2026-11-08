@@ -1,0 +1,47 @@
+---
+import '../styles/global.css';
+import Nav from '../components/Nav.astro';
+import { href } from '../lib/links';
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+const p = (target: string) => href(Astro.url.pathname, target);
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="color-scheme" content="dark" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip" href="#main">跳到正文</a>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brandrow">
+          <a class="brand" href={p('')}>hc-tui</a>
+          <span class="commit">main @ 2527acc · 2026-11-08</span>
+        </div>
+        <Nav />
+      </div>
+    </header>
+    <main id="main" class="page">
+      <slot />
+    </main>
+    <footer class="footer">
+      <div class="footer-inner">
+        <p>静态站：构建产物不引用外部脚本、样式或字体。页面内容对应仓库提交 <code>2527acc</code>（2026-11-08）。</p>
+        <p>
+          事实来源：<code>README.md</code>、<code>docs/plugins.md</code>、<code>docs/mods.md</code>、<code>docs/usage.md</code>、<code>docs/plan-extensions.md</code>、<code>docs/m9-gap.md</code>、<code>examples/packages/git-board/hctui.toml</code>。
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
