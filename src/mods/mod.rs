@@ -142,8 +142,12 @@ pub struct ModSurface {
     pub focused: bool,
     /// 生命周期状态。
     pub state: SurfaceState,
-    /// 运行期错误计数；连续 3 次进入 `Failed`。
+    /// 运行期错误计数；region 首次、其它表面连续 3 次进入 `Failed`。
     pub fails: u32,
+    /// 已分发的宿主调用数，占位 `?` 详情里的调用序号。
+    pub host_calls: u64,
+    /// 最近一次分发的宿主方法名，占位 `?` 详情里的 host 方法。
+    pub last_host_method: Option<String>,
     /// `window` 覆盖层的位置记忆 key。
     pub key: Option<String>,
     /// 打开时的 props 副本；`setProps` 热更新。
@@ -159,9 +163,19 @@ pub struct ModSurface {
     /// 绘制前清哪一块；`dialog` 默认清整个内容区。
     pub clear: ClearArea,
     /// 最近一次错误摘要，写日志并标注在失败表面顶部。
+    /// 最近一次错误原文，写日志并作为失败占位的错误盒正文。
     pub last_error: Option<String>,
     /// 引擎回调收集的运行期错误，绘制后由宿主取走并计数。
-    pub errors: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub errors: std::sync::Arc<std::sync::Mutex<Vec<ModError>>>,
+}
+
+/// 引擎回调收集的一条运行期异常。
+#[derive(Debug, Clone)]
+pub struct ModError {
+    /// 异常原文（消息 + 栈）。
+    pub message: String,
+    /// 引擎不能继续了（加载失败或 VM 已停）：没有可保留的帧，直接进占位。
+    pub fatal: bool,
 }
 
 impl ModSurface {
@@ -170,11 +184,14 @@ impl ModSurface {
         matches!(self.state, SurfaceState::Running | SurfaceState::Loading)
     }
 
-    /// 记录一次运行期错误；连续 3 次进入 `Failed`。
+    /// 记录一次运行期错误；region 首次即进入 `Failed`，其它表面连续 3 次。
+    ///
+    /// 失败表面不卸载、不回落到内置实现：宿主在同一矩形里绘制错误占位，
+    /// 直到用户按 `r` 重载或安装新代际。
     pub fn record_failure(&mut self, message: String) {
         self.fails += 1;
         self.last_error = Some(message);
-        if self.fails >= 3 {
+        if self.place == SurfacePlace::Region || self.fails >= 3 {
             self.state = SurfaceState::Failed;
         }
     }
@@ -285,6 +302,8 @@ pub struct ModRuntime {
     pub windows: BTreeMap<String, WindowPos>,
     /// 请求 ID 序号。
     pub next_request: u64,
+    /// 已记录过的运行期错误：mod id → 错误原文；同一错误只写一条日志、只弹一次 toast。
+    pub seen_errors: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ModRuntime {
@@ -488,6 +507,8 @@ impl ModRuntime {
             focused: false,
             state: SurfaceState::Loading,
             fails: 0,
+            host_calls: 0,
+            last_host_method: None,
             key,
             props: Value::Null,
             modal: true,
@@ -517,6 +538,24 @@ mod tests {
         surface.record_failure("boom".into());
         surface.record_failure("boom".into());
         assert_eq!(surface.state, SurfaceState::Loading);
+        surface.record_failure("boom".into());
+        assert_eq!(surface.state, SurfaceState::Failed);
+        assert_eq!(surface.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn region_failure_keeps_a_placeholder_after_the_first_error() {
+        let mut runtime = ModRuntime::default();
+        let host = crate::mods::host::ModHost::new("s1", "sidebar");
+        let view = nsh_platform_tui::AppView::new(runtime.options(None));
+        let surface = runtime.open_surface(
+            "s1".into(),
+            "sidebar",
+            SurfacePlace::Region,
+            view,
+            None,
+            host,
+        );
         surface.record_failure("boom".into());
         assert_eq!(surface.state, SurfaceState::Failed);
         assert_eq!(surface.last_error.as_deref(), Some("boom"));

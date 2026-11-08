@@ -218,6 +218,8 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "settings" => Some("设置"),
         "detach" => Some("断开"),
         "reload config" => Some("重新加载配置"),
+        "{} · render failed" => Some("{} · 渲染失败"),
+        "r reload · ? details" => Some("r 重载 · ? 详情"),
         "open notification target" => Some("打开通知目标"),
         "notification action {} accepted" => Some("通知动作 {} 已受理"),
         "notification action {} failed: {}" => Some("通知动作 {} 失败：{}"),

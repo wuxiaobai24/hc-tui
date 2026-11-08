@@ -3,7 +3,7 @@
 [返回 README](../README.md) · [配置](configuration.md) · [命令](commands.md) · [插件](plugins.md) · [开发计划](plan-extensions.md) · [开发与部署](development.md)
 
 版本：v0.4（2026-11-08）
-状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地；安装、代际、签名包与 `mods` CLI（§10、§12、§13）随 M5 落地；M11b 把模块纳入统一包：模块从包记录加载，动作、终端入口与模块表面共用同一个启用闸门与同一份授予。示例见 `examples/mods/` 与 `examples/packages/git-board/`。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
+状态：实施中。外框与表面（§4、§5 宿主侧、§6 结构、§12 schema 4）随 M3 落地；宿主通道、实例生命周期、覆盖层与键鼠粘贴路由（§5 预算调度、§6 表面分支、§7–§9、§11）随 M4 落地；崩溃占位（错误盒、`r` 重载与 `?` 详情、同错误去重，§5、§6、§8、§11）随 crashpane 票落地；安装、代际、签名包与 `mods` CLI（§10、§12、§13）随 M5 落地；M11b 把模块纳入统一包：模块从包记录加载，动作、终端入口与模块表面共用同一个启用闸门与同一份授予。示例见 `examples/mods/` 与 `examples/packages/git-board/`。逐项进度见 [开发计划](plan-extensions.md#31-里程碑交付状态)。
 取代：本文 v0.3。
 运行时基线：nsh 提交 `951556dc1af6f5acf593cfd28640a0fd467b71e3`（`crates/nsh-platform-tui`、`crates/nsh-tui-host`）；发行版 0.4.0 尚无 TUI 后端。宿主侧 ratatui 0.30.2、crossterm 0.29。
 
@@ -204,6 +204,15 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 5. 按 z 序绘制覆盖层表面。
 6. 显示光标：取焦点表面的 `cursor_style()`，在对应矩形内定位。
 
+失败表面（`state = Failed`）不卸载也不回落到内置实现：宿主在同一矩形里画
+错误盒代替第 2 步的 `view.render`。边框用 `agent_error` 色，标题 `<模块> · 渲染失败`，
+正文是末条异常首行（按区域宽度截断）与 `r 重载 · ? 详情`。矩形放不下边框加一行
+正文（模式行这类一行高的区域）时退化成单行摘要，标题与提示保留。region 表面
+每帧由外框布局给出矩形，覆盖层保持打开时的大小。
+
+默认区域（`sidebar`/`tabs`/`status`）在失败后仍由外框绑定模块块：`ui::draw` 这时
+不画内置实现，只把内置实现画进离屏缓冲以登记命中域（见 §6）。
+
 `graphics.draw` 在字符帧之后输出 Kitty 图片，必须把模块区域与覆盖层并入遮挡计算：与遮挡矩形相交的图片不输出，覆盖层关闭后重新上传；裁剪按 Pane 与表面矩形的交集计算。遗漏这一步会让终端图片盖住 dialog。
 
 调度：
@@ -239,6 +248,11 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 - `Ctrl+B` 在模块文本输入中仍先被前缀消费；连按两次把字面 `Ctrl+B` 交给表面。
 - 鼠标按 z 序选择表面；拖动目标从按下到释放保持不变；覆盖层内操作不穿透。
 - `Esc` 关闭顶层 dialog 或 popup；`window` 由自身控件关闭。打开时声明 `onEsc: "module"` 的表面自己处理 `Esc`，宿主不抢先关闭。
+- 失败占位也由 `Esc` 关掉，关掉后宿主不自动重开；恢复要用户显式触发（`mods.open`、`mods.dock`、`packages enable`）。
+- 占位可见时 `r` / `?` 归宿主，不投给输入目标：`r` 重载该模块，`?` 把完整异常写进
+  `logs/<id>/engine.log`。目标取焦点失败表面，没有时取最上层（最后打开）的失败表面。
+  占位一消失，这两个键回到输入目标。失败焦点表面上的其它按键被宿主派发路径吞掉，
+  不落到后台 PTY。
 - `<mod>.<command>` 通过 `host.on("command", { name, args })` 投递，命令面板、`[[keys.command]]` 与 `hc-tui do` 都能触发；分发器把它交给该模块已授予 `command` 事件的表面，未授予返回 `forbidden`。
 
 ## 7. 宿主通道
@@ -397,7 +411,8 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 - nsh 能力与宿主授予描述依赖与路由范围，不构成对恶意代码的 OS 隔离：`process.execute` 能绕过文件写入路径的限制，网络与执行权限按用户身份生效。信任边界是安装来源、安装前预览与签名包的信任根。
 - 本地目录中的 mod 属于用户自己编写的可信代码；共享文档或 GUI 中的模块引用不自动获得执行权。
 - 沙箱限制：内存 128 MiB、调用 500 ms、加载 10 s、节点数 200000，按实例设置，`hctui.toml` 只能下调。
-- 日志与错误写 `logs/<id>/`，保留两份各 1 MiB；失败表面顶部标注原因，其它表面不受影响。
+- 日志与错误写 `logs/<id>/`，保留两份各 1 MiB；失败表面在同一矩形里留错误占位，其它表面不受影响。
+- 同一模块同一条错误只写一条日志、只弹一次 toast（按原文去重，重载成功或装上新代际后重新计）。连续每帧失败因此不会刷屏；每次按 `r` 是新的尝试，各记一条。
 
 ## 9. 主题
 
@@ -445,16 +460,30 @@ stateDiagram-v2
   Staging --> Running: 首帧成功，原子切换
   Staging --> Broken: 失败，旧实例继续
   Broken --> Staging: mods.reload
-  Running --> Failed: 连续 3 次运行期崩溃
-  Failed --> Staging: mods.reload
+  Running --> Failed: region 首次运行期崩溃；其它表面连续 3 次；引擎已停
+  Failed --> Staging: r / mods.reload / 安装新代际 / 改配置
+  Failed --> [*]: 表面关闭（Esc 或 mods.close）
   Running --> [*]: 表面关闭 / 退出
 ```
+
+- 状态机与恢复路径：`Healthy → Failed(err) →（用户按 r / 重装 / 改配置）→ Healthy`。
+  region 表面（sidebar/tabs/status）首次运行期失败即进入 `Failed`；覆盖层沿用连续 3 次；
+  引擎已经停下（`Load`/`Stopped` 类错误）时没有可保留的帧，首次报错就进 `Failed`。
+  `Failed` 期间表面保持打开、不抢焦点，矩形里是错误盒（§5）。
+- 恢复：`r` 重载、`hc-tui packages reload`/`mods.reload`、安装新代际与改配置都走同一条
+  staging 路径。重载失败保留 `Failed` 与占位，新代际首帧成功才回到 Healthy。
+  包被停用或撤下时区域表面关闭，该区域回到内置实现，不留空框。
+- 去重：同一模块同一条错误只写一条日志、只弹一次 toast；去重表在每次重载成功或
+  装上新代际时清空，连续每帧失败只记一条，用户按 `r` 的每次尝试各记一条。`?` 把
+  完整上下文（模块 id、表面、代际、`host` 方法名与调用序号、异常原文与栈）逐行
+  追加到 `logs/<id>/engine.log`，`packages log <id>` 能读到。
 
 - 加载：解析两份清单、校验 `host_api`、`min_hc_tui_version`、nsh `min_runtime`、确认授予、`Bundle::from_path` 或 `Bundle::from_package`、`AppView::load`、首帧渲染。
 - 热重载：`AppView::load` 会停止旧实例，因此新实例先在 staging 中加载并渲染到离屏缓冲区；成功后再替换旧实例并切换 `generation`。失败时旧实例与已显示帧保持不变，错误写入日志。
 - staging 期间宿主方法返回 `staging`，模块不能在激活前产生不可回滚副作用；`init` 只读状态。
 - 激活后旧代际的迟到回复按 `generation` 丢弃；旧代码的定时器与挂起任务随实例停止。
-- 崩溃：`on_error` 与 `on_app_error` 记录并保留上一帧；连续三次失败进入 `failed`，`mods.reload` 恢复。
+- 崩溃：`on_app_error` 记录并保留上一帧；region 首次、其它表面连续三次进入 `failed`，
+  `r`／`mods.reload` 恢复。失败表面在同一矩形里显示错误占位，不静默回落内置实现、不卸载。
 - 内置模块随 hc-tui 版本更新：升级后使用新版本目录，旧版本在引用释放后回收；用户克隆的副本不随升级覆盖。
 - 默认界面的回退：`--no-mods` 关闭全部模块表面并使用内置外框，动作与终端入口不受影响；单个包 `disable` 后其模块区域从外框撤下，外框回落到内置内容，不留空框；全部包停用时动作目录为空而不是报错。回退路径不依赖 nsh 运行时。
 - 关闭：表面关闭时调用 `AppView::stop`，期限 250 ms；退出时所有表面共用该预算。

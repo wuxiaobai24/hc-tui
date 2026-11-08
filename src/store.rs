@@ -531,9 +531,7 @@ impl Store {
         }
         let mut text = String::new();
         if let Ok(existing) = std::fs::read_to_string(&path) {
-            if !existing.is_empty() && !existing.ends_with('\n') {
-                text.push_str(&existing);
-            }
+            text.push_str(&existing);
         }
         text.push_str(line);
         text.push('\n');

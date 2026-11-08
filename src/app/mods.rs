@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crossterm::event::{KeyEvent, KeyEventKind, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent};
 use nsh_engine::HostReply;
 use nsh_platform_tui::Handled;
 use ratatui_core::layout::Rect;
@@ -86,6 +86,11 @@ impl App {
 
     /// 分发一条宿主调用。
     fn dispatch_mod_call(&mut self, surface_id: &str, mod_id: &str, call: PendingCall) {
+        // 占位 `?` 详情里的 host 方法与调用序号：记录最近一次分发的调用。
+        if let Some(surface) = self.mods.surface_mut(surface_id) {
+            surface.host_calls += 1;
+            surface.last_host_method = Some(call.name.clone());
+        }
         let staging = self
             .mods
             .surface(surface_id)
@@ -1490,12 +1495,34 @@ impl App {
         let mut view = nsh_platform_tui::AppView::new(options);
         let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = errors.clone();
-        view.on_error(move |message| {
+        view.on_app_error(move |error| {
             sink.lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .push(message.to_string());
+                .push(crate::mods::ModError {
+                    message: error.to_string(),
+                    fatal: error.is_fatal(),
+                });
         });
-        view.load(bundle).map_err(|error| error.to_string())?;
+        // 加载失败也留表面：该矩形里画错误占位，由用户重载或装新代际恢复。
+        // 引擎把模块求值期的异常交给 `on_app_error`，`load` 本身仍返回 `Ok`：
+        // 这里把两者并成同一个结论。
+        let loaded = match view.load(bundle) {
+            Ok(()) => {
+                let pending: Vec<String> = {
+                    let mut errors = errors.lock().unwrap_or_else(|error| error.into_inner());
+                    std::mem::take(&mut *errors)
+                        .into_iter()
+                        .map(|error| error.message)
+                        .collect()
+                };
+                if pending.is_empty() {
+                    Ok(())
+                } else {
+                    Err(pending.join("; "))
+                }
+            }
+            Err(error) => Err(error.to_string()),
+        };
         let area = self.initial_surface_area(place, size, at, key.as_deref());
         let store_generation = self.mod_store_generation(mod_id);
         let surface = self
@@ -1532,6 +1559,19 @@ impl App {
                 self.toast = None;
                 self.toast_notification = None;
             }
+        if let Err(error) = loaded {
+            // 引擎没装上：没有可绘制的帧，直接进占位。
+            if let Some(surface) = self.mods.surface_mut(&id) {
+                surface.state = SurfaceState::Failed;
+            }
+            self.record_mod_errors(
+                &id,
+                mod_id,
+                vec![crate::mods::ModError {
+                    message: error,
+                    fatal: true,
+                }],
+            );
         }
         self.dirty = true;
         Ok(id)
@@ -1633,10 +1673,13 @@ impl App {
         let mut staging = nsh_platform_tui::AppView::new(options);
         let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = errors.clone();
-        staging.on_error(move |message| {
+        staging.on_app_error(move |error| {
             sink.lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .push(message.to_string());
+                .push(crate::mods::ModError {
+                    message: error.to_string(),
+                    fatal: error.is_fatal(),
+                });
         });
         staging.load(bundle).map_err(|error| error.to_string())?;
         // 离屏首帧：TestBackend 上渲染一次，成功才替换。
@@ -1653,6 +1696,20 @@ impl App {
         terminal
             .draw(|frame| staging.render(frame, rect))
             .map_err(|error| error.to_string())?;
+        // 首帧就抛：保留现状（旧实例与已显示帧不变），原因是占位盒的正文。
+        let first_frame_errors: Vec<crate::mods::ModError> = {
+            let mut errors = errors.lock().unwrap_or_else(|error| error.into_inner());
+            std::mem::take(&mut *errors)
+        };
+        if !first_frame_errors.is_empty() {
+            let message = first_frame_errors
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.record_mod_errors(&surface_id, mod_id, first_frame_errors);
+            return Err(message);
+        }
         let generation = {
             let generation = self.mods.generations.entry(mod_id.to_string()).or_insert(0);
             *generation += 1;
@@ -1669,6 +1726,8 @@ impl App {
         surface.fails = 0;
         surface.last_error = None;
         surface.store_generation = store_generation;
+        // 新代际重新开始计数：以后同样错误还要写日志与弹 toast。
+        self.mods.seen_errors.remove(mod_id);
         self.dirty = true;
         Ok(())
     }
@@ -1909,6 +1968,15 @@ impl App {
         let Some(input) = crate::mods::input::translate_key(&key, release) else {
             return true;
         };
+        if self
+            .mods
+            .surface(&id)
+            .is_some_and(|surface| surface.state == SurfaceState::Failed)
+        {
+            // 失败占位自己接 `r` / `?`，其余按键也不落到后台 PTY。
+            self.mod_error_key(&id, &key);
+            return true;
+        }
         let Some(surface) = self.mods.surface_mut(&id) else {
             self.focused_mod = None;
             return false;
@@ -1953,7 +2021,7 @@ impl App {
                 matches!(
                     surface.place,
                     SurfacePlace::Dialog | SurfacePlace::Popup | SurfacePlace::Window
-                ) && surface.interactive()
+                ) && (surface.interactive() || surface.state == SurfaceState::Failed)
             })
             .map(|surface| {
                 let z = match surface.place {
@@ -1975,8 +2043,14 @@ impl App {
             if click_through || !super::contains(area, mouse.column, mouse.row) {
                 continue;
             }
+            let failed = self
+                .mods
+                .surface(&id)
+                .is_some_and(|surface| surface.state == SurfaceState::Failed);
             self.focus_mod_surface(Some(id.clone()));
-            self.deliver_mouse(&id, mouse);
+            if !failed {
+                self.deliver_mouse(&id, mouse);
+            }
             if modal {
                 return true;
             }
@@ -2038,6 +2112,7 @@ impl App {
     }
 
     /// 关闭 z 序最高的覆盖层（window > popup > dialog）；`onEsc: "module"` 的不由宿主关。
+    /// 失败占位也由 `Esc` 关掉：关掉后宿主不自动重开，恢复需要显式触发。
     /// 返回是否关闭。
     pub fn close_top_mod_overlay(&mut self) -> bool {
         let target = self
@@ -2045,7 +2120,7 @@ impl App {
             .surfaces
             .iter()
             .filter(|surface| {
-                surface.interactive()
+                (surface.interactive() || surface.state == SurfaceState::Failed)
                     && surface.esc_to_host
                     && matches!(
                         surface.place,
@@ -2172,6 +2247,45 @@ impl App {
             self.seen_dirty = true;
             self.dirty = true;
             self.save_local_state();
+        }
+    }
+
+    /// 包集合变了：停用的区域模块撤下表面（区域回落到内置实现，不留空框），
+    /// 失败的区域按新代际重载（重装与改配置的恢复路径），仍是坏的保持占位。
+    pub fn recover_region_modules(&mut self) {
+        if self.config.no_mods {
+            return;
+        }
+        let enabled: std::collections::BTreeSet<String> = self
+            .plugins
+            .modules()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        let regions: Vec<(String, String, SurfaceState)> = self
+            .mods
+            .surfaces
+            .iter()
+            .filter(|surface| surface.place == SurfacePlace::Region)
+            .map(|surface| (surface.id.clone(), surface.mod_id.clone(), surface.state))
+            .collect();
+        for (surface_id, mod_id, state) in regions {
+            if !enabled.contains(&mod_id) {
+                self.mods_close(&surface_id);
+                continue;
+            }
+            if state == SurfaceState::Failed {
+                if let Err(error) = self.mods_reload(&mod_id) {
+                    self.record_mod_errors(
+                        &surface_id,
+                        &mod_id,
+                        vec![crate::mods::ModError {
+                            message: error,
+                            fatal: false,
+                        }],
+                    );
+                }
+            }
         }
     }
 
@@ -2349,18 +2463,133 @@ impl App {
         Ok(())
     }
 
-    /// 记录运行期异常：写 `logs/<id>/engine.log` 并计数；连续三次进入 Failed。
-    pub fn record_mod_errors(&mut self, surface_id: &str, mod_id: &str, errors: Vec<String>) {
+    /// 记录运行期异常：写 `logs/<id>/engine.log`、弹一次 toast 并计数。
+    ///
+    /// 同一模块同一条错误只写一条日志、只弹一次 toast：连续每帧失败不刷屏。
+    /// 重载成功或安装新代际时清空这份去重表。
+    pub fn record_mod_errors(
+        &mut self,
+        surface_id: &str,
+        mod_id: &str,
+        errors: Vec<crate::mods::ModError>,
+    ) {
         let store = crate::store::Store::open(self.config.mods_state_dir());
         for error in &errors {
-            let line = format!("[{}] {error}", crate::store::now_unix());
+            let fresh = self
+                .mods
+                .seen_errors
+                .entry(mod_id.to_string())
+                .or_default()
+                .insert(error.message.clone());
+            if !fresh {
+                continue;
+            }
+            let line = format!("[{}] {}", crate::store::now_unix(), error.message);
             let _ = store.append_log(mod_id, &line);
-            eprintln!("{}", t2("mod {}: {}", mod_id, error));
+            eprintln!("{}", t2("mod {}: {}", mod_id, &error.message));
+            let first = error.message.lines().next().unwrap_or_default();
+            self.register_notification(
+                t2("mod {}: {}", mod_id, first),
+                "error",
+                6000,
+                None,
+                None,
+                None,
+                false,
+            );
         }
         if let Some(surface) = self.mods.surface_mut(surface_id) {
             for error in errors {
-                surface.record_failure(error);
+                surface.record_failure(error.message);
+                if error.fatal {
+                    // 引擎已停：没有可保留的帧，首次报错就直接进占位。
+                    surface.state = SurfaceState::Failed;
+                }
             }
+        }
+        self.dirty = true;
+    }
+
+    /// `r` / `?` 的目标：焦点失败表面优先，否则最上层（最后打开）的失败表面。
+    pub fn failed_mod_surface(&self) -> Option<String> {
+        if let Some(id) = self.focused_mod.as_ref() {
+            if self
+                .mods
+                .surface(id)
+                .is_some_and(|surface| surface.state == SurfaceState::Failed)
+            {
+                return Some(id.clone());
+            }
+        }
+        self.mods
+            .surfaces
+            .iter()
+            .rfind(|surface| surface.state == SurfaceState::Failed)
+            .map(|surface| surface.id.clone())
+    }
+
+    /// 失败占位上的 `r` / `?`：`r` 重载该模块，`?` 把完整异常写进包日志。
+    pub fn mod_error_key(&mut self, surface_id: &str, key: &KeyEvent) -> bool {
+        let Some(surface) = self.mods.surface(surface_id) else {
+            return false;
+        };
+        if surface.state != SurfaceState::Failed {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('r') => {
+                let mod_id = surface.mod_id.clone();
+                if let Err(error) = self.mods_reload(&mod_id) {
+                    self.record_mod_errors(
+                        surface_id,
+                        &mod_id,
+                        vec![crate::mods::ModError {
+                            message: error,
+                            fatal: false,
+                        }],
+                    );
+                }
+                self.dirty = true;
+                true
+            }
+            KeyCode::Char('?') => {
+                self.log_mod_error_detail(surface_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `?`：把完整异常上下文（模块、表面、代际、host 方法、调用序号、错误原文）
+    /// 逐行写进 `logs/<id>/engine.log`，`packages log` 能看到。
+    pub fn log_mod_error_detail(&mut self, surface_id: &str) {
+        let Some(surface) = self.mods.surface(surface_id) else {
+            return;
+        };
+        let now = crate::store::now_unix();
+        let mod_id = surface.mod_id.clone();
+        let mut lines = vec![
+            format!(
+                "[{now}] detail mod {} surface {} generation {} failures {}",
+                surface.mod_id, surface.id, surface.generation, surface.fails
+            ),
+            format!(
+                "[{now}] detail last host call #{} {}",
+                surface.host_calls,
+                surface.last_host_method.as_deref().unwrap_or("none")
+            ),
+        ];
+        for line in surface
+            .last_error
+            .as_deref()
+            .unwrap_or("(no error recorded)")
+            .lines()
+        {
+            lines.push(format!("[{now}] detail error {line}"));
+        }
+        let store = crate::store::Store::open(self.config.mods_state_dir());
+        for line in lines {
+            let _ = store.append_log(&mod_id, &line);
         }
         self.dirty = true;
     }
