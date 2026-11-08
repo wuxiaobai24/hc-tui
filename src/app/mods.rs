@@ -66,6 +66,9 @@ impl App {
             }
         }
         self.flush_mod_events();
+        if self.mod_toast_dirty {
+            self.push_toast_props();
+        }
         if dispatched {
             self.dirty = true;
         }
@@ -353,20 +356,10 @@ impl App {
                     host::reject(reply, "invalid", "id required");
                     return;
                 };
-                let Some(index) = self.mod_notifications.iter().position(|item| item.id == id)
-                else {
+                if !self.dismiss_notification(id) {
                     host::reject(reply, "not_found", "unknown notification");
                     return;
-                };
-                let entry = self.mod_notifications.remove(index);
-                if self
-                    .toast
-                    .as_ref()
-                    .is_some_and(|toast| toast.text == entry.text)
-                {
-                    self.toast = None;
                 }
-                self.dirty = true;
                 if let Some(reply) = reply {
                     reply.resolve(json!({}));
                 }
@@ -510,8 +503,12 @@ impl App {
                     host::reject(reply, "invalid", "surface required");
                     return;
                 };
-                if !self.mods.surfaces.iter().any(|s| s.id == target) {
+                let Some(surface) = self.mods.surface(target) else {
                     host::reject(reply, "not_found", "no such surface");
+                    return;
+                };
+                if surface.place == SurfacePlace::Toast {
+                    host::reject(reply, "invalid", "toast surfaces do not take focus");
                     return;
                 }
                 self.focus_mod_surface(Some(target.to_string()));
@@ -1036,30 +1033,184 @@ impl App {
         } else {
             format!("{title} · {body}")
         };
+        self.register_notification(
+            text,
+            level,
+            timeout.max(1) * 1000,
+            action,
+            target,
+            surface,
+            status,
+        )
+    }
+
+    /// 宿主侧登记一条通知：解析归属表面、计时并写进队列。
+    ///
+    /// 命中提示表面时只走模块队列；否则保持内置 toast 或状态行行为。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_notification(
+        &mut self,
+        text: String,
+        level: &str,
+        timeout_ms: u64,
+        action: Option<Value>,
+        target: Option<&str>,
+        surface: Option<&str>,
+        status: bool,
+    ) -> String {
         let id = format!("n{}", self.mods.next_request_id());
+        let routed = self.resolve_toast_surface(surface);
         self.mod_notifications.push(crate::mods::ModNotification {
             id: id.clone(),
             level: level.to_string(),
             text: text.clone(),
             action,
             target: target.map(str::to_string),
-            surface: surface.map(str::to_string),
+            surface: routed.clone().or_else(|| surface.map(str::to_string)),
             created: crate::store::now_unix(),
+            created_ms: crate::store::now_millis(),
+            timeout_ms,
+            since: std::time::Instant::now(),
         });
         // 队列只保留最近 200 条，旧条目被挤掉后 `dismiss` 返回 `not_found`。
         while self.mod_notifications.len() > 200 {
             self.mod_notifications.remove(0);
         }
-        if status {
+        if routed.is_some() {
+            self.mod_toast_dirty = true;
+        } else if status {
             self.note = text;
         } else {
             self.toast = Some(crate::app::Toast {
                 text,
-                until: std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1)),
+                until: std::time::Instant::now()
+                    + std::time::Duration::from_millis(timeout_ms.max(1)),
             });
+            self.toast_notification = Some(id.clone());
         }
+        self.bump_mod_revision_domains(&["notifications"]);
         self.dirty = true;
         id
+    }
+
+    /// 按 id 撤掉一条通知；返回是否找到。文本只用于显示。
+    pub(crate) fn dismiss_notification(&mut self, id: &str) -> bool {
+        let Some(index) = self.mod_notifications.iter().position(|item| item.id == id) else {
+            return false;
+        };
+        self.mod_notifications.remove(index);
+        // toast 槽位按登记的通知 ID 对应，不按文本比较。
+        if self.toast_notification.as_deref() == Some(id) {
+            self.toast = None;
+            self.toast_notification = None;
+        }
+        self.mod_toast_dirty = true;
+        self.bump_mod_revision_domains(&["notifications"]);
+        self.dirty = true;
+        true
+    }
+
+    /// 提示表面：外框声明了 `toasts` 节点且表面可交互。
+    fn toast_surfaces(&self) -> Vec<(String, String)> {
+        if self.config.no_mods || !self.chrome.has_toasts() {
+            return Vec::new();
+        }
+        self.mods
+            .surfaces
+            .iter()
+            .filter(|surface| surface.place == SurfacePlace::Toast && surface.interactive())
+            .map(|surface| (surface.id.clone(), surface.mod_id.clone()))
+            .collect()
+    }
+
+    /// 通知归属的提示表面：`surface` 按表面 ID 或模块 ID 命中；未指定取默认。
+    fn resolve_toast_surface(&self, requested: Option<&str>) -> Option<String> {
+        let surfaces = self.toast_surfaces();
+        match requested {
+            Some(name) => surfaces
+                .iter()
+                .find(|(id, mod_id)| id == name || mod_id == name)
+                .map(|(id, _)| id.clone()),
+            None => surfaces.first().map(|(id, _)| id.clone()),
+        }
+    }
+
+    /// 把队列写进每条提示表面的 props；通道与 `setProps` 相同。
+    pub(crate) fn push_toast_props(&mut self) {
+        let targets = self.toast_surfaces();
+        if targets.is_empty() {
+            self.mod_toast_dirty = false;
+            return;
+        }
+        let limit = self.config.toast_limit.max(1);
+        let default = targets[0].0.clone();
+        for (surface_id, _) in targets {
+            let mut toasts: Vec<Value> = self
+                .mod_notifications
+                .iter()
+                .filter(|item| match &item.surface {
+                    Some(id) => id == &surface_id,
+                    None => surface_id == default,
+                })
+                .map(|item| {
+                    let mut value = json!({
+                        "id": item.id,
+                        "level": item.level,
+                        "text": item.text,
+                        "created_ms": item.created_ms,
+                        "timeout_ms": item.timeout_ms,
+                    });
+                    if let Some(action) = &item.action {
+                        value["action"] = action.clone();
+                    }
+                    if let Some(target) = &item.target {
+                        value["target"] = json!(target);
+                    }
+                    value
+                })
+                .collect();
+            // 只留最新几条，显示顺序由模块决定。
+            if toasts.len() > limit {
+                toasts.drain(..toasts.len() - limit);
+            }
+            let props = json!({"toasts": toasts, "max": limit});
+            if let Some(surface) = self.mods.surface_mut(&surface_id) {
+                surface.props = props.clone();
+                surface.host.send("props.changed", json!({"props": props}));
+            }
+        }
+        self.mod_toast_dirty = false;
+        self.dirty = true;
+    }
+
+    /// 超时的通知由宿主撤掉，模块只负责显示。
+    pub(crate) fn expire_mod_notifications(&mut self, now: std::time::Instant) {
+        let expired: Vec<String> = self
+            .mod_notifications
+            .iter()
+            .filter(|item| {
+                item.timeout_ms > 0
+                    && now.saturating_duration_since(item.since).as_millis() as u64
+                        >= item.timeout_ms
+            })
+            .map(|item| item.id.clone())
+            .collect();
+        if expired.is_empty() {
+            return;
+        }
+        self.mod_notifications
+            .retain(|item| !expired.contains(&item.id));
+        if self
+            .toast_notification
+            .as_ref()
+            .is_some_and(|id| expired.contains(id))
+        {
+            self.toast = None;
+            self.toast_notification = None;
+        }
+        self.mod_toast_dirty = true;
+        self.bump_mod_revision_domains(&["notifications"]);
+        self.dirty = true;
     }
 
     /// `ask` 超时或目标表面已关：应答错误，不静默丢弃。
@@ -1126,6 +1277,16 @@ impl App {
         if self.focused_mod == surface {
             return;
         }
+        // 提示表面不抢焦点：请求无效，当前焦点保持不变。
+        if let Some(id) = &surface {
+            if self
+                .mods
+                .surface(id)
+                .is_some_and(|target| target.place == SurfacePlace::Toast)
+            {
+                return;
+            }
+        }
         let targets: Vec<String> = self.mods.surfaces.iter().map(|s| s.id.clone()).collect();
         for id in targets {
             if let Some(surface) = self.mods.surface_mut(&id) {
@@ -1161,6 +1322,9 @@ impl App {
     ) -> Result<String, String> {
         if self.config.no_mods {
             return Err(t("mods are disabled (--no-mods)").to_string());
+        }
+        if place == SurfacePlace::Toast && !self.chrome.has_toasts() {
+            return Err(t("chrome has no toasts block").to_string());
         }
         let package = self.mod_package(mod_id)?;
         if !package.enabled || !self.mods.is_enabled(mod_id) {
@@ -1237,7 +1401,16 @@ impl App {
         surface.state = SurfaceState::Running;
         surface.store_generation = store_generation;
         surface.props = props;
-        self.focus_mod_surface(Some(id.clone()));
+        if place == SurfacePlace::Toast {
+            // 提示层固定形态：不抢焦点、不是模态、不参与 `Esc`、不吃鼠标。
+            surface.modal = false;
+            surface.autofocus = false;
+            surface.esc_to_host = false;
+            surface.click_through = true;
+            self.mod_toast_dirty = true;
+        } else {
+            self.focus_mod_surface(Some(id.clone()));
+        }
         self.dirty = true;
         Ok(id)
     }
@@ -1406,7 +1579,7 @@ impl App {
     ) -> ratatui_core::layout::Rect {
         let content = self.content;
         match place {
-            SurfacePlace::Region | SurfacePlace::Pane => content,
+            SurfacePlace::Region | SurfacePlace::Pane | SurfacePlace::Toast => content,
             SurfacePlace::Dialog => {
                 let (w, h) = size.unwrap_or((64, 16));
                 crate::mods::render::dialog_rect(content, w, h)
@@ -1437,6 +1610,13 @@ impl App {
 
     /// 打开参数：`modal`、`autofocus`、`onEsc`、`clickThrough`；默认与既有行为一致。
     pub fn apply_surface_options(&mut self, surface_id: &str, data: &Value) {
+        let toast = self
+            .mods
+            .surface(surface_id)
+            .is_some_and(|surface| surface.place == SurfacePlace::Toast);
+        if toast {
+            return;
+        }
         let mut unfocus = false;
         if let Some(surface) = self.mods.surface_mut(surface_id) {
             if let Some(modal) = data.get("modal").and_then(Value::as_bool) {
@@ -1566,6 +1746,10 @@ impl App {
             return;
         }
         self.mods_dirty = false;
+        if !self.mod_all_domains && self.mod_changed_domains.is_empty() {
+            // 只有 revision 变化（如授予变更）：不发空域的 `state.changed`。
+            return;
+        }
         let domains: Vec<&str> = if self.mod_all_domains {
             MOD_DOMAINS.to_vec()
         } else {
@@ -1769,7 +1953,45 @@ impl App {
                 changed = true;
             }
         }
+        // 提示表面不在外框 `mod` 块里，停用时单独收起。
+        let dropped: Vec<String> = self
+            .mods
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                surface.place == SurfacePlace::Toast && !enabled_ids.contains(&surface.mod_id)
+            })
+            .map(|surface| surface.mod_id.clone())
+            .collect();
+        for id in dropped {
+            if self.mods_close(&id) {
+                changed = true;
+            }
+        }
         for entry in enabled {
+            // 提示模块不占停靠区、不进 `mods_docked`：外框有 `toasts` 节点就始终有一条表面。
+            if entry.module.place == "toast" {
+                if !self.chrome.has_toasts() {
+                    continue;
+                }
+                let open = self.mods.surfaces.iter().any(|surface| {
+                    surface.mod_id == entry.id && surface.place == SurfacePlace::Toast
+                });
+                if !open {
+                    match self.mods_open(
+                        &entry.id,
+                        SurfacePlace::Toast,
+                        json!({}),
+                        None,
+                        None,
+                        None,
+                    ) {
+                        Ok(_) => changed = true,
+                        Err(error) => self.note = error,
+                    }
+                }
+                continue;
+            }
             if self.chrome.mods().iter().any(|(id, _)| id == &entry.id) {
                 changed |= self.mods_docked.insert(entry.id.clone());
                 continue;
@@ -2162,6 +2384,9 @@ fn client_host() -> String {
 
 #[cfg(test)]
 mod base_tests;
+
+#[cfg(test)]
+mod toast_tests;
 
 #[cfg(test)]
 mod tests {

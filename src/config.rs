@@ -706,6 +706,8 @@ pub struct Config {
     pub agent_sort: AgentSort,
     pub indicators: Indicators,
     pub notifications: Delivery,
+    /// 提示表面上同时保留的最大条数；内置 toast 不受影响。
+    pub toast_limit: usize,
     pub sound: bool,
     pub sound_path: Option<String>,
     pub sound_done_path: Option<String>,
@@ -829,6 +831,7 @@ impl Default for Config {
             agent_sort: AgentSort::Spaces,
             indicators: Indicators::Dots,
             notifications: Delivery::Toast,
+            toast_limit: 3,
             sound: false,
             sound_path: None,
             sound_done_path: None,
@@ -1120,6 +1123,12 @@ impl Config {
                 "notifications.delay_seconds" => {
                     // 保留键位兼容：toast 目前立即出现，不按延迟排队。
                     let _ = value.number(&mut warnings, path);
+                }
+                "notifications.toast_limit" => {
+                    self.toast_limit = value
+                        .number(&mut warnings, path)
+                        .unwrap_or(self.toast_limit as i64)
+                        .clamp(1, 20) as usize
                 }
                 "notifications.sound" => {
                     self.sound = value.boolean(&mut warnings, path).unwrap_or(self.sound)
@@ -1426,6 +1435,7 @@ pub fn default_config_text() -> String {
     out.push_str("# [theme.custom]\n# accent = \"#89b4fa\"\n");
     out.push_str("\n[notifications]\n");
     out.push_str("delivery = \"toast\"   # off | toast | system\n");
+    out.push_str("toast_limit = 3      # 提示表面同时保留的条数\n");
     out.push_str("sound = false\n");
     out.push_str("# sound_path = \"/path/to/notification.mp3\"\n");
     out.push_str("# done_path = \"/path/to/done.mp3\"\n");

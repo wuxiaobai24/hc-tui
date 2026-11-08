@@ -155,6 +155,7 @@ name = "default"
 
 [notifications]
 delivery = "toast"   # off | toast | system
+toast_limit = 3      # 提示表面同时保留的条数
 sound = false
 # sound_path = "/path/to/notification.mp3"
 # done_path = "/path/to/done.mp3"
@@ -341,6 +342,7 @@ refresh = 5
 ## 通知与剪贴板
 
 notifications.delivery 为 off / toast / system，system 另调用 notify-send。
+notifications.toast_limit 限制绑定提示模块后同时保留的通知条数（默认 3）；内置 toast 不受它影响。
 sound=true 时可分别设置 sound_path、done_path、request_path；可用播放器优先
 paplay，其次 ffplay / afplay / mpv，无法播放回落终端响铃。
 复制同时尝试 OSC 52 和平台剪贴板工具；图片读取在 macOS 使用系统接口，Linux 需要 wl-paste / xclip。
