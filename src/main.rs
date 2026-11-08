@@ -1,6 +1,10 @@
 use anyhow::Result;
 use hc_tui::i18n::{t, t1, t2, t3};
 
+mod cli {
+    pub mod completion;
+}
+
 fn main() -> Result<()> {
     hc_tui::i18n::set_zh(hc_tui::config::detect_zh());
     tracing_subscriber::fmt()
@@ -39,6 +43,7 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Some("completion") => cli::completion::run(&args[1..]),
         Some("ls") => {
             let config = parse_options(&args[1..])?;
             println!(
@@ -134,6 +139,7 @@ fn usage() {
         "{}",
         t("       hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>]")
     );
+    println!("       hc-tui completion zsh|bash|fish");
     println!(
         "{}",
         t("       hc-tui do <command> [<terminal>] [JSON arguments] [options]")
