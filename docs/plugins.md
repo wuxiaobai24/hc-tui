@@ -272,6 +272,13 @@ hc-tui events [--plugin <id>] [--kinds terminal.status,terminal.turn] [--count N
 
 命令面板、`[[keys.command]] type = "action"` 与 `hc-tui do` 使用同一分发器；插件动作在启用前不出现在目录中。
 
+命令面板与终端右键菜单选中带参数 schema 的插件动作时，先按 schema 打开参数表单：
+`string` 单行输入、`string` + `enum` 单选菜单、`boolean` 开关、`integer`/`number` 数字输入、
+嵌套 `object` 分组缩进、标量 `array` 逐项增删。提交复用宿主同一套递归校验，
+错误在表单内联显示且不派发；表单打开期间控制通道对同名动作回
+`confirmation_pending = true`，关闭后 `do` 与 `plugins action invoke` 照旧直接派发并返回真实 `request`。
+`hc-tui do <action> '<json>'` 与无窗口路径不经过表单。
+
 ## 8. 事件
 
 ```sh

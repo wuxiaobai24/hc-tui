@@ -21,8 +21,8 @@ use crossterm::event::KeyCode;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, Chooser, Connection, GotoOverlay, HelpOverlay, MobileAction, MobileTarget, NavigationRow,
-    Prompt, Reader, SettingsOverlay, Toast,
+    ActionForm, App, Chooser, Connection, FormRow, GotoOverlay, HelpOverlay, MobileAction,
+    MobileTarget, NavigationRow, Prompt, Reader, RowKind, SettingsOverlay, Toast,
 };
 use crate::config::HostCursor;
 use crate::i18n::{t, t1, t2, tv};
@@ -189,6 +189,12 @@ fn render_modals(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     if let Some(prompt) = &app.prompt {
         targets.clear();
         render_prompt(frame, prompt, app.content, theme, &mut targets);
+    }
+    if let Some(form) = app.form.as_mut() {
+        targets.clear();
+        let content = app.content;
+        render_form(frame, form, content, theme);
+        render_form_menu(frame, form, content, theme);
     }
     app.pointer_targets = targets;
 }
@@ -1402,6 +1408,245 @@ fn centered(content: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     )
+}
+
+fn render_form(frame: &mut Frame, form: &mut ActionForm, content: Rect, theme: &Theme) {
+    if content.width < 24 || content.height < 8 {
+        return;
+    }
+    let width = 64.min(content.width - 2);
+    let height = (form.rows().len() as u16 + 5).min(content.height);
+    let area = centered(content, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.color("accent")))
+        .style(Style::default().bg(theme.color("sidebar_bg")));
+    let inner = block.inner(area);
+    if inner.width < 4 || inner.height < 4 {
+        return;
+    }
+    clear_area(frame, area, theme);
+    frame.render_widget(block, area);
+    let bg = Style::default().bg(theme.color("sidebar_bg"));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {}", form.title),
+                Style::default()
+                    .fg(theme.color("accent"))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", form.action),
+                Style::default().fg(theme.color("dim")),
+            ),
+        ]))
+        .style(bg),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
+    for (index, row) in form.rows().iter().enumerate() {
+        let failed = form.error_row == Some(index);
+        lines.push((
+            Some(index),
+            form_row_line(row, index == form.selected, failed, theme),
+        ));
+        if failed {
+            if let Some(message) = &form.error {
+                lines.push((
+                    None,
+                    Line::from(vec![
+                        Span::raw(format!("  {}", "  ".repeat(row.depth + 1))),
+                        Span::styled(
+                            truncate(message, inner.width.saturating_sub(4) as usize),
+                            Style::default().fg(theme.color("agent_error")),
+                        ),
+                    ]),
+                ));
+            }
+        }
+    }
+    let field_height = (inner.height as usize).saturating_sub(3);
+    if field_height == 0 {
+        return;
+    }
+    let selected_line = lines
+        .iter()
+        .position(|(row, _)| *row == Some(form.selected))
+        .unwrap_or(0);
+    if selected_line < form.scroll {
+        form.scroll = selected_line;
+    }
+    if selected_line >= form.scroll + field_height {
+        form.scroll = selected_line + 1 - field_height;
+    }
+    form.scroll = form.scroll.min(lines.len().saturating_sub(field_height));
+    let visible: Vec<Line> = lines
+        .iter()
+        .skip(form.scroll)
+        .take(field_height)
+        .map(|(_, line)| line.clone())
+        .collect();
+    frame.render_widget(
+        Paragraph::new(visible).style(bg),
+        Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(3),
+        ),
+    );
+    if form.error_row.is_none() {
+        if let Some(message) = &form.error {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(message, inner.width as usize),
+                    Style::default().fg(theme.color("agent_error")),
+                ))
+                .style(bg),
+                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            t("↵ submit    ⇥ next    esc cancel    ^a add    ^d remove"),
+            Style::default().fg(theme.color("dim")),
+        ))
+        .style(bg),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+fn form_row_line(row: &FormRow, focused: bool, failed: bool, theme: &Theme) -> Line<'static> {
+    let indent = format!("  {}", "  ".repeat(row.depth));
+    let label_style = Style::default()
+        .fg(if failed {
+            theme.color("agent_error")
+        } else if focused {
+            theme.color("accent")
+        } else {
+            theme.color("fg")
+        })
+        .add_modifier(if focused {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    let mut spans = vec![Span::raw(indent)];
+    match &row.kind {
+        RowKind::Group => {
+            spans.push(Span::styled(
+                row.label.clone(),
+                Style::default()
+                    .fg(theme.color("accent"))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        RowKind::Bool => {
+            spans.push(Span::styled(format!("{}: ", row.label), label_style));
+            spans.push(Span::raw(if row.checked { "[x] on" } else { "[ ] off" }));
+        }
+        RowKind::Enum {
+            options, selected, ..
+        } => {
+            spans.push(Span::styled(format!("{}: ", row.label), label_style));
+            let text = selected
+                .and_then(|index| options.get(index))
+                .map(option_text)
+                .unwrap_or_else(|| "—".to_string());
+            spans.push(Span::raw(text));
+            spans.push(Span::styled(
+                "  ◂ ▸",
+                Style::default().fg(theme.color("dim")),
+            ));
+        }
+        RowKind::AddItem { .. } => {
+            spans.push(Span::styled(
+                row.label.clone(),
+                Style::default().fg(theme.color("dim")),
+            ));
+        }
+        RowKind::Text { .. } | RowKind::ArrayItem { .. } => {
+            let label = if row.label.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", row.label)
+            };
+            spans.push(Span::styled(label, label_style));
+            if focused {
+                let (before, after) = row.text.split_at(row.cursor.min(row.text.len()));
+                spans.push(Span::styled(
+                    before.to_string(),
+                    Style::default()
+                        .fg(theme.color("fg"))
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    "▏",
+                    Style::default().fg(theme.color("accent")),
+                ));
+                spans.push(Span::raw(after.to_string()));
+            } else if row.text.is_empty() {
+                spans.push(Span::styled("—", Style::default().fg(theme.color("dim"))));
+            } else {
+                spans.push(Span::raw(row.text.clone()));
+            }
+        }
+    }
+    Line::from(spans)
+}
+
+fn option_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn render_form_menu(frame: &mut Frame, form: &ActionForm, content: Rect, theme: &Theme) {
+    let Some((row, selected)) = form.menu else {
+        return;
+    };
+    let Some(RowKind::Enum { options, .. }) = form.rows().get(row).map(|row| &row.kind) else {
+        return;
+    };
+    let width = 40.min(content.width.saturating_sub(4));
+    let height = (options.len() as u16 + 2).min(content.height);
+    if width < 8 || height < 3 {
+        return;
+    }
+    let area = centered(content, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.color("accent")))
+        .style(Style::default().bg(theme.color("sidebar_bg")));
+    let inner = block.inner(area);
+    clear_area(frame, area, theme);
+    frame.render_widget(block, area);
+    let start = selected.saturating_sub((inner.height as usize).saturating_sub(1));
+    let lines: Vec<Line> = options
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(inner.height as usize)
+        .map(|(index, option)| {
+            let style = if index == selected {
+                Style::default()
+                    .fg(theme.color("selection_fg"))
+                    .bg(theme.color("selection_bg"))
+            } else {
+                Style::default()
+                    .fg(theme.color("fg"))
+                    .bg(theme.color("sidebar_bg"))
+            };
+            Line::from(Span::styled(format!(" {}", option_text(option)), style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.color("sidebar_bg"))),
+        inner,
+    );
 }
 
 fn render_prompt(

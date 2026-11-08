@@ -259,6 +259,7 @@ impl App {
 impl App {
     pub(super) fn on_pointer_mouse(&mut self, mouse: MouseEvent) -> bool {
         let modal = self.prompt.is_some()
+            || self.form.is_some()
             || self.chooser.is_some()
             || self.goto.is_some()
             || self.settings.is_some()

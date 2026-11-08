@@ -18,6 +18,7 @@ use crossterm::event::{
 use ratatui_core::layout::Rect;
 use serde_json::{json, Value};
 
+pub use self::form::{ActionForm, FormRow, RowKind};
 use crate::chat::commands::{Kind, Local};
 use crate::chat::{hook, Chat, ChatAction};
 use crate::clipboard;
@@ -39,6 +40,7 @@ mod actions;
 mod agent_tree;
 mod bindings;
 mod branches;
+mod form;
 pub(crate) mod interaction;
 mod keyboard;
 mod layout_sync;
@@ -466,6 +468,8 @@ pub struct App {
     pub move_mode: bool,
     pub workspace_mode: bool,
     pub prompt: Option<Prompt>,
+    /// 按动作的 args schema 生成的参数表单；打开期间不吃其它分发。
+    pub form: Option<ActionForm>,
     pub copy: Option<CopyMode>,
     /// 打开的 Chat 视图；覆盖内容区，但 Pane 照常 attach。
     pub chat: Option<Chat>,
@@ -636,6 +640,7 @@ impl App {
             move_mode: false,
             workspace_mode: false,
             prompt: None,
+            form: None,
             copy: None,
             chat: None,
             drag: None,
@@ -876,6 +881,14 @@ impl App {
             Some("do") => {
                 let command = body["command"].as_str().unwrap_or("");
                 let args = body.get("args").cloned().unwrap_or(json!({}));
+                // 表单开着时同名动作只在界面里完成，控制通道不重复派发。
+                if self
+                    .form
+                    .as_ref()
+                    .is_some_and(|form| form.action == command)
+                {
+                    return json!({"accepted":true,"confirmation_pending":true});
+                }
                 self.plugin_request = None;
                 if let Some(package) =
                     crate::plugin::registry::disabled_package(&self.config, command)
@@ -1357,6 +1370,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             let local = self.prefix
                 || self.prompt.is_some()
+                || self.form.is_some()
                 || self.help.is_some()
                 || self.settings.is_some()
                 || self.goto.is_some()
@@ -1376,6 +1390,10 @@ impl App {
                     self.forward_key(key);
                 }
             }
+            return;
+        }
+        if self.form.is_some() {
+            self.on_form_key(key);
             return;
         }
         if self.prompt.is_some() {
@@ -1529,6 +1547,15 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: String) {
+        if let Some(form) = &mut self.form {
+            if let Some(row) = form.focused_row_mut() {
+                let text = text.replace(['\r', '\n'], " ");
+                row.text.insert_str(row.cursor, &text);
+                row.cursor += text.len();
+                self.dirty = true;
+            }
+            return;
+        }
         if let Some(prompt) = &mut self.prompt {
             prompt.buffer.insert_str(prompt.cursor, &text);
             prompt.cursor += text.len();
@@ -1610,6 +1637,7 @@ impl App {
         if self.mobile
             || self.chat.is_some()
             || self.prompt.is_some()
+            || self.form.is_some()
             || self.help.is_some()
             || self.settings.is_some()
             || self.goto.is_some()
@@ -1626,6 +1654,7 @@ impl App {
             return;
         }
         if self.prompt.is_some()
+            || self.form.is_some()
             || self.help.is_some()
             || self.settings.is_some()
             || self.goto.is_some()
@@ -3476,6 +3505,10 @@ impl App {
                 if let Some(row) = rows.get(goto.selected) {
                     if self.palette {
                         self.palette = false;
+                        if self.open_plugin_form(&row.text, json!({})) {
+                            self.dirty = true;
+                            return;
+                        }
                         self.ask_with(
                             PromptKind::Command,
                             t("command + JSON arguments"),
@@ -5330,7 +5363,15 @@ impl App {
             ChooserKind::Machines => self.open_remote_pane(item.value),
             ChooserKind::Commands => {
                 let (name, args) = item.value.split_once(' ').unwrap_or((&item.value, "{}"));
-                let result = serde_json::from_str(args)
+                let parsed = serde_json::from_str::<Value>(args);
+                // 带参数 schema 的插件动作先开表单；没字段、停用或解析失败走原路。
+                if let Ok(arguments) = &parsed {
+                    if self.open_plugin_form(name, arguments.clone()) {
+                        self.dirty = true;
+                        return;
+                    }
+                }
+                let result = parsed
                     .map_err(anyhow::Error::from)
                     .and_then(|args| self.execute_action(name, args));
                 if let Err(error) = result {
