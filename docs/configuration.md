@@ -130,6 +130,7 @@ pane_scrollbars = true
 show_agent_labels_on_pane_borders = false
 hide_tab_bar_when_single_tab = false
 mouse_capture = true
+keyboard_protocol = "auto"  # auto | kitty | legacy
 mouse_scroll_lines = 3
 copy_on_select = false
 confirm_close = true
@@ -248,6 +249,7 @@ paste_image = "prefix+shift+v"
 | ui.pane_borders | auto 分屏才画；always 总是画；titles 仅标题；off 不画 |
 | ui.pane_gaps | true 保留相邻 Pane 各自边框；false 使用单条共享分隔线 |
 | ui.pane_outer_borders | 是否保留内容区最外沿边框 |
+| ui.keyboard_protocol | auto 启动时探测 `CSI ? u`，100ms 内没有回复按不支持处理；kitty 跳过探测直接启用 disambiguate；legacy 完全不碰终端 |
 | ui.host_cursor | native 使用宿主光标；drawn 用单元格绘制 |
 | ui.sidebar_collapsed_mode | compact 留窄栏；hidden 完全隐藏 |
 | ui.confirm_close | 关闭 Tab、Space、最后一个 Pane 时确认，不控制 app.quit |

@@ -389,6 +389,25 @@ Copy Mode：`h j k l` 移动，`w`/`b` 按词，`0`/`$` 行首行尾，`g`/`G` �
 `/` 搜索（命中会高亮）、`n` 下一个，`o` 打开光标处的链接，`q`/`Esc` 退出。
 复制同时走 OSC 52 与平台剪贴板工具。
 
+### Kitty 键盘协议
+
+`ui.keyboard_protocol` 默认 `auto`：启动时发 `CSI ? u` 探测，100ms 内收到
+`CSI ? <flags> u` 就发 `CSI > 1 u` 打开 disambiguate；退出、panic、SIGTERM 时
+发 `CSI < u` 恢复。`kitty` 跳过探测直接启用，`legacy` 完全不碰终端。
+
+启用后，legacy 下会撞车的键才分得开：
+
+| 键 | legacy | kitty |
+|---|---|---|
+| `ctrl+i` | 与 `tab` 同一个字节 `09` | `CSI 105;5u`，独立键 |
+| `ctrl+m` | 与 `enter` 同一个字节 `0d` | 独立键 |
+| `ctrl+[` | 与 `esc` 同一个字节 `1b` | 独立键 |
+
+只开 disambiguate 一个标志，不请求 key release 与 alternate keys，所以松开按键
+不会额外产生事件。宿主不支持时按键仍是原来的样子：`ctrl+i` 照旧当 `tab`。
+`hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds n]` 打印宿主回复的原始
+字节与解出的按键，`hc-tui keys decode <hex>` 解一段十六进制字节。
+
 
 ### 默认绑定冲突
 
