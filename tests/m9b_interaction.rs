@@ -296,6 +296,69 @@ fn tab_bar_switches_and_adds_tabs_by_key() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// Agents 段的徽标走 `props.changed`：终端状态变化后侧栏符号跟着变，不需要重载。
+#[test]
+fn sidebar_agent_badges_follow_terminal_status() {
+    let (mut app, root) = app_with_regions();
+    app.terminals = vec![sidebar_terminal("local/t1", "claude", "working", 2)];
+    let mut frame = String::new();
+    for _ in 0..60 {
+        frame = screen(&mut app, 80, 24);
+        app.pump_mods();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let row = frame
+        .lines()
+        .find(|line| line.contains("claude"))
+        .unwrap_or_default()
+        .to_string();
+    assert!(row.contains("● claude"), "working row: {row:?}");
+
+    app.terminals[0].status = Some("idle".to_string());
+    for _ in 0..60 {
+        frame = screen(&mut app, 80, 24);
+        app.pump_mods();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let row = frame
+        .lines()
+        .find(|line| line.contains("claude"))
+        .unwrap_or_default()
+        .to_string();
+    assert!(row.contains("○ claude"), "idle row: {row:?}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn sidebar_terminal(
+    address: &str,
+    name: &str,
+    status: &str,
+    turn: u64,
+) -> hc_tui::hc::proto::TerminalSummary {
+    hc_tui::hc::proto::TerminalSummary {
+        address: address.to_string(),
+        parent: None,
+        space_id: Some("space:1".to_string()),
+        tab_id: None,
+        name: Some(name.to_string()),
+        title: name.to_string(),
+        cwd: Some("/nonexistent/m9b-one".to_string()),
+        program: Some(name.to_string()),
+        space: Some("one".to_string()),
+        plugin: None,
+        plugin_terminal: None,
+        session: None,
+        turn,
+        seen_turn: turn,
+        pinned: false,
+        cols: 80,
+        rows: 24,
+        live: true,
+        status: Some(status.to_string()),
+        keep: false,
+    }
+}
+
 #[test]
 fn status_line_is_read_only() {
     let (mut app, root) = app_with_regions();

@@ -435,6 +435,8 @@ pub struct App {
     pub region_mods_attempted: std::collections::BTreeSet<String>,
     /// 上次尝试绑定时插件注册表的代际；变化后重新尝试。
     pub region_mods_revision: u64,
+    /// 区域模块已经拿到的 props 版本；变化时用 `props.changed` 推新的一份。
+    pub region_mods_props: BTreeMap<String, String>,
     /// 插件注册表：配置目录与安装存储的当前代际。
     pub plugins: crate::plugin::registry::Registry,
     /// 服务作业台账：写进布局文档 `services` 段，旧读者忽略。
@@ -677,6 +679,7 @@ impl App {
             mod_action_rpc: std::collections::BTreeMap::new(),
             region_mods_attempted: std::collections::BTreeSet::new(),
             region_mods_revision: u64::MAX,
+            region_mods_props: BTreeMap::new(),
             mods_dirty: false,
             mod_agent_order: None,
             pending_mod_rpc: std::collections::HashMap::new(),
@@ -1277,6 +1280,7 @@ impl App {
         }
         // 区域模块只负责绘制，不接管键盘焦点。
         let focused = self.focused_mod.clone();
+        let digest = props.to_string();
         let opened = self.mods_open(
             mod_id,
             crate::mods::SurfacePlace::Region,
@@ -1287,7 +1291,10 @@ impl App {
         );
         self.focus_mod_surface(focused);
         match opened {
-            Ok(_) => true,
+            Ok(_) => {
+                self.region_mods_props.insert(mod_id.to_string(), digest);
+                true
+            }
             Err(_) => {
                 self.region_mods_attempted.insert(mod_id.to_string());
                 false

@@ -97,13 +97,18 @@ fn unique_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("hctui-m9b-{tag}-{}-{unique}", std::process::id()))
 }
 
-fn config_in(root: &Path, theme: Theme) -> Config {
+fn config_in(root: &Path, theme: Theme, fixture: Fixture) -> Config {
     Config {
         restore: false,
         prompt_new_tab: false,
         config_path: root.join("config").join("config.toml"),
         state_path: root.join("state").join("state.json"),
         theme,
+        tab_bar_position: if fixture.bottom_tabs {
+            hc_tui::config::TabBarPosition::Bottom
+        } else {
+            hc_tui::config::TabBarPosition::Top
+        },
         ..Config::default()
     }
 }
@@ -123,8 +128,20 @@ fn install_module(config: &Config, module: &RegionMod, capabilities: &str) {
     std::fs::remove_dir_all(staging).ok();
 }
 
-/// 固定状态：一个本机 Space、两个 Tab、没有 Agent Pane。
-fn fixture_state(app: &mut App) {
+/// 侧栏的三种状态：无 Agent、两条 Agent terminal、Tab 栏在底部。
+#[derive(Clone, Copy)]
+struct Fixture {
+    agents: bool,
+    bottom_tabs: bool,
+}
+
+const PLAIN: Fixture = Fixture {
+    agents: false,
+    bottom_tabs: false,
+};
+
+/// 固定状态：一个本机 Space、两个 Tab，可选两条不带本地 Pane 的 Agent terminal。
+fn fixture_state(app: &mut App, fixture: Fixture) {
     app.note.clear();
     app.connection = hc_tui::app::Connection::Connecting;
     app.workspaces = vec![Workspace {
@@ -137,11 +154,47 @@ fn fixture_state(app: &mut App) {
         active: 0,
     }];
     app.active_ws = 0;
+    if fixture.agents {
+        app.terminals = vec![
+            terminal("local/t1", "claude", "working", 2),
+            terminal("local/t2", "codex", "idle", 3),
+        ];
+    }
 }
 
-fn app_in(config: Config) -> App {
+fn terminal(
+    address: &str,
+    name: &str,
+    status: &str,
+    turn: u64,
+) -> hc_tui::hc::proto::TerminalSummary {
+    hc_tui::hc::proto::TerminalSummary {
+        address: address.to_string(),
+        parent: None,
+        space_id: Some("space:1".to_string()),
+        tab_id: None,
+        name: Some(name.to_string()),
+        title: name.to_string(),
+        cwd: Some("/nonexistent/m9b-fixture".to_string()),
+        program: Some(name.to_string()),
+        space: Some("work".to_string()),
+        plugin: None,
+        plugin_terminal: None,
+        session: None,
+        turn,
+        seen_turn: turn,
+        pinned: false,
+        cols: 80,
+        rows: 24,
+        live: true,
+        status: Some(status.to_string()),
+        keep: false,
+    }
+}
+
+fn app_in(config: Config, fixture: Fixture) -> App {
     let mut app = App::new(config).expect("app builds");
-    fixture_state(&mut app);
+    fixture_state(&mut app, fixture);
     app
 }
 
@@ -249,16 +302,17 @@ fn region_differences(
     height: u16,
     theme: Theme,
     label: &str,
+    fixture: Fixture,
 ) -> Vec<(&'static str, usize, usize)> {
     let root = unique_dir(&format!("diff-{label}-{width}x{height}"));
-    let config = config_in(&root, theme);
-    let mut plain = app_in(config.clone());
+    let config = config_in(&root, theme, fixture);
+    let mut plain = app_in(config.clone(), fixture);
     let builtin = draw(&mut plain, width, height);
     let (sidebar, tab_bar, status) = builtin_areas(&plain, width, height);
     for module in &REGION_MODS {
         install_module(&config, module, "{\"host\":[\"state\"]}");
     }
-    let mut app = app_in(config);
+    let mut app = app_in(config, fixture);
     let areas: Vec<Rect> = [sidebar, tab_bar, status]
         .into_iter()
         .map(|area| area.expect("region area"))
@@ -291,11 +345,63 @@ fn regions_match_builtin_cell_for_cell() {
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         for theme in parity_themes() {
             let name = theme.name.clone();
-            for (module, differences, total) in region_differences(width, height, theme, &name) {
+            for (module, differences, total) in
+                region_differences(width, height, theme, &name, PLAIN)
+            {
                 println!("{module} {width}x{height} {name}: {differences} of {total} cells differ");
                 assert_eq!(
                     differences, 0,
                     "{module} parity failed at {width}x{height} {name}"
+                );
+            }
+        }
+    }
+}
+
+/// 侧栏里两条 Agent terminal 的状态：分组头、徽标、标签都要与内置实现逐格相同。
+#[test]
+fn regions_match_builtin_with_agent_terminals() {
+    let fixture = Fixture {
+        agents: true,
+        bottom_tabs: false,
+    };
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        for theme in parity_themes() {
+            let name = theme.name.clone();
+            for (module, differences, total) in
+                region_differences(width, height, theme, &name, fixture)
+            {
+                println!(
+                    "{module} agents {width}x{height} {name}: {differences} of {total} cells differ"
+                );
+                assert_eq!(
+                    differences, 0,
+                    "{module} agents parity at {width}x{height} {name}"
+                );
+            }
+        }
+    }
+}
+
+/// 外框把 Tab 栏放到底部时三块仍然逐格相同。
+#[test]
+fn regions_match_builtin_with_bottom_tab_bar() {
+    let fixture = Fixture {
+        agents: true,
+        bottom_tabs: true,
+    };
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        for theme in parity_themes() {
+            let name = theme.name.clone();
+            for (module, differences, total) in
+                region_differences(width, height, theme, &name, fixture)
+            {
+                println!(
+                    "{module} bottom-tabs {width}x{height} {name}: {differences} of {total} cells differ"
+                );
+                assert_eq!(
+                    differences, 0,
+                    "{module} bottom-tabs parity at {width}x{height} {name}"
                 );
             }
         }
@@ -309,7 +415,9 @@ fn regions_match_builtin_cell_for_cell() {
 fn default_theme_color_gap_is_measurable() {
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         let theme = theme::builtin("default").expect("default theme");
-        for (module, differences, total) in region_differences(width, height, theme, "default") {
+        for (module, differences, total) in
+            region_differences(width, height, theme, "default", PLAIN)
+        {
             println!("{module} {width}x{height} default: {differences} of {total} cells differ");
         }
     }
@@ -360,13 +468,13 @@ fn snapshot_path(width: u16, height: u16) -> PathBuf {
 fn no_mods_frame_matches_baseline_snapshot() {
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         let root = unique_dir(&format!("no-mods-{width}x{height}"));
-        let mut config = config_in(&root, parity_themes().remove(0));
+        let mut config = config_in(&root, parity_themes().remove(0), PLAIN);
         // 模块装好但整体停用：三块必须仍由内置实现绘制。
         for module in &REGION_MODS {
             install_module(&config, module, "{\"host\":[\"state\"]}");
         }
         config.no_mods = true;
-        let mut app = app_in(config);
+        let mut app = app_in(config, PLAIN);
         let buffer = draw(&mut app, width, height);
         assert!(
             app.mod_regions.is_empty(),

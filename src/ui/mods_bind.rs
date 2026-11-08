@@ -4,6 +4,10 @@
 //! 出现这些运行时规则照旧生效；只把这一帧确实可见的区域换成模块块，尺寸取
 //! 内置区域刚算出的矩形，所以第二遍布局与第一遍逐字段相同。模块没装、停用或
 //! 渲染失败时该区域保持内置块，回退到 Rust 实现。
+//!
+//! 侧栏 Agents 段的分组与徽标由宿主决议（`navigation_rows`），作为 props 交给
+//! 模块；props 变化时用既有的 `props.changed` 事件推新的一份，模块监听后重绘，
+//! 不需要重载表面。
 
 use ratatui_core::layout::Rect;
 
@@ -52,6 +56,7 @@ pub fn layout(app: &mut App, area: Rect) -> Plan {
         if !app.ensure_region_module(module, props.clone()) {
             continue;
         }
+        refresh_props(app, module, &props);
         if !bind_block(&mut tree.root, builtin_name, module, rect, props) {
             continue;
         }
@@ -99,17 +104,72 @@ fn builtin_rect(layout: &ChromeLayout, name: &str) -> Option<Rect> {
     }
 }
 
-/// 区域模块随包打开的启动参数；配置项不在 `state` 里，只能随包会话固定。
+/// 区域模块的启动参数。侧栏的 Agents 段需要分组、徽标与折叠状态，这些由宿主
+/// 决议（`navigation_rows`），模块只按快照与最新 props 渲染。
 fn region_props(app: &App, builtin: &str) -> serde_json::Value {
     match builtin {
-        "spaces" => serde_json::json!({
-            "sort": match app.config.agent_sort {
-                crate::config::AgentSort::Priority => "priority",
-                crate::config::AgentSort::Spaces => "grouped",
-            },
-        }),
+        "spaces" => {
+            let rows: Vec<serde_json::Value> = app
+                .navigation_rows()
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "group": row.group,
+                        "group_id": row.group_id,
+                        "label": row.label,
+                        "badge": badge_name(row.badge),
+                        "focused": row.pane.is_some_and(|pane| pane == app.focused()),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "sort": match app.config.agent_sort {
+                    crate::config::AgentSort::Priority => "priority",
+                    crate::config::AgentSort::Spaces => "grouped",
+                },
+                "indicators": match app.config.indicators {
+                    crate::config::Indicators::Symbols => "symbols",
+                    crate::config::Indicators::Dots => "dots",
+                },
+                "agents": {
+                    "rows": rows,
+                    "folded": app.folded_agent_groups.iter().cloned().collect::<Vec<_>>(),
+                },
+            })
+        }
         _ => serde_json::json!({}),
     }
+}
+
+/// 徽标在 props 里的名字。
+fn badge_name(badge: crate::model::Badge) -> &'static str {
+    use crate::model::Badge;
+    match badge {
+        Badge::Blocked => "blocked",
+        Badge::Error => "error",
+        Badge::Done => "done",
+        Badge::Working => "working",
+        Badge::Idle => "idle",
+        Badge::Unknown => "unknown",
+        Badge::None => "none",
+    }
+}
+
+/// props 变了就把最新一份推给模块：`props.changed` 是既有的宿主事件，模块
+/// 监听后更新信号，不需要重载表面（重载会清空模块内存里的快照）。
+fn refresh_props(app: &mut App, module: &str, props: &serde_json::Value) {
+    let digest = props.to_string();
+    if app.region_mods_props.get(module) == Some(&digest) {
+        return;
+    }
+    if app.region_mods_props.contains_key(module) {
+        app.send_mod_event(
+            module,
+            "props.changed",
+            &serde_json::json!({ "props": props }),
+        );
+    }
+    app.region_mods_props.insert(module.to_string(), digest);
 }
 
 /// 把 `builtin` 区域的块换成模块块，尺寸取该区域这一帧的矩形。

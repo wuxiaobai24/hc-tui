@@ -59,6 +59,26 @@ const BASE = "bg";
 const SELECTED = "sidebar_selected_bg";
 const ICON_FG = "space_icon_fg";
 const DONE = "agent_done";
+const BADGE_GLYPH: Record<string, [string, string]> = {
+  blocked: ["!", "◆"],
+  error: ["x", "✖"],
+  done: ["✓", "✔"],
+  working: ["●", "◐"],
+  idle: ["○", "○"],
+  unknown: ["?", "◌"],
+  none: ["·", "·"],
+};
+const BADGE_TOKEN: Record<string, string> = {
+  blocked: "agent_blocked",
+  error: "agent_error",
+  done: "agent_done",
+  working: "agent_working",
+  idle: "agent_idle",
+  unknown: "agent_unknown",
+  none: "agent_unknown",
+};
+const SELECTION_BG = "selection_bg";
+const SELECTION_FG = "selection_fg";
 const SPACE_COLORS = [
   "space_teal",
   "space_green",
@@ -144,6 +164,17 @@ const iconIndex = (identity: string): number => {
 const snapshot = signal<Snapshot>({});
 const folded = signal<Record<string, boolean>>({});
 const size = signal({ cells: 0, rows: 0 });
+// 启动参数里的 props 只是首份；宿主用 `props.changed` 推最新的 Agents 分组。
+const pushed = signal<Record<string, any>>({});
+
+const props = (): any => ({ ...(params.props ?? {}), ...pushed() });
+
+host.on("props.changed", (event: any) => {
+  if (event && typeof event.props === "object" && event.props !== null) {
+    pushed.set(event.props);
+  }
+});
+
 
 const failure = signal("");
 async function refresh() {
@@ -212,7 +243,48 @@ function navTitle(left: string, right: string): Row {
 
 const blank = (): Row => ({ left: [], right: [] });
 
-function rowsFor(snapshotValue: Snapshot, inner: number, height: number): Row[] {
+/// Agents 段：宿主给的分组行 + 折叠状态，按内置实现的组头、徽标与选中底色渲染。
+function agentRows(propsValue: any, inner: number): Row[] {
+  const rows: Array<Record<string, any>> = propsValue.agents?.rows ?? [];
+  const foldedGroups: string[] = propsValue.agents?.folded ?? [];
+  const symbols = propsValue.indicators === "symbols";
+  const rowsOut: Row[] = [];
+  let previous = "";
+  for (const row of rows) {
+    const groupId = row.group_id ?? "";
+    if (groupId !== previous) {
+      const group = truncate(row.group ?? "", Math.max(inner - 4, 0));
+      const chevron = foldedGroups.includes(groupId) ? "▸" : "▾";
+      const text = ` ${chevron} ${group}`;
+      rowsOut.push({
+        left: [
+          { text: text + pad(Math.max(inner - width(text), 0)), token: DIM },
+        ],
+        right: [],
+      });
+      previous = groupId;
+    }
+    if (foldedGroups.includes(groupId)) continue;
+    const badge = String(row.badge ?? "none");
+    const glyph = (BADGE_GLYPH[badge] ?? BADGE_GLYPH.none)[symbols ? 1 : 0];
+    const label = truncate(row.label ?? "", Math.max(inner - 4, 0));
+    const text = ` ${glyph} ${label}`;
+    const focused = row.focused === true;
+    rowsOut.push({
+      left: [
+        {
+          text: text + pad(Math.max(inner - width(text), 0)),
+          token: focused ? SELECTION_FG : BADGE_TOKEN[badge] ?? FG,
+          bg: focused ? ground(SELECTION_BG) : undefined,
+        },
+      ],
+      right: [],
+    });
+  }
+  return rowsOut;
+}
+
+function rowsFor(snapshotValue: Snapshot, propsValue: any, inner: number, height: number): Row[] {
   const spaces = snapshotValue.spaces ?? [];
   const focused = snapshotValue.focused?.space ?? undefined;
   const machines: string[] = [];
@@ -274,22 +346,17 @@ function rowsFor(snapshotValue: Snapshot, inner: number, height: number): Row[] 
     noBar: true,
   });
   const sort =
-    params.props?.sort === "priority"
+    propsValue.sort === "priority"
       ? tr("priority", "优先级")
       : tr("grouped", "分组");
   rows.push(navTitle(tr(" Agents", " Agent"), sort));
 
-  const agents = snapshotValue.agents ?? [];
+  const agents = agentRows(propsValue, inner);
+  const agentRoom = Math.max(height - rows.length, 0);
   if (agents.length === 0) {
     rows.push({ left: [{ text: tr("  (no agents)", "  （无 Agent）"), token: DIM }], right: [] });
   } else {
-    for (const agent of agents) {
-      const label = agent.name || agent.title || agent.address;
-      rows.push({
-        left: [{ text: `  ${truncate(label, Math.max(inner - 4, 0))}`, token: FG }],
-        right: [],
-      });
-    }
+    rows.push(...agents.slice(0, agentRoom));
   }
   while (rows.length < height) rows.push(blank());
   return rows;
@@ -365,7 +432,7 @@ function Line(props: { row: Row }) {
 function layoutRows(): Row[] {
   const current = size();
   if (current.cells <= 0 || current.rows <= 0) return [];
-  return rowsFor(snapshot(), Math.max(current.cells - 1, 0), current.rows);
+  return rowsFor(snapshot(), props(), Math.max(current.cells - 1, 0), current.rows);
 }
 
 function App() {

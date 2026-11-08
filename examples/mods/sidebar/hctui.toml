@@ -8,4 +8,4 @@ host_api = 1
 
 [grants]
 host = ["state"]
-events = ["state.changed", "focus.changed", "app.ready"]
+events = ["state.changed", "focus.changed", "props.changed", "app.ready"]
