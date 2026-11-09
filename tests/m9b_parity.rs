@@ -581,8 +581,10 @@ fn delayed_first_props_keeps_the_builtin_region() {
         frames += 1;
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    // 窗口里每一帧的内容由上面的逐帧断言保证；这里只证明窗口确实被采样。
+    // 慢 runner 上一帧要 100 ms，400 ms 窗口只有 4 帧，帧数取决于机器快慢。
     assert!(
-        frames > 5,
+        frames >= 2,
         "the delay window must cover several frames, got {frames}"
     );
     // 500 ms 之后模块落笔，区域换成模块自己的内容。

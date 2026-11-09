@@ -568,6 +568,12 @@ fn toml_error(path: &Path, source: &str, error: &toml::de::Error) -> ManifestErr
     )
 }
 
+/// 目录里是否已经落了清单文件；只判存在，不解析内容。
+/// 代际目录「完整落盘」的判据（见 [`crate::store::Store::publish_staged`]）。
+pub fn has_manifest(dir: &Path) -> bool {
+    dir.join(MANIFEST_FILE).is_file() || dir.join(PLUGIN_FILE).is_file()
+}
+
 /// 读包根目录的清单：`hctui.toml` 优先于同目录的 `plugin.toml`。
 pub fn load_dir(dir: &Path) -> Result<Loaded, ManifestError> {
     let manifest_path = dir.join(MANIFEST_FILE);
