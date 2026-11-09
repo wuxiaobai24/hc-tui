@@ -369,9 +369,10 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 记录是唯一发布真相，`current` 只是可重建索引：
 
 - `save_record` 在记录目录写临时文件，`fsync` 后 `rename` 覆盖，再 `fsync` 父目录；失败时旧记录保持原样，不会留下半截 JSON。
-- 包级互斥是 `store/<id>/.lock`（`O_CREAT|O_EXCL`、写入持有者 PID、30 秒超时、持有者进程已消失或锁文件超过 120 秒视为残留）；锁的粒度是一个包，不同包的安装互不阻塞。
-- 代际分配在锁内：`next_generation` → 复制到 `store/<id>/.tmp-<gen>` → 同一文件系统 `rename` 到 `store/<id>/<gen>` → 原子写记录 → 最后切 `current`。复制失败清理暂存目录并返回错误；记录写失败删除刚发布的代际目录，旧记录与旧指针不变。
-- `Store::open` 每次打开做一次幂等恢复：清理持有者已消失的 `.tmp-*` 与记录临时文件；记录存在而 `current` 缺失、指向不存在的目标或停在旧代际（切换中途失败）时按记录重建指针（linked 来源按记录里的 `origin` 重建）；`current` 存在但没有记录时不静默删除，作为 issue 报出来并拒绝加载该包。
+- 包级互斥是 `store/<id>/.lock`：unix 上用 `flock` 排他锁持有文件描述符，持有者进程消失（包括 SIGKILL）时由内核释放，不靠 PID 探活，也不依赖锁文件内容；非 unix 上先写临时文件再用硬链接原子占位，锁文件一出现就带着完整 PID。内容只是诊断信息，判不出持有者（内容为空、不可解析、锁文件已被删掉）一律视为可接管；等待 30 秒超时。锁的粒度是一个包，不同包的安装互不阻塞。
+- 代际分配在锁内：`next_generation` → 复制到本进程独占的暂存目录 `store/<id>/.tmp-<pid>-<seq>-<gen>` → 逐文件与目录 `fsync` → 同一文件系统 `rename` 到 `store/<id>/<gen>` → 校验清单在位 → 原子写记录 → 最后切 `current`。复制失败只清理自己的暂存目录，记录写失败删除刚发布的代际目录，旧记录与旧指针不变。
+- 发布不变量：`current` 只指向已经完整落盘的代际（目录里有 `hctui.toml` 或 `plugin.toml`，内容已 `fsync`）；记录先于指针落盘，指针总可由记录重建。两个安装者并发时包锁把它们排成先后两代，不共享暂存目录。
+- `Store::open` 每次打开做一次幂等恢复：清理持有者已消失的 `.tmp-*` 与记录临时文件；记录存在而 `current` 缺失、指向不存在的目标或停在旧代际（切换中途失败）时按记录重建指针（linked 来源按记录里的 `origin` 重建）；记录指向的代际目录在但缺清单时按 issue 报出来并摘掉指向它的指针，记录与目录都不删；`current` 存在但没有记录时不静默删除，作为 issue 报出来并拒绝加载该包。
 - 旧格式记录仍可读：新增字段都带 `#[serde(default)]`，schema 变化不要求重装。
 - `hc-tui plugins gc` 语义不变：只回收没有记录指向、也没有任何 pin 的旧代际。
 
@@ -381,6 +382,10 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 | --- | --- | --- |
 | 两个真进程同时安装同一目录 | `tests/plugin_install_race.rs::two_processes_installing_the_same_plugin_serialize` | 两个进程都退出码 0（锁超时不算通过）、各自报告不同代际、一条记录、`current` 跟随记录、无 `.tmp-*`、`.lock` 已删除 |
 | 持有者被 SIGKILL 后锁残留 | `tests/plugin_install_race.rs::a_killed_installer_leaves_a_lock_the_next_process_takes_over` | 锁文件带着死掉的 PID 留下，下一个进程接管并装完，发布态一致 |
+| 两个安装者并发（放大复现） | `src/plugin/registry.rs::racing_installers_never_publish_an_incomplete_generation`（`store::set_lock_create_delay` 注入锁内延迟、8 MiB 负载、重复 20 轮） | 两个安装者都成功且代际不同、记录与指针一致、`current` 指向的代际带清单且负载完整、不留 `.tmp-*` |
+| 锁文件内容为空 / 垃圾 / 不存在 | `src/store.rs::a_lock_with_an_unknown_holder_is_taken_over` | 三种情形都立刻接管，释放后不残留锁文件 |
+| 记录指向的代际缺清单 | `src/store.rs::a_generation_without_its_manifest_is_not_published` | 只报 issue、摘掉指针、记录与目录保留；清单落地后下次打开修回指针 |
+| 记录临时文件 | `src/store.rs::record_temp_files_follow_their_writer` | 活着的写入者的临时文件保留，死去写入者的被清掉 |
 | 复制完、写记录前崩溃 | `src/store.rs::a_crash_between_copy_and_record_keeps_the_old_generation` | 旧记录与旧代际不变，暂存目录被恢复清掉 |
 | `save_record` 写入失败 | `src/plugin/registry.rs::a_failed_record_write_keeps_the_published_generation`（记录目录 0555） | 命令报 `Permission denied`、旧记录逐字节不变、`current` 与旧代际完好、新代际目录被删除、重新打开仍列旧版本 |
 | `set_current` 切换失败 | `src/plugin/registry.rs::a_failed_pointer_switch_is_repaired_from_the_record`（`current` 目录 0555） | 记录已指向新代际、指针仍为旧代际、下一次 `Store::open` 按记录修好指针并加载包 |
@@ -390,7 +395,6 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 
 - 30 秒 `LOCK_TIMEOUT` 真正走完超时返回 `TimedOut`：用例覆盖的是串行等待与死锁接管，没有真的等 30 秒；
 - `copy_tree` 中途 I/O 失败后清理暂存目录（`discard_staged` 路径）：只验证了「写记录失败删除代际目录」；
-- `clean_temporary_records` 清理记录临时文件：暂存目录的清理有用例，记录临时文件没有；
 - `sync_directory` 失败被忽略：只影响持久性，无法在不破坏文件系统语义的前提下注入。
 
 ### 9.2 启用语义
