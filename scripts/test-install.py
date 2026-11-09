@@ -74,7 +74,6 @@ else:
         for system, arch, rosetta, target in [
             ("Linux", "x86_64", "0", "x86_64-unknown-linux-musl"),
             ("Linux", "aarch64", "0", "aarch64-unknown-linux-musl"),
-            ("Darwin", "x86_64", "0", "x86_64-apple-darwin"),
             ("Darwin", "arm64", "1", "aarch64-apple-darwin"),
             ("Darwin", "x86_64", "1", "aarch64-apple-darwin"),
         ]:
@@ -89,6 +88,17 @@ else:
                 self.assertIn(target, result.stdout)
                 self.assertIn("hc-tui update", result.stdout)
                 self.assertFalse(list(binary.parent.glob(".hc-tui-install.*")))
+
+    def test_macos_intel_is_rejected_with_a_reason(self):
+        # macOS Intel 自 v0.5.0 起没有预编译包：必须直接报错，不能去下 404。
+        self.archive("aarch64-apple-darwin")
+        self.env.update(MOCK_SYSTEM="Darwin", MOCK_ARCH="x86_64", MOCK_ROSETTA="0")
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("macOS Intel", result.stderr)
+        self.assertIn("cargo build", result.stderr)
+        downloads = self.root / "downloads"
+        self.assertFalse(downloads.exists() and list(downloads.iterdir()))
 
     def test_explicit_version_and_directory_with_spaces(self):
         expected = self.archive("x86_64-unknown-linux-musl")
