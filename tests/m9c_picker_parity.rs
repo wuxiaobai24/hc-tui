@@ -4,6 +4,8 @@
 //! HC_TUI_GRAPHICS=kitty cargo test --test m9c_picker_parity
 //! ```
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -31,7 +33,6 @@ fn app(tag: &str) -> App {
         restore: false,
         prompt_new_tab: false,
         sidebar: false,
-        session: Some(format!("m9d-parity-{tag}")),
         config_path: root.join("config").join("config.toml"),
         state_path: root.join("state").join("state.json"),
         ..Config::default()
@@ -245,6 +246,7 @@ fn open_palette(app: &mut App) {
 
 #[test]
 fn chooser_two_states_match() {
+    let _core = support::IsolatedCore::new("m9c-picker");
     let source = picker_source();
     // 空过滤：根菜单。
     compare("root", 80, 24, &source, 4, false, false, open_root, &[]);
@@ -285,6 +287,7 @@ fn chooser_two_states_match() {
 
 #[test]
 fn goto_two_states_match() {
+    let _core = support::IsolatedCore::new("m9c-picker");
     let source = picker_source();
     compare(
         "goto-empty",
@@ -316,6 +319,7 @@ fn goto_two_states_match() {
 
 #[test]
 fn palette_two_states_match() {
+    let _core = support::IsolatedCore::new("m9c-picker");
     let source = picker_source();
     compare(
         "palette",
@@ -351,6 +355,7 @@ fn palette_two_states_match() {
 /// 反例：故意少渲染一行，对拍必须 FAIL。
 #[test]
 fn counterexample_one_row_less_fails() {
+    let _core = support::IsolatedCore::new("m9c-picker");
     let source = picker_source().replace("const DEBUG_SKIP_ROW = 0;", "const DEBUG_SKIP_ROW = 1;");
     let mut builtin = data_app("counter-row-b");
     let _ = draw(&mut builtin, 80, 24);
@@ -370,6 +375,7 @@ fn counterexample_one_row_less_fails() {
 /// 反例：故意错位一列，对拍必须 FAIL。
 #[test]
 fn counterexample_one_column_off_fails() {
+    let _core = support::IsolatedCore::new("m9c-picker");
     let source =
         picker_source().replace("const DEBUG_SHIFT_COL = 0;", "const DEBUG_SHIFT_COL = 1;");
     let mut builtin = data_app("counter-col-b");

@@ -7,6 +7,8 @@
 //! 颜色不是对拍对象：nsh TUI 把前景归到终端 16 色/Reset，内置实现写主题
 //! RGB，逐格比色永远不相等（仓库既有 `scripts/mods-parity.sh` 同样只比字符格）。
 
+mod support;
+
 use std::path::PathBuf;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -97,7 +99,6 @@ fn config_in(root: &std::path::Path) -> Config {
     Config {
         restore: false,
         prompt_new_tab: false,
-        session: Some(format!("hcp-m9g-test-{}", std::process::id())),
         config_path: root.join("config").join("config.toml"),
         state_path: root.join("state").join("state.json"),
         theme: hc_tui::theme::builtin("catppuccin").expect("theme"),
@@ -395,6 +396,7 @@ fn builtin_frame(
 
 #[test]
 fn toast_matches_builtin_cell_for_cell() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let mut failures = 0;
     for (width, height) in [(80u16, 24u16), (120, 40)] {
@@ -528,6 +530,7 @@ fn compare_masked(
 /// 反例：框宽算少一格，对拍必须报出差异。
 #[test]
 fn wrong_width_is_caught() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("negative");
     let config = config_in(&root);
@@ -572,6 +575,7 @@ fn wrong_width_is_caught() {
 /// 点击某条：先 `run`（`target` 作 `terminal`），再 `dismiss`。
 #[test]
 fn click_runs_action_then_dismisses() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("click");
     let config = config_in(&root);
@@ -643,6 +647,7 @@ fn click_runs_action_then_dismisses() {
 /// 点内容区别处：模块认不下这一下，通知留着，事件继续往下传。
 #[test]
 fn click_outside_the_box_keeps_the_toast() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("outside");
     let config = config_in(&root);
@@ -677,6 +682,7 @@ fn click_outside_the_box_keeps_the_toast() {
 /// 超时：`timeout=1` 秒后条目由宿主撤掉，模块跟着消失。
 #[test]
 fn timeout_removes_the_entry() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("timeout");
     let config = config_in(&root);
@@ -715,6 +721,7 @@ fn tail_lines(text: &str, count: usize) -> String {
 /// `--no-mods`：提示模块在盘上也不加载，内置 toast 照旧画。
 #[test]
 fn no_mods_falls_back_to_the_builtin_toast() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("fallback");
     let mut config = config_in(&root);
@@ -744,6 +751,7 @@ fn no_mods_falls_back_to_the_builtin_toast() {
 /// 模块接手后内置槽位不再另画一份：每条只出现一次，最旧的那条留在最下面。
 #[test]
 fn module_takes_over_without_a_second_box() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("takeover");
     let config = config_in(&root);
@@ -812,6 +820,7 @@ fn module_takes_over_without_a_second_box() {
 /// 边框色：三个级别各取一条的颜色，必须与同主题 token 的取色探针一致。
 #[test]
 fn level_selects_the_border_colour() {
+    let _core = support::IsolatedCore::new("m9g");
     hc_tui::i18n::set_zh(false);
     let colour_source = if std::env::var_os("M9G_NEGATIVE_COLOR").is_some() {
         let broken = TOAST_TSX.replace(

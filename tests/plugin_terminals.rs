@@ -7,8 +7,10 @@
 //! HC_TUI_E2E=1 cargo test -p hc-tui --test plugin_terminals -- --nocapture
 //! ```
 //!
-//! 客户端会话与 peer 会话都在 `/tmp/hc-tui-e2e-plugin` 下隔离；peer 是
-//! localhost 上的独立 core session，结束时停掉。
+//! 客户端会话走 `support::IsolatedCore`（独立 runtime，结束自动回收）；peer 是
+//! localhost 上的独立 core session，由 `PeerGuard` 停掉。
+
+mod support;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,23 +25,7 @@ use hc_tui::hc::net::{Command, NetConfig, NetEvent, NetHandle};
 use hc_tui::plugin::terminal;
 use hc_tui::term::view::TerminalView;
 
-const SESSION: &str = "hctui-m7-e2e";
 const PEER_SESSION: &str = "hctui-m7-e2e-peer";
-
-fn isolated_environment() {
-    let root = Path::new("/tmp/hc-tui-e2e-plugin");
-    for (key, name) in [
-        ("XDG_RUNTIME_DIR", "run"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_CACHE_HOME", "cache"),
-    ] {
-        let path = root.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        std::env::set_var(key, path);
-    }
-    std::env::set_var("HC_SESSION", SESSION);
-}
 
 /// 测试结束时停掉 peer 的 core；它会跑在本机默认 XDG 的独立会话里。
 struct PeerGuard;
@@ -62,15 +48,19 @@ impl Drop for PeerGuard {
     }
 }
 
+/// peer 的 core 跑在 canonical runtime（ssh 会话的 XDG_RUNTIME_DIR），不是客户端
+/// 那个隔离 runtime。停完可能被远端连接重新拉起，所以停到 socket 真的消失。
+/// peer 的 core 跑在 canonical runtime（ssh 会话的 XDG_RUNTIME_DIR），不是客户端
+/// 那个隔离 runtime。停到 socket 上真的没有监听进程为止。
 fn stop_peer_core() {
-    let _ = std::process::Command::new("hc")
-        .args(["server", "stop"])
-        .env_remove("XDG_RUNTIME_DIR")
-        .env_remove("XDG_STATE_HOME")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_CACHE_HOME")
-        .env("HC_SESSION", PEER_SESSION)
-        .output();
+    let runtime: std::path::PathBuf = format!("/run/user/{}", unsafe { libc::getuid() }).into();
+    for _ in 0..3 {
+        support::stop_session(&runtime, PEER_SESSION);
+        if !support::session_running(&runtime, PEER_SESSION) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
 }
 
 fn peer_session_dir() -> Option<std::path::PathBuf> {
@@ -136,12 +126,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let (sender, events) = std::sync::mpsc::channel();
-        let net = NetHandle::spawn(
-            NetConfig {
-                session: Some(SESSION.to_string()),
-            },
-            sender,
-        );
+        let net = NetHandle::spawn(NetConfig { session: None }, sender);
         Self {
             net,
             events,
@@ -256,7 +241,7 @@ fn remote_terminal_keeps_argv_cwd_env_and_survives_view_close() -> Result<()> {
         eprintln!("skipping M7 end-to-end test; set HC_TUI_E2E=1 to run it against a real core");
         return Ok(());
     }
-    isolated_environment();
+    let _core = support::IsolatedCore::new("plugin-terminals");
     reset_peer_session();
     let _peer = PeerGuard;
     if !add_peer() {
@@ -297,7 +282,7 @@ fn remote_terminal_keeps_argv_cwd_env_and_survives_view_close() -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut conn = hc_tui::hc::client::Conn::connect(Some(SESSION)).await?;
+        let mut conn = hc_tui::hc::client::Conn::connect(None).await?;
         let label = conn
             .call(
                 "terminal.label",

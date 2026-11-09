@@ -5,6 +5,8 @@
 //! - 同一区域被两个包声明时，id 字典序最小的胜出，另一个拿到一条 issue。
 //! - 非法区域名在清单校验期被拒绝，错误带 `文件:行:列`。
 
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use hc_tui::app::{App, Connection};
@@ -115,6 +117,7 @@ fn status_row(app: &mut App, width: u16, height: u16) -> String {
 
 #[test]
 fn a_manifest_region_takes_the_status_line_and_disable_restores_the_builtin() {
+    let _core = support::IsolatedCore::new("wire");
     let root = unique_dir("status");
     let config = config_in(&root);
     write_package(&config, "wire-probe", Some("status"), None);
@@ -171,6 +174,7 @@ fn a_manifest_region_takes_the_status_line_and_disable_restores_the_builtin() {
 
 #[test]
 fn two_packages_declaring_one_region_report_the_loser_and_keep_the_smallest_id() {
+    let _core = support::IsolatedCore::new("wire");
     let root = unique_dir("conflict");
     let config = config_in(&root);
     let bundle = nsh_bundler::compile_module("App.tsx", PROBE_TSX, &[]).expect("module compiles");
@@ -195,6 +199,7 @@ fn two_packages_declaring_one_region_report_the_loser_and_keep_the_smallest_id()
 
 #[test]
 fn an_unknown_region_is_rejected_with_file_line_and_column() {
+    let _core = support::IsolatedCore::new("wire");
     let text = "manifest_version = 2\nid = \"dev.example.probe\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = 1\n\n[module]\nbundle = \"dist/bundle.js\"\nregion = \"sidebar\"\n";
     let error = hc_tui::pkg::parse_file(Path::new("/tmp/hctui.toml"), text).unwrap_err();
     assert_eq!(error.line, 9, "{error}");
