@@ -14,8 +14,74 @@ use crate::pkg::{Capabilities, Grants, Module, ModuleInfo, OVERLAY_KINDS, PLACES
 
 /// 当前清单格式版本；v1 仍可读。
 pub const MANIFEST_VERSION: u32 = 2;
-/// 当前宿主接口版本。
+/// 当前宿主接口版本；随 hc-tui 的主版本同步维护。
 pub const HOST_API: u32 = 1;
+
+/// 清单声明的宿主接口范围：`host_api = 1` 等价 `1..=1`，`host_api = "1..=2"` 是范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostApiRange {
+    /// 包要求的最低宿主接口版本。
+    pub min: u32,
+    /// 包兼容的最高宿主接口版本。
+    pub max: u32,
+}
+
+impl HostApiRange {
+    /// 单版本写法。
+    pub const fn exact(version: u32) -> Self {
+        Self {
+            min: version,
+            max: version,
+        }
+    }
+
+    /// 当前宿主接口版本落在这个范围里没有。
+    pub fn contains(&self, version: u32) -> bool {
+        self.min <= version && version <= self.max
+    }
+
+    /// `"1..=2"` 形态；也接受单数字串。
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        match text.split_once("..=") {
+            Some((min, max)) => {
+                let min = min.trim().parse::<u32>().ok()?;
+                let max = max.trim().parse::<u32>().ok()?;
+                (min <= max && min >= 1).then_some(Self { min, max })
+            }
+            None => text.parse::<u32>().ok().map(Self::exact),
+        }
+    }
+}
+
+impl std::fmt::Display for HostApiRange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.min == self.max {
+            write!(formatter, "{}", self.min)
+        } else {
+            write!(formatter, "{}..={}", self.min, self.max)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HostApiRange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Exact(u32),
+            Range(String),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Exact(version) => Ok(Self::exact(version)),
+            Repr::Range(text) => Self::parse(&text).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "host_api {text:?} is not a version or a `a..=b` range"
+                ))
+            }),
+        }
+    }
+}
 
 /// 支持的平台名。
 pub const PLATFORMS: &[&str] = &["linux", "macos"];
@@ -92,8 +158,8 @@ pub struct Manifest {
     pub name: toml::Spanned<String>,
     /// 包版本。
     pub version: toml::Spanned<String>,
-    /// 宿主接口版本。
-    pub host_api: toml::Spanned<u32>,
+    /// 宿主接口版本或范围。
+    pub host_api: toml::Spanned<HostApiRange>,
     /// 支持的平台；空表示全部。
     #[serde(default)]
     pub platforms: Option<toml::Spanned<Vec<toml::Spanned<String>>>>,
@@ -463,10 +529,11 @@ impl Manifest {
         )?;
         check(
             self.host_api.span(),
-            *self.host_api.get_ref() == HOST_API,
+            self.host_api.get_ref().contains(HOST_API),
             &format!(
-                "host_api {} is not supported (host api {HOST_API})",
-                self.host_api.get_ref()
+                "host_api {} is not supported (this hc-tui speaks host api {HOST_API}); upgrade hc-tui to a version that speaks host api {}, or downgrade the package to host api {HOST_API}",
+                self.host_api.get_ref(),
+                self.host_api.get_ref().min
             ),
         )?;
         check(
@@ -1126,6 +1193,50 @@ additionalProperties = false
         );
         assert!(error.line >= 10, "line: {}", error.line);
         assert!(error.message.contains("argv"), "{}", error.message);
+    }
+
+    #[test]
+    fn host_api_accepts_a_version_or_a_range() {
+        let exact = parse(
+            Path::new("plugin.toml"),
+            "manifest_version = 1\nid = \"dev.example.probe\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = 1\n",
+        )
+        .unwrap();
+        assert_eq!(*exact.host_api.get_ref(), HostApiRange::exact(1));
+        assert_eq!(exact.host_api.get_ref().to_string(), "1");
+
+        let range = parse(
+            Path::new("plugin.toml"),
+            "manifest_version = 1\nid = \"dev.example.probe\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = \"1..=2\"\n",
+        )
+        .unwrap();
+        assert_eq!(range.host_api.get_ref().to_string(), "1..=2");
+        assert!(range.host_api.get_ref().contains(HOST_API));
+
+        let too_new = parse_err(
+            "manifest_version = 1\nid = \"dev.example.probe\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = \"2..=3\"\n",
+        );
+        assert_eq!(too_new.line, 5);
+        assert!(
+            too_new.message.contains("host_api 2..=3 is not supported"),
+            "{}",
+            too_new.message
+        );
+        assert!(
+            too_new.message.contains("downgrade the package"),
+            "{}",
+            too_new.message
+        );
+
+        let malformed = parse_err(
+            "manifest_version = 1\nid = \"dev.example.probe\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = \"one\"\n",
+        );
+        assert_eq!(malformed.line, 5);
+        assert!(
+            malformed.message.contains("host_api"),
+            "{}",
+            malformed.message
+        );
     }
 
     #[test]

@@ -14,9 +14,8 @@ use hc_tui::error::{fail, not_found, usage, ErrorCode};
 
 fn main() {
     hc_tui::i18n::set_zh(hc_tui::config::detect_zh());
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // 本仓自己的 tracing 与插件日志同一套预算；不写 stdout，机器可读输出不被日志污染。
+    hc_tui::api_log::install(hc_tui::config::Config::load(None).plugins_state_dir());
 
     // 崩溃报告在 core / CLI / 模块三条路径共用同一份格式。
     hc_tui::diag::install();
@@ -68,6 +67,7 @@ fn dispatch(args: &[String]) -> Result<()> {
             probe(&args[1..])
         }
         Some("keys") => keys_command(&args[1..]),
+        Some("machine") => machine_command(&args[1..]),
         Some("commands") => {
             if args.iter().any(|arg| wants_help(arg)) {
                 return print_help("commands");
@@ -158,7 +158,7 @@ fn usage_text() -> String {
     for line in [
         t("usage: hc-tui [options]"),
         t("       hc-tui probe [options]"),
-        t("       hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex>"),
+        t("       hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex> | where <action>"),
         "       hc-tui update [--version X.Y.Z] [--check] [--from archive.tar.gz]",
         "       hc-tui session-hook install|remove|status",
         "       hc-tui theme list|show|reload [--config <path>]",
@@ -169,7 +169,8 @@ fn usage_text() -> String {
         t("       hc-tui plugins pane open|status|focus|close ..."),
         t("       hc-tui packages list|install|update|link|unlink|uninstall|enable|disable|gc|log|info ..."),
         t("       hc-tui packages update --check [<id>] [--json]"),
-        t("       hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>]"),
+        t("       hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>] [--since <rev>]"),
+        "       hc-tui machine ls [--json] [--session <name>] [--config <path>]",
         "       hc-tui completion zsh|bash|fish",
         "       hc-tui config check|reset-keys [--config <path>] [--yes]",
         "       hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]",
@@ -312,6 +313,7 @@ fn events_command(args: &[String]) -> Result<()> {
     let mut plugin = None;
     let mut kinds: Vec<String> = Vec::new();
     let mut count = None;
+    let mut since = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -355,12 +357,25 @@ fn events_command(args: &[String]) -> Result<()> {
                         .map_err(|_| usage(t("--count needs a number")))?,
                 );
             }
+            "--since" => {
+                index += 1;
+                since = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| usage(t("--since needs a value")))?
+                        .parse::<u64>()
+                        .map_err(|_| usage(t("--since needs a number")))?,
+                );
+            }
             other => return Err(usage(t1("unknown option: {}", other))),
         }
         index += 1;
     }
     let config = hc_tui::config::Config::load(config_path);
     let mut request = serde_json::json!({"method": "events"});
+    if let Some(since) = since {
+        request["since"] = serde_json::json!(since);
+    }
     if let Some(plugin) = plugin {
         request["plugin"] = serde_json::json!(plugin);
     }
@@ -781,8 +796,8 @@ fn help_contract(path: &str) -> Option<String> {
         ),
         "packages info" => (
             "usage: hc-tui packages info <id|source> [--json] [--config <path>]",
-            "key/value block: id, name, version, source, generation, capabilities, module, services, grants, installed time, remote version",
-            r#"{"id","name","version","source","generation","enabled","capabilities","module","services","grants","installedAt","path","remote"}"#,
+            "key/value block: id, name, version, host_api, source, generation, capabilities, module, services, grants, installed time, remote version",
+            r#"{"id","name","version","host_api","source","generation","enabled","capabilities","module","services","grants","installedAt","path","remote"}"#,
             &[ErrorCode::Usage, ErrorCode::PackageNotFound, ErrorCode::ManifestInvalid, ErrorCode::FileNotFound],
         ),
         "packages install" => (
@@ -950,10 +965,22 @@ fn help_contract(path: &str) -> Option<String> {
             &[ErrorCode::Usage, ErrorCode::FileNotFound, ErrorCode::PermissionDenied],
         ),
         "events" => (
-            "usage: hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>] [--config <path>]",
-            "one NDJSON event per line until the stream ends or `--count` is reached",
+            "usage: hc-tui events [--plugin <id>] [--kinds a,b] [--count <n>] [--since <rev>] [--config <path>]",
+            "one NDJSON event per line until the stream ends or `--count` is reached; `--since` first prints one `events.snapshot` frame (with `revision` and `resync`) and then only events newer than that revision",
             "NDJSON on stdout (this command is always JSON)",
             &[ErrorCode::Usage, ErrorCode::CoreUnavailable],
+        ),
+        "machine" => (
+            "usage: hc-tui machine ls [--json] [--session <name>] [--config <path>]",
+            "one line per machine: name, state, version, protocol, endpoint protocol generation, capabilities; `local` is filled from this client's own handshake",
+            r#"{"machines":[{"name","target","host","state","version","protocol","endpoint_protocol_generation","capabilities","why"}]}"#,
+            &[ErrorCode::Usage, ErrorCode::CoreUnavailable, ErrorCode::ProtocolIncompatible],
+        ),
+        "machine ls" => (
+            "usage: hc-tui machine ls [--json] [--session <name>] [--config <path>]",
+            "one line per machine: name, state, version, protocol, endpoint protocol generation, capabilities; unknown fields print `-`",
+            r#"{"machines":[{"name","target","host","state","version","protocol","endpoint_protocol_generation","capabilities","why"}]}"#,
+            &[ErrorCode::Usage, ErrorCode::CoreUnavailable, ErrorCode::ProtocolIncompatible],
         ),
         "notify" => (
             "usage: hc-tui notify <text> [--level info|warn|error] [--action <name>] [--target <terminal|pane>]",
@@ -968,10 +995,16 @@ fn help_contract(path: &str) -> Option<String> {
             &[ErrorCode::Usage, ErrorCode::CoreUnavailable, ErrorCode::WindowRequired, ErrorCode::LayoutInvalid, ErrorCode::PaneNotFound, ErrorCode::TerminalNotFound, ErrorCode::MachineNotFound],
         ),
         "keys" => (
-            "usage: hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex>",
-            "`probe` measures the keyboard protocol, `decode` decodes one sequence",
-            "not supported (`--json` is a usage error)",
-            &[ErrorCode::Usage],
+            "usage: hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex> | where <action>",
+            "`probe` measures the keyboard protocol, `decode` decodes one sequence, `where` prints the full prefix chain that triggers an action",
+            "`where` has a `--json` shape; the other verbs do not",
+            &[ErrorCode::Usage, ErrorCode::ActionNotFound],
+        ),
+        "keys where" => (
+            "usage: hc-tui keys where <action> [--json] [--config <path>]",
+            "one line: `prefix (ctrl+b) + ?  →  help`; direct bindings print just their key",
+            r#"{"action","keys":["ctrl+b","?"]}"#,
+            &[ErrorCode::Usage, ErrorCode::ActionNotFound],
         ),
         "keys probe" => (
             "usage: hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>]",
@@ -1443,6 +1476,7 @@ fn packages_info(config: &hc_tui::config::Config, target: &str, json: bool) -> R
             "id": id,
             "name": manifest.name(),
             "version": local,
+            "host_api": manifest.host_api.get_ref().to_string(),
             "source": origin,
             "path": root.display().to_string(),
             "generation": record.as_ref().map(|record| record.generation),
@@ -1458,6 +1492,7 @@ fn packages_info(config: &hc_tui::config::Config, target: &str, json: bool) -> R
         return Ok(());
     }
     println!("{}", t3("{} ({} {})", &id, manifest.name(), &local));
+    println!("{}", t1("  host_api     {}", manifest.host_api.get_ref()));
     println!(
         "{}",
         t1("  source       {}", origin.as_deref().unwrap_or("-"))
@@ -2462,12 +2497,14 @@ fn keys_command(args: &[String]) -> Result<()> {
         let path = match args.first().map(String::as_str) {
             Some("probe") => "keys probe",
             Some("decode") => "keys decode",
+            Some("where") => "keys where",
             _ => "keys",
         };
         return print_help(path);
     }
     match args.first().map(String::as_str) {
         Some("probe") => keys_probe(&args[1..]),
+        Some("where") => keys_where(&args[1..]),
         Some("decode") => {
             let text = args
                 .get(1)
@@ -2483,8 +2520,217 @@ fn keys_command(args: &[String]) -> Result<()> {
             println!("used {used} key {key:?}");
             Ok(())
         }
-        _ => Err(usage(t("usage: hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex>"))),
+        _ => Err(usage(t("usage: hc-tui keys probe [--protocol auto|kitty|legacy] [--seconds <n>] | decode <hex> | where <action>"))),
     }
+}
+
+/// `hc-tui machine ls [--json]`：本机与其它机器各一行，带协议与能力。
+///
+/// 本机行来自自己的 hello 握手：`version`、`protocol`（`framed` / `plain`）、
+/// `endpoint_protocol_generation` 与 `capabilities` 都是握手实返值。远端机器只能
+/// 报 core 的 `machine.list` 知道的字段（`version` 与 `state`），尚未握手的三项
+/// 为 `null` / `[]`，不猜。
+fn machine_command(args: &[String]) -> Result<()> {
+    if wants_help(args.first().map(String::as_str).unwrap_or_default())
+        || args.iter().skip(1).any(|arg| wants_help(arg))
+    {
+        let path = match args.first().map(String::as_str) {
+            Some("ls") => "machine ls",
+            _ => "machine",
+        };
+        return print_help(path);
+    }
+    match args.first().map(String::as_str) {
+        Some("ls") => machine_ls(&args[1..]),
+        _ => Err(usage(t("usage: hc-tui machine ls [--json]"))),
+    }
+}
+
+fn machine_ls(args: &[String]) -> Result<()> {
+    let mut json = false;
+    let mut config_path = None;
+    let mut session = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--config" => {
+                index += 1;
+                config_path = Some(std::path::PathBuf::from(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| usage(t("--config needs a value")))?,
+                ));
+            }
+            "--session" => {
+                index += 1;
+                session = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| usage(t("--session needs a value")))?,
+                );
+            }
+            other => return Err(usage(t1("unknown option: {}", other))),
+        }
+        index += 1;
+    }
+    let mut config = hc_tui::config::Config::load(config_path);
+    if let Some(session) = session {
+        config.session = Some(session);
+    }
+    let session = config.session.clone();
+    let machines = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let mut conn = hc_tui::hc::client::Conn::connect(session.as_deref())
+                .await
+                .map_err(connect_error)?;
+            let hello = conn.hello.clone();
+            let mut features = hello.features.clone();
+            features.sort();
+            let mut rows = vec![serde_json::json!({
+                "name": "local",
+                "target": "",
+                "host": hello.core.name,
+                "state": "connected",
+                "version": hello.version,
+                "protocol": if hello.framed { "framed" } else { "plain" },
+                "endpoint_protocol_generation": hello.generation,
+                "capabilities": features,
+            })];
+            let list = conn
+                .call("machine.list", serde_json::json!({}))
+                .await
+                .map_err(hc_tui::error::control)?;
+            if let Some(remote) = list.get("machines").and_then(serde_json::Value::as_array) {
+                for machine in remote {
+                    rows.push(serde_json::json!({
+                        "name": machine.get("name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                        "target": machine.get("target").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                        "host": machine.get("host").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                        "state": machine.get("state").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
+                        "version": machine
+                            .get("version")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|version| !version.is_empty()),
+                        "protocol": serde_json::Value::Null,
+                        "endpoint_protocol_generation": serde_json::Value::Null,
+                        "capabilities": Vec::<String>::new(),
+                        "why": machine.get("why").cloned().unwrap_or(serde_json::Value::Null),
+                    }));
+                }
+            }
+            Ok::<Vec<serde_json::Value>, anyhow::Error>(rows)
+        })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"machines": machines}))?
+        );
+        return Ok(());
+    }
+    for row in &machines {
+        let text = |key: &str| {
+            row.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-")
+                .to_string()
+        };
+        let generation = row
+            .get("endpoint_protocol_generation")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let capabilities = row
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            text("name"),
+            text("state"),
+            text("version"),
+            text("protocol"),
+            generation,
+            capabilities
+        );
+    }
+    Ok(())
+}
+
+/// 握手失败的稳定码：协议代次对不上单独成码，其余都算 core 不可用。
+fn connect_error(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    if hc_tui::error::text_code(&message) == ErrorCode::ProtocolIncompatible {
+        fail(ErrorCode::ProtocolIncompatible, message)
+    } else {
+        fail(ErrorCode::CoreUnavailable, message)
+    }
+}
+
+/// `hc-tui keys where <action>`：反查现在按什么键能触发这个动作。
+///
+/// 绑定是前缀模型：`prefix+?` 要按前缀键再按 `?`，所以输出给完整前缀链
+/// （`["ctrl+b", "?"]`），不是只给末尾那个键。
+fn keys_where(args: &[String]) -> Result<()> {
+    let mut action = None;
+    let mut path = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--config" => {
+                index += 1;
+                path = Some(std::path::PathBuf::from(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| usage(t("--config needs a value")))?,
+                ));
+            }
+            other if other.starts_with('-') => return Err(usage(t1("unknown option: {}", other))),
+            other => action = Some(other.to_string()),
+        }
+        index += 1;
+    }
+    let action = action.ok_or_else(|| usage(t("where needs an action name")))?;
+    let config = hc_tui::config::Config::load(path);
+    let keys = &config.keys;
+    let binding = keys
+        .entries()
+        .into_iter()
+        .find(|(name, _)| *name == action)
+        .map(|(_, binding)| binding);
+    let Some(binding) = binding.filter(|binding| !binding.is_off()) else {
+        return Err(fail(
+            ErrorCode::ActionNotFound,
+            t1("unknown action {}", &action),
+        ));
+    };
+    let chain = binding.chain(&keys.prefix);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"action": action, "keys": chain}))?
+        );
+    } else if chain.len() > 1 {
+        println!(
+            "{}",
+            t3("prefix ({}) + {}  →  {}", &chain[0], &chain[1], &action)
+        );
+    } else {
+        println!("{}", t2("{}  →  {}", &chain[0], &action));
+    }
+    Ok(())
 }
 
 fn keys_probe(args: &[String]) -> Result<()> {

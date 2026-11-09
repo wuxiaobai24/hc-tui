@@ -132,6 +132,37 @@ Agent 和对应 Pane 共用终端别名，写入 core 的 `hctui` 标签；Tab �
 | mods.grant | name 必填，host/events 至少一项；追加宿主授予，revoke 为 true 时撤销 |
 | mods.enable / mods.disable | name 必填；启用或禁用模块，禁用时关闭其表面 |
 
+`hc-tui machine ls` 不开窗口也能查机器，每台一行：
+
+```sh
+hc-tui machine ls [--json] [--session <name>] [--config <path>]
+```
+
+本机行（`name = "local"`）来自自己的 hello 握手：`version` 是它的版本，`protocol` 是
+`framed` 或 `plain`，`endpoint_protocol_generation` 是它的协议代次，`capabilities` 是它声明的
+features。其它机器行只报 core `machine.list` 知道的字段：`version` 与 `state`；尚未握手的
+`protocol` / `endpoint_protocol_generation` / `capabilities` 为 `null` / `[]`，`why` 原样转出。
+握手失败报 `core_unavailable`（退出码 3），代次不匹配报 `protocol_incompatible`。
+
+```console
+$ hc-tui machine ls --json
+{"machines":[{"capabilities":["attach","automatic_input","events","framed","resize_notifications","shell","status"],"endpoint_protocol_generation":1,"host":"omarchy","name":"local","protocol":"framed","state":"connected","target":"","version":"0.1.18"},{"capabilities":[],"endpoint_protocol_generation":null,"host":"box","name":"box","protocol":null,"state":"unreachable","target":"box","version":"0.1.18","why":"cannot reach box: link down"}]}
+```
+
+反查一个动作现在按什么键触发：
+
+```sh
+hc-tui keys where <action> [--json] [--config <path>]
+```
+
+绑定是前缀模型，所以给完整前缀链（`["ctrl+b","?"]`），不是只给末尾的键。`off` 的动作
+报 `action_not_found`（退出码 1）。直接绑定的动作只有一键。
+
+```console
+$ hc-tui keys where help --json
+{"action":"help","keys":["ctrl+b","?"]}
+```
+
 ```sh
 hc-tui do mod.open '{"name":"changes"}'
 hc-tui do file.open '{"path":"README.md"}'
@@ -179,12 +210,18 @@ stdin 收到上下文 JSON，超时、取消、进程组回收与并发队列由
 事件流读同一个控制 socket：
 
 ```sh
-hc-tui events [--plugin <id>] [--kinds terminal.status,terminal.turn] [--count N]
+hc-tui events [--plugin <id>] [--kinds terminal.status,terminal.turn] [--count N] [--since <rev>]
 ```
 
 先收到一条 `{"subscribed":true,"queue":256}` 确认，之后按行输出事件 JSON；断开或 Ctrl-C 即停止。
 `--plugin` 只看该插件终端的事件，`--kinds` 只看列出的 kind（逗号分隔）。每个订阅者 256 条队列，
 溢出时补发 `{"kind":"events.dropped","count":N}`。插件进程可直接使用注入的 `HCTUI_SOCKET`。
+
+每条事件带单调递增的 `revision`；快照（`hc-tui ls` 与 `method = "snapshot"`）同样带 `revision`，
+起点取 core `events.subscribe` 的 `seq`，之后每条发布事件 +1。`--since <rev>` 断线续订时先收到一帧
+`{"kind":"events.snapshot","revision":R,"resync":false,"snapshot":{…}}`，此后只推 `revision` 比 R 大的
+事件（快照已经包含更早的状态，不重发旧号）。`rev` 早于保留的 1024 条、或快于当前 revision 时
+首帧标 `"resync":true`，不静默。模块侧 `state.changed` 负载里的 `revision` 是同一把尺子。
 
 `plugins pane` 要求运行中的 TUI。`open` 在 Space 的机器上创建真实终端：`--machine` 缺省用 Space
 的机器，`--cwd` 缺省用 Space 目录，`--placement` 覆盖清单里的 placement。`tab` / `right` / `down` /

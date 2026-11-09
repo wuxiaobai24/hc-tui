@@ -970,7 +970,7 @@ impl App {
         self.refresh_plugins_if_changed();
         match body["method"].as_str() {
             Some("snapshot") => {
-                json!({"state":self.snapshot(),"connection":self.connection.label(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session,"plugin":t.plugin,"plugin_terminal":t.plugin_terminal,"cwd":t.cwd})).collect::<Vec<_>>()})
+                json!({"state":self.snapshot(),"connection":self.connection.label(),"revision":self.event_publisher.revision(),"terminals":self.terminals.iter().map(|t|json!({"address":t.address,"title":t.title,"status":t.status,"parent":t.parent,"pinned":t.pinned,"seen_turn":t.seen_turn,"session":t.session,"plugin":t.plugin,"plugin_terminal":t.plugin_terminal,"cwd":t.cwd})).collect::<Vec<_>>()})
             }
             Some("notify") => {
                 let text = body.get("text").and_then(Value::as_str).unwrap_or("");
@@ -5784,6 +5784,8 @@ impl App {
                 self.reconcile_plugin_pins(&live);
                 self.terminals = terminals;
                 self.events_seen = seq;
+                // revision 的起点取 core 的状态序号：重连后不从 0 重数。
+                self.event_publisher.seed_revision(seq);
                 self.sync_terminals();
                 self.dirty = true;
             }

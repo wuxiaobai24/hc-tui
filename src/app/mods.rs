@@ -84,8 +84,36 @@ impl App {
         }
     }
 
-    /// 分发一条宿主调用。
+    /// 分发一条宿主调用，并记一行完成日志。
     fn dispatch_mod_call(&mut self, surface_id: &str, mod_id: &str, call: PendingCall) {
+        let staging = self
+            .mods
+            .surface(surface_id)
+            .is_some_and(|s| s.state == SurfaceState::Staging);
+        let surface_ok = self.mods.surface(surface_id).is_some();
+        let granted = self.mods.granted(mod_id, &call.name);
+        let outcome = if !granted {
+            crate::api_log::Outcome::Denied
+        } else if staging || !surface_ok {
+            crate::api_log::Outcome::Err
+        } else {
+            crate::api_log::Outcome::Ok
+        };
+        let log = crate::api_log::Request::new(
+            "mods",
+            format!(
+                "{mod_id}#{}",
+                self.mods
+                    .surface(surface_id)
+                    .map_or(0, |s| s.host_calls + 1)
+            ),
+            &call.name,
+        );
+        self.dispatch_mod_call_once(surface_id, mod_id, call);
+        log.finish(outcome);
+    }
+
+    fn dispatch_mod_call_once(&mut self, surface_id: &str, mod_id: &str, call: PendingCall) {
         // 占位 `?` 详情里的 host 方法与调用序号：记录最近一次分发的调用。
         if let Some(surface) = self.mods.surface_mut(surface_id) {
             surface.host_calls += 1;
@@ -2909,6 +2937,38 @@ mount(() => <View><Text>{result()}</Text></View>);
         assert!(!screen.contains("done"), "screen: {screen}");
         let surface = app.mods.surface(&surface).expect("surface stays");
         assert!(surface.state == SurfaceState::Running);
+    }
+
+    /// 被拒的宿主调用落一行 `outcome="denied"`：用真实分发路径，不用假造日志。
+    #[test]
+    fn a_denied_host_call_writes_one_denied_log_line() {
+        let root = std::env::temp_dir().join(format!(
+            "hctui-mods-denied-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        let subscriber = crate::api_log::subscriber(root.clone());
+        let mut app = app();
+        probe(&mut app);
+        let screen = tracing::subscriber::with_default(subscriber, || frames(&mut app, 40));
+        assert!(screen.contains("forbidden"), "screen: {screen}");
+        let log = std::fs::read_to_string(
+            root.join("logs")
+                .join(crate::api_log::CORE_PACKAGE)
+                .join(format!("{}.stdout.log", crate::api_log::CORE_REQUEST)),
+        )
+        .expect("the denied call wrote no log line");
+        println!("{log}");
+        assert!(
+            log.lines().any(|line| line.contains("subsystem=\"mods\"")
+                && line.contains("outcome=\"denied\"")
+                && line.contains("method=\"exec\"")),
+            "{log}"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

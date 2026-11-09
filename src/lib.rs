@@ -7,6 +7,7 @@
 //! - [`app`] / [`ui`]：状态与渲染
 //! - [`tui`]：外层终端的进入与恢复
 
+pub mod api_log;
 pub mod app;
 pub mod chat;
 pub mod clipboard;

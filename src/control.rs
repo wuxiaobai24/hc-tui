@@ -4,10 +4,15 @@
 //! 升级为长连接，按 `plugin` 与 `kinds` 过滤后逐行输出 NDJSON。每个订阅者一条
 //! 有界队列（[`EVENT_QUEUE`]），满了丢弃并补发 `events.dropped`；客户端断开
 //! 即停止推送。
+//!
+//! 每条事件带单调递增的 `revision`；`events` 请求可带 `since`，首帧推当前快照
+//! （带 `revision`），此后只推更新的修订号；`since` 已被 [`HISTORY`] 裁剪掉时
+//! 首帧标 `resync: true`。
 use crate::config::Config;
 use crate::i18n::t;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -15,6 +20,8 @@ use std::time::Duration;
 
 /// 每个事件订阅者的队列上限。
 pub const EVENT_QUEUE: usize = 256;
+/// 给 `--since` 补发保留的事件条数；更旧的 revision 回落到快照。
+pub const HISTORY: usize = 1024;
 
 pub struct Request {
     pub body: Value,
@@ -59,6 +66,10 @@ struct Subscriber {
 #[derive(Default)]
 struct PublisherInner {
     next: AtomicU64,
+    /// 最新事件的 revision；起点由 core 的 `events.subscribe` 序号垫高。
+    revision: AtomicU64,
+    /// 最近 [`HISTORY`] 条事件，供 `--since` 补发。
+    history: Mutex<VecDeque<Value>>,
     subscribers: Mutex<Vec<Subscriber>>,
 }
 
@@ -70,9 +81,25 @@ pub struct Publisher {
 
 impl Publisher {
     /// 推一条事件；不符合某个订阅者过滤条件时不入队。
+    ///
+    /// 每条事件先打上递增的 `revision` 再分发，因此事件流、补发与快照用同一
+    /// 把尺子。
     pub fn publish(&self, event: &Value) {
-        let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
-        let plugin = event.get("plugin").and_then(Value::as_str);
+        let revision = self.inner.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut event = event.clone();
+        event["revision"] = json!(revision);
+        {
+            let mut history = self
+                .inner
+                .history
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            history.push_back(event.clone());
+            while history.len() > HISTORY {
+                history.pop_front();
+            }
+        }
+        let event = &event;
         let mut subscribers = self
             .inner
             .subscribers
@@ -80,14 +107,8 @@ impl Publisher {
             .unwrap_or_else(|error| error.into_inner());
         subscribers.retain(|subscriber| !subscriber.closed.load(Ordering::Relaxed));
         for subscriber in subscribers.iter() {
-            if !subscriber.kinds.is_empty() && !subscriber.kinds.iter().any(|wanted| wanted == kind)
-            {
+            if !matches(subscriber.plugin.as_deref(), &subscriber.kinds, event) {
                 continue;
-            }
-            if let Some(wanted) = &subscriber.plugin {
-                if plugin != Some(wanted.as_str()) {
-                    continue;
-                }
             }
             if subscriber.sender.try_send(event.clone()).is_err() {
                 subscriber.dropped.fetch_add(1, Ordering::Relaxed);
@@ -106,6 +127,33 @@ impl Publisher {
             .iter()
             .filter(|subscriber| !subscriber.closed.load(Ordering::Relaxed))
             .count()
+    }
+
+    /// 当前快照该报的 revision：最新事件号。
+    pub fn revision(&self) -> u64 {
+        self.inner.revision.load(Ordering::SeqCst)
+    }
+
+    /// 把 revision 的起点垫到 core 的状态序号；只升不降，重连不会让 revision 回退。
+    pub fn seed_revision(&self, seq: u64) {
+        self.inner.revision.fetch_max(seq, Ordering::SeqCst);
+    }
+
+    /// `since` 是否已经接不上：早于保留区间的第一条，或快于当前 revision
+    /// （上一个进程留下的号）。两种情况都由首帧的 `resync` 标出来，不静默。
+    fn stale(&self, since: u64) -> bool {
+        let history = self
+            .inner
+            .history
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let oldest = history
+            .front()
+            .and_then(|event| event.get("revision").and_then(Value::as_u64));
+        match oldest {
+            Some(oldest) => since + 1 < oldest || since > self.revision(),
+            None => since > self.revision(),
+        }
     }
 
     fn subscribe(
@@ -208,7 +256,10 @@ impl Server {
                     let events = events.clone();
                     let shutdown = Arc::clone(&shutdown);
                     // 长连接不阻塞其它控制命令。
-                    std::thread::spawn(move || stream_events(stream, &events, &shutdown, filter));
+                    let requests = sender.clone();
+                    std::thread::spawn(move || {
+                        stream_events(stream, &events, &shutdown, filter, &requests)
+                    });
                     continue;
                 }
                 let (reply, answer) = mpsc::channel();
@@ -239,6 +290,8 @@ impl Server {
 struct EventFilter {
     plugin: Option<String>,
     kinds: Vec<String>,
+    /// 只推 revision 大于它的新事件；`None` 表示不补发。
+    since: Option<u64>,
 }
 
 impl EventFilter {
@@ -269,20 +322,97 @@ impl EventFilter {
                 _ => Vec::new(),
             })
             .unwrap_or_default();
-        EventFilter { plugin, kinds }
+        let since = body.get("since").and_then(Value::as_u64);
+        EventFilter {
+            plugin,
+            kinds,
+            since,
+        }
+    }
+}
+
+/// 一条事件是否命中 `plugin` 与 `kinds` 过滤；空条件表示全收。
+fn matches(plugin: Option<&str>, kinds: &[String], event: &Value) -> bool {
+    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+    if !kinds.is_empty() && !kinds.iter().any(|wanted| wanted == kind) {
+        return false;
+    }
+    match plugin {
+        Some(wanted) => event.get("plugin").and_then(Value::as_str) == Some(wanted),
+        None => true,
     }
 }
 
 /// 一个订阅连接的生命周期：先回一条确认，再逐行推送，断开或界面退出即结束。
+/// 结束时记一行 `outcome="stream_closed"`。
 #[cfg(unix)]
 fn stream_events(
+    stream: std::os::unix::net::UnixStream,
+    publisher: &Publisher,
+    stop: &Arc<AtomicBool>,
+    filter: EventFilter,
+    requests: &mpsc::SyncSender<Request>,
+) {
+    let log = crate::api_log::Request::new(
+        "control",
+        crate::api_log::next_request_id("stream"),
+        "events.subscribe",
+    );
+    stream_events_once(stream, publisher, stop, filter, requests);
+    log.finish(crate::api_log::Outcome::StreamClosed);
+}
+
+/// 向界面要一份当前快照；命令队列满或超时时把原因当帧报出去，不静默。
+#[cfg(unix)]
+fn snapshot_frame(
+    requests: &mpsc::SyncSender<Request>,
+    publisher: &Publisher,
+    resync: bool,
+) -> Value {
+    let (reply, answer) = mpsc::channel();
+    let body = json!({"method": "snapshot"});
+    if requests.try_send(Request { body, reply }).is_err() {
+        return json!({
+            "kind": "events.snapshot",
+            "revision": publisher.revision(),
+            "resync": true,
+            "error": t("command queue is full"),
+        });
+    }
+    let snapshot = answer
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| json!({"error": t("UI did not answer")}));
+    let revision = snapshot
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| publisher.revision());
+    match snapshot.get("error") {
+        Some(error) => json!({
+            "kind": "events.snapshot",
+            "revision": revision,
+            "resync": resync,
+            "error": error,
+        }),
+        None => json!({
+            "kind": "events.snapshot",
+            "revision": revision,
+            "resync": resync,
+            "snapshot": snapshot,
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn stream_events_once(
     mut stream: std::os::unix::net::UnixStream,
     publisher: &Publisher,
     stop: &Arc<AtomicBool>,
     filter: EventFilter,
+    requests: &mpsc::SyncSender<Request>,
 ) {
     use std::io::Read;
-    let (id, receiver, dropped, closed) = publisher.subscribe(filter.plugin, filter.kinds);
+    let (id, receiver, dropped, closed) =
+        publisher.subscribe(filter.plugin.clone(), filter.kinds.clone());
     let _ = stream.set_nonblocking(true);
     if write_line(
         &mut stream,
@@ -294,12 +424,35 @@ fn stream_events(
         publisher.unsubscribe(id);
         return;
     }
+    // `--since`：首帧总是当前快照（带 revision）。快照已经把更早的状态包含进去，
+    // 所以此后只推 revision 比快照与客户端手里的值都大的事件。
+    let mut floor = filter.since;
+    if let Some(since) = filter.since {
+        let resync = publisher.stale(since);
+        let frame = snapshot_frame(requests, publisher, resync);
+        if write_line(&mut stream, &frame).is_err() {
+            closed.store(true, Ordering::Relaxed);
+            publisher.unsubscribe(id);
+            return;
+        }
+        let revision = frame
+            .get("revision")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| publisher.revision());
+        floor = Some(since.max(revision));
+    }
     while !stop.load(Ordering::Relaxed) && !closed.load(Ordering::Relaxed) {
         match receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(event) => {
+                let revision = event.get("revision").and_then(Value::as_u64).unwrap_or(0);
+                // 快照覆盖过的 revision 不再重复推。
+                if floor.is_some_and(|floor| revision <= floor) {
+                    continue;
+                }
                 if write_line(&mut stream, &event).is_err() {
                     break;
                 }
+                floor = floor.map(|floor| floor.max(revision));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -387,6 +540,27 @@ pub fn call(config: &Config, request: Value) -> Result<Value> {
 /// 与 [`call`] 相同，但把带 `error` 的应答也原样返回给调用方。
 #[cfg(unix)]
 pub fn call_raw(config: &Config, request: Value) -> Result<Value> {
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let request_id = request
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::api_log::next_request_id("req"));
+    let log = crate::api_log::Request::new("control", request_id, method);
+    let answer = call_raw_once(config, request);
+    log.finish(match &answer {
+        Ok(value) if value.get("error").is_none() => crate::api_log::Outcome::Ok,
+        _ => crate::api_log::Outcome::Err,
+    });
+    answer
+}
+
+#[cfg(unix)]
+fn call_raw_once(config: &Config, request: Value) -> Result<Value> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket_path(config))?;

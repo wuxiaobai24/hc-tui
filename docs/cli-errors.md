@@ -34,6 +34,7 @@ $ echo $?
 | `package_not_found` | 按 id 找不到包、插件或模块 | 1 |
 | `pane_not_found` | 指定的 pane 不存在 | 1 |
 | `terminal_not_found` | 指定的终端不存在 | 1 |
+| `action_not_found` | `keys where` 找不到这个动作名 | 1 |
 | `machine_not_found` | 指定的机器不存在 | 1 |
 | `file_not_found` | 文件或安装来源不存在 | 1 |
 | `file_exists` | 目标文件已经存在，且没带覆盖开关（`config init` 不带 `--force`） | 1 |

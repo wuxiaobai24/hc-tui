@@ -72,15 +72,21 @@ pub fn check(config: &Config, target: &str) -> Result<Report, String> {
         crate::pkg::load_dir(&path).map_err(|error| crate::pkg::manifest_error(target, &error))?;
     let manifest = &loaded.manifest;
     let id = manifest.id().to_string();
-    if *manifest.host_api.get_ref() != crate::plugin::manifest::HOST_API {
+    if !manifest
+        .host_api
+        .get_ref()
+        .contains(crate::plugin::manifest::HOST_API)
+    {
         return Err(crate::diag::detail(
             &format!(
                 "{target}: host_api {} 不受支持",
                 manifest.host_api.get_ref()
             ),
             &format!(
-                "这个包要的宿主 API 是 {}，当前 hc-tui 只讲 {}",
+                "这个包要的宿主 API 是 {}，当前 hc-tui 只讲 {}；升级 hc-tui 到支持 host api {} 的版本，或者把包降到 host api {}",
                 manifest.host_api.get_ref(),
+                crate::plugin::manifest::HOST_API,
+                manifest.host_api.get_ref().min,
                 crate::plugin::manifest::HOST_API
             ),
             "hc-tui update",

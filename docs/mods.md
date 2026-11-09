@@ -142,7 +142,7 @@ events = ["state.changed", "terminal.status", "terminal.turn", "focus.changed", 
 | `place` | 默认表面类型与位置：`left`/`right`/`top`/`bottom` 停靠，`toast` 进提示层，`none` 只由 `mods.open`、外框绑定或其它 mod 打开 |
 | `size` | 停靠厚度；小于等于 1 视为占比，否则为像素 |
 | `focusable` | 允许 `pane.go` 把键盘焦点移入该表面 |
-| `host_api` | 宿主通道版本；与内嵌版本不符时拒绝加载 |
+| `host_api` | 宿主通道版本：单版本（`1`，等价 `1..=1`）或范围（`"1..=2"`）；当前宿主接口不在范围内时拒绝加载，报 `host_api_too_old` |
 | `[grants] host` | 允许调用的宿主方法名，未列出的一律拒绝 |
 | `[grants] events` | 允许接收的事件名，未列出的不投递 |
 | `min_hc_tui_version` | 与 hc-tui 版本比较，不满足时跳过并给警告 |
@@ -649,7 +649,7 @@ M6 起插件动作带 `<package-id>.<action-id>` 完整名进入同一分发器�
 ## 19. 版本与兼容
 
 - hc-tui 固定 nsh 的一个提交，并在 `Cargo.lock` 与 `THIRD-PARTY-NOTICES.md` 记录；升级走单独改动，附帧快照、图片遮挡与示例 mod 回归。
-- `host_api` 与 `hc-tui` 版本在加载时校验；包的 `min_runtime` 与内嵌 nsh 版本比较，低于要求时拒绝加载并说明所需版本。
+- `host_api` 与 `hc-tui` 版本在加载时校验：`host_api` 支持单版本与 `a..=b` 范围，当前宿主接口版本落在范围外就报 `host_api_too_old`，消息里给“升级 hc-tui”与“降级包”两条路；包的 `min_runtime` 与内嵌 nsh 版本比较，低于要求时拒绝加载并说明所需版本。
 - `hctui.toml` 的 `min_hc_tui_version` 防止旧客户端加载用到新宿主方法的模块。
 - 内置模块的 bundle 与 hc-tui 版本绑定，启动时按版本解出；用户克隆的默认模块固定在自己的目录，不随升级覆盖。
 - `state.json` schema 升到 4；旧版本文件按缺失字段为空处理，不回写。

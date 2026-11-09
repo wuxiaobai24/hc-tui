@@ -319,33 +319,57 @@ impl Binding {
     pub fn is_off(&self) -> bool {
         matches!(self, Self::Off)
     }
+
+    /// 触发这个绑定要按的完整前缀链：前缀键的写法在前，动作键在后。
+    /// 直接绑定只有一键，`off` 为空。
+    pub fn chain(&self, prefix: &Binding) -> Vec<String> {
+        match self {
+            Self::Off => Vec::new(),
+            Self::Prefix(code, modifiers) => {
+                vec![prefix.key_spec(), key_spec(*code, *modifiers)]
+            }
+            Self::Direct(code, modifiers) => vec![key_spec(*code, *modifiers)],
+        }
+    }
+
+    /// 按键本身的写法，不带 `prefix+`；`off` 是空串。
+    pub fn key_spec(&self) -> String {
+        match self {
+            Self::Off => String::new(),
+            Self::Prefix(code, modifiers) | Self::Direct(code, modifiers) => {
+                key_spec(*code, *modifiers)
+            }
+        }
+    }
+}
+
+/// 修改键加按键名，`ctrl+b` / `shift+tab` 那种写法。
+fn key_spec(code: KeyCode, modifiers: KeyModifiers) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl".to_string());
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        parts.push("super".to_string());
+    }
+    parts.push(name_of(code));
+    parts.join("+")
 }
 
 impl std::fmt::Display for Binding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (prefix, code, modifiers) = match self {
+        let spec = match self {
             Self::Off => return write!(formatter, "\"\""),
-            Self::Prefix(code, modifiers) => (true, code, modifiers),
-            Self::Direct(code, modifiers) => (false, code, modifiers),
+            Self::Prefix(..) => format!("prefix+{}", self.key_spec()),
+            Self::Direct(..) => self.key_spec(),
         };
-        let mut parts: Vec<String> = Vec::new();
-        if prefix {
-            parts.push("prefix".to_string());
-        }
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            parts.push("ctrl".to_string());
-        }
-        if modifiers.contains(KeyModifiers::ALT) {
-            parts.push("alt".to_string());
-        }
-        if modifiers.contains(KeyModifiers::SHIFT) {
-            parts.push("shift".to_string());
-        }
-        if modifiers.contains(KeyModifiers::SUPER) {
-            parts.push("super".to_string());
-        }
-        parts.push(name_of(*code));
-        write!(formatter, "\"{}\"", parts.join("+"))
+        write!(formatter, "\"{spec}\"")
     }
 }
 

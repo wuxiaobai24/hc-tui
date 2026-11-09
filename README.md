@@ -71,6 +71,27 @@ request=$(./target/release/hc-tui plugins action invoke dev.hctui.pkg.git-board.
 
 不做：终端内容、光标、复制模式、历史搜索和 Kitty 图片留在宿主进程，它们逐格在 VT → Ratatui 的热路径上，模块通道只传快照与动作。输入法组合事件不在宿主输入通道（`src/mods/input.rs` 只翻译按键、粘贴、焦点与鼠标），IME 下的行为未验证。Sixel/iTerm 图片协议未实现。包以用户身份运行，没有 OS 沙箱；服务只在本机 core 上起，没有自动重启与多机调度；插件不能建立第二条 core 连接，也不能修改共享布局文档。
 
+## 排查与续订
+
+不开窗口也能查机器、反查键位、从上一个 revision 续订事件：
+
+```console
+$ hc-tui machine ls --json
+{"machines":[{"capabilities":["attach","automatic_input","events","framed","resize_notifications","shell","status"],"endpoint_protocol_generation":1,"host":"omarchy","name":"local","protocol":"framed","state":"connected","target":"","version":"0.1.18"}]}
+
+$ hc-tui keys where help --json
+{"action":"help","keys":["ctrl+b","?"]}
+
+$ hc-tui events --since 41 --count 2
+{"subscribed":true,"queue":256}
+{"kind":"events.snapshot","revision":47,"resync":false,"snapshot":{…}}
+```
+
+`machine ls` 的四项新增字段是 `version`、`protocol`、`endpoint_protocol_generation` 与
+`capabilities`；本机行来自自己的 hello 握手，远端机器尚未握手时为 `null` / `[]`。
+`keys where` 给完整前缀链（前缀键 + 动作键）。`events --since <rev>` 先推一帧带 `revision` 的
+快照，此后只推 `revision` 更大的事件；`rev` 已被裁剪或快于当前值时首帧带 `"resync":true`。
+
 ## 文档
 
 | 文档 | 内容 |

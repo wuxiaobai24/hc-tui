@@ -885,6 +885,17 @@ impl Session<'_> {
         self.next_id += 1;
         let id = self.next_id;
         let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let log = crate::api_log::Request::new("core", format!("req_{id}"), method);
+        let answer = self.rpc_once(id, method, request).await;
+        log.finish(match &answer {
+            Ok(_) => crate::api_log::Outcome::Ok,
+            Err(error) => crate::api_log::Outcome::from_rpc_kind(&error.kind),
+        });
+        answer
+    }
+
+    /// 发一条请求并等它的回复，不含日志。
+    async fn rpc_once(&mut self, id: u64, method: &str, request: Value) -> Result<Value, RpcError> {
         let frame = codec::encode(0, DATA, request.to_string().as_bytes())?;
         self.write(&frame).await.map_err(RpcError::io)?;
 

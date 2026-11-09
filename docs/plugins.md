@@ -73,7 +73,7 @@ events = ["state.changed", "terminal.status"]
 | 字段 | 说明 |
 |---|---|
 | `manifest_version` | 清单格式版本；当前为 2，`1` 仍可读 |
-| `host_api` | 宿主接口版本，与 hc-tui 内嵌版本不一致时拒绝加载 |
+| `host_api` | 宿主接口版本：写一个版本（`1`，等价 `1..=1`）或一个范围（`"1..=2"`）；当前宿主接口不在范围内时拒绝加载，报 `host_api_too_old`，并在错误里给“升级 hc-tui”与“降级包”两条路 |
 | `platforms` | `linux` / `macos`；不匹配时跳过并给警告 |
 | `[[actions]].contexts` | `global`（命令面板与 `do`）、`space`（侧栏 Space 菜单）、`pane`（Pane 右键菜单） |
 | `[[actions]].argv` | 工作目录为包目录；`./` 开头的程序相对包目录解析 |
@@ -350,7 +350,7 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 | `packages link <目录>` | 注册为开发来源，代码原地读取，清单变化后重载 |
 | `packages install <目录>` | 预览清单后复制到新代际，`current` 原子切换，默认不启用 |
 | `packages install <git 仓库|.tar.gz>` | 先 `git clone --depth 1` 或 `tar -xzf` 到临时目录，校验清单后同上，临时目录随即删除 |
-| `packages info <id|来源>` | 显示 id、名字、版本、来源、代际、能力、模块、服务、授予、安装时间与来源端版本；来源不是已安装 id 时只读清单，不动 store |
+| `packages info <id|来源>` | 显示 id、名字、版本、host_api、来源、代际、能力、模块、服务、授予、安装时间与来源端版本；来源不是已安装 id 时只读清单，不动 store |
 | `packages update --check [<id>]` | 只读比较本记录版本与来源端版本，不写记录、不装代际；有更新时退出码 0 并带 `"outdated": true` |
 | `packages update <id> <目录>` | 写入新代际；运行中的调用与终端继续使用旧代际，pin 释放后回收 |
 | `packages unlink <id>` | 移除开发注册，不删除目录 |
@@ -436,7 +436,7 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 - 两种状态退出码都是 0；来源读不出来（没有记录来源、远端不可达）时按包报错并非零退出。
 - 命令只读：不写记录、不发布代际。
 
-`packages info <id|来源>` 的 `--json` 输出 `id`、`name`、`version`、`source`、`path`、`generation`、`enabled`、`installedAt`、`capabilities`、`module`、`services`、`grants` 与 `remote`；未安装的来源 `generation`/`enabled`/`installedAt`/`remote` 为 `null`。`remote` 是 `{version, outdated}`，来源不可达时是 `{error}`，`info` 本身不因此失败。
+`packages info <id|来源>` 的 `--json` 输出 `id`、`name`、`version`、`host_api`、`source`、`path`、`generation`、`enabled`、`installedAt`、`capabilities`、`module`、`services`、`grants` 与 `remote`；`host_api` 是清单声明的单版本或范围的串形式。未安装的来源 `generation`/`enabled`/`installedAt`/`remote` 为 `null`。`remote` 是 `{version, outdated}`，来源不可达时是 `{error}`，`info` 本身不因此失败。
 
 ## 10. 信任与权限
 
@@ -526,6 +526,7 @@ hc-tui packages log <id> [--service <service>] [-n 100]
 ## 16. 版本
 
 - `manifest_version` 描述清单格式，`host_api` 描述宿主接口，`version` 是包自身的 semver；三者分别校验。
+- `host_api` 可以写单版本（`1`）或范围（`"1..=2"`）；加载时看当前宿主接口版本落在范围内没有，不落在里面就报 `host_api_too_old`，消息里同时给“升级 hc-tui”与“降级包”两条路。旧清单不用改，`manifest_version` 不涨。
 - hc-tui 升级 `host_api` 时保留对旧版本的加载与诊断，不静默降级动作语义。
 - 清单与命令目录随版本生成 `--plugins-schema` 输出，供作者与 Agent 校对。
 
