@@ -29,8 +29,6 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,12 +89,12 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: require all four archives and checksums
+      - name: require all three archives and checksums
         run: |
           set -euo pipefail
           version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
           cd artifacts
-          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
             archive="hc-tui-$version-$target.tar.gz"
             test -s "$archive"
             sha256sum -c "$archive.sha256"

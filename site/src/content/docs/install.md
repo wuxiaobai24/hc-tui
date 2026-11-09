@@ -30,8 +30,9 @@ sh install.sh --version 0.4.2 --bin-dir "$HOME/.local/bin"
 | --- | --- |
 | Linux amd64，musl 静态 | `x86_64-unknown-linux-musl` |
 | Linux arm64，musl 静态 | `aarch64-unknown-linux-musl` |
-| macOS Intel | `x86_64-apple-darwin` |
 | macOS Apple Silicon | `aarch64-apple-darwin` |
+
+macOS Intel 自 v0.5.0 起不再提供预编译包：`install.sh` 会直接提示原因，从源码构建即可。
 
 macOS 包独立携带 VT 静态库，仍使用系统库，不是完全静态的 Mach-O。
 

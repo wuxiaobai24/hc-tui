@@ -74,6 +74,10 @@ main() {
         *) fail "unsupported architecture: $architecture" ;;
     esac
     target=$architecture-$platform
+    # macOS Intel 从 v0.5.0 起不再提供预编译包（GitHub 的 Intel runner 太慢，收益也小）。
+    if [ "$target" = "x86_64-apple-darwin" ]; then
+        fail 'macOS Intel (x86_64) 不再提供预编译发行包：请用 Apple Silicon 机器，或从源码构建（cargo build --release --locked）'
+    fi
     if [ -z "$release_version" ]; then
         release_url=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --fail --location --silent --show-error --head --connect-timeout 10 --max-time 30 \

@@ -91,10 +91,13 @@ XDG/session 下测同一台机器。延迟为按键到该字符出现在 pane �
 |---|---|---|
 | Linux amd64 | x86_64-unknown-linux-musl | 静态链接、原生 --version/default-config |
 | Linux arm64 | aarch64-unknown-linux-musl | 静态链接、QEMU --version |
-| macOS Intel | x86_64-apple-darwin | 原生 --version/default-config |
 | macOS Apple Silicon | aarch64-apple-darwin | 原生 --version/default-config |
 
-macOS 的 VT 静态链接，但系统库不是完全静态。四套包都不依赖用户机器上的 Zig。
+macOS Intel（`x86_64-apple-darwin`）自 v0.5.0 起不再发布：GitHub 的 Intel runner 构建一次要十几分钟，
+而实际使用面已经很小。Intel Mac 用户从源码构建即可（`cargo build --release --locked`），
+`install.sh` 在该平台会直接给出这条提示，而不是去下载一个不存在的包。
+
+macOS 的 VT 静态链接，但系统库不是完全静态。三套包都不依赖用户机器上的 Zig。
 统一通过 `scripts/package-release.sh TARGET` 生成 tar.gz 及 `.sha256`，包内含二进制、许可、第三方声明、变更记录、README 和 install.sh。
 Release 另外发布 `install.sh` / `install.sh.sha256`，固定入口为 `releases/latest/download/install.sh`；发布前在 Linux/macOS 跑安装器的隔离回归。
 **四个构建全部成功且八个资产校验完整才发布**，不再因为 Linux 一项成功就发布缺平台的 Release。
