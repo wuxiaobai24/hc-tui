@@ -192,6 +192,30 @@ pub fn install(root: PathBuf) {
     let _ = tracing::subscriber::set_global_default(subscriber(root));
 }
 
+/// 测试用的进程级日志根：首次调用装一次全局 subscriber，之后任何线程
+/// （含引擎线程）写的请求日志都落到同一棵树里。根目录按进程号与时间戳
+/// 分开，不回收——同一进程的多个用例共用它，断言各读各的那一段。
+#[cfg(test)]
+pub fn install_for_tests() -> &'static std::path::Path {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!(
+            "hctui-api-log-tests-{}-{unique}",
+            std::process::id()
+        ));
+        install(root.clone());
+        // 别的用例可能已经把这个 callsite 在空订阅者下注册过（兴趣记成
+        // `never`），装好全局订阅者之后要重算一次，否则事件在调用点就被
+        // 跳过，谁都收不到。
+        tracing::callsite::rebuild_interest_cache();
+        root
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

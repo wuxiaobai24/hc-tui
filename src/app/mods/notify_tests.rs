@@ -2,6 +2,7 @@
 //!
 //! 运行：`cargo test --lib notify_cli -- --nocapture`
 
+use super::toast_tests::wait_until;
 use super::*;
 use crate::config::Config;
 use crate::mods::SurfacePlace;
@@ -174,6 +175,18 @@ fn notify_cli_routes_to_toast_surface() {
         "target": "t1",
     }));
     pump(&mut app, 20);
+    // 通知 4 秒后过期：按条件等，不按帧数等。
+    assert!(
+        wait_until(&mut app, 3.0, |app| app
+            .mods
+            .surfaces
+            .iter()
+            .find(|surface| surface.place == SurfacePlace::Toast)
+            .is_some_and(|surface| surface.props["toasts"]
+                .as_array()
+                .is_some_and(|list| list.len() == 1))),
+        "通知没有推到提示表面"
+    );
     let props = app
         .mods
         .surfaces

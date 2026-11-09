@@ -90,7 +90,8 @@ host.on("state.changed", (payload: any) => {
   seen.set(seen().concat([text]));
   if (reports >= 5) return;
   reports += 1;
-  host.call("notify", { title: "state.changed", body: text }).catch(() => {});
+  // 超时要够长：慢机器上 30 帧可能跨过几秒，条目不能因过期而凭空少掉。
+  host.call("notify", { title: "state.changed", body: text, timeout: 600 }).catch(() => {});
 });
 
 function App() {
@@ -165,6 +166,25 @@ fn pump(app: &mut App, count: usize) {
     }
 }
 
+/// 出帧到条件成立或 `secs` 秒超时；返回期限内是否达成。
+/// 时间轴上只信时钟：慢机器上一帧可能就跨过一整秒，固定帧数算不上等待。
+pub(super) fn wait_until(app: &mut App, secs: f32, mut ok: impl FnMut(&App) -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(secs);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    loop {
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        app.poll_plugin_registry();
+        app.tick();
+        if ok(app) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// 宿主推送队列的同一条路径（`setProps` 处理器就是这两步）。
 fn set_props(app: &mut App, surface: &str, props: serde_json::Value) {
     let surface = app.mods.surface_mut(surface).expect("surface exists");
@@ -177,6 +197,11 @@ fn toast_props(app: &App, surface: &str) -> serde_json::Value {
         .surface(surface)
         .map(|surface| surface.props.clone())
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// 提示表面收到的队列长度。
+fn toasts_len(app: &App, surface: &str) -> Option<usize> {
+    toast_props(app, surface)["toasts"].as_array().map(Vec::len)
 }
 
 /// 提示表面实际画出来的行。
@@ -226,7 +251,12 @@ fn toast_ticket_queue_dismiss_and_timeout() {
             None,
         )
         .unwrap();
-    pump(&mut app, 60);
+    assert!(
+        wait_until(&mut app, 3.0, |app| {
+            app.mod_notifications.len() == 2 && toasts_len(app, &toast) == Some(2)
+        }),
+        "两条同文本通知没有都进队列并推到提示表面"
+    );
     println!("toast surface = {toast}, caller surface = {caller}");
     println!("focused mod after open = {:?}", app.focused_mod);
     let rect = app.mods.surface(&toast).map(|surface| surface.area);
@@ -265,7 +295,12 @@ fn toast_ticket_queue_dismiss_and_timeout() {
         &caller,
         json!({"script": [{"name": "dismiss", "data": {"id": ids[0]}}]}),
     );
-    pump(&mut app, 40);
+    assert!(
+        wait_until(&mut app, 3.0, |app| {
+            app.mod_notifications.len() == 1 && toasts_len(app, &toast) == Some(1)
+        }),
+        "撤掉一条后队列与提示表面都应剩一条"
+    );
     println!(
         "after dismiss {}: queue = {}",
         ids[0],
@@ -288,7 +323,12 @@ fn toast_ticket_queue_dismiss_and_timeout() {
         &caller,
         json!({"script": [{"name": "dismiss", "data": {"id": ids[1]}}]}),
     );
-    pump(&mut app, 40);
+    assert!(
+        wait_until(&mut app, 3.0, |app| {
+            app.mod_notifications.is_empty() && toasts_len(app, &toast) == Some(0)
+        }),
+        "撤掉最后一条后队列与提示表面都应空"
+    );
     println!(
         "after dismiss {}: queue = {} props = {}",
         ids[1],
@@ -309,7 +349,12 @@ fn toast_ticket_queue_dismiss_and_timeout() {
             "title": "expiring", "body": "", "timeout": 1
         }}]}),
     );
-    pump(&mut app, 40);
+    assert!(
+        wait_until(&mut app, 3.0, |app| {
+            app.mod_notifications.len() == 1 && toasts_len(app, &toast) == Some(1)
+        }),
+        "timeout=1 的通知应先入队并推到提示表面"
+    );
     println!(
         "after notify timeout=1: props = {}",
         toast_props(&app, &toast)
@@ -318,9 +363,14 @@ fn toast_ticket_queue_dismiss_and_timeout() {
         toast_props(&app, &toast)["toasts"].as_array().map(Vec::len),
         Some(1)
     );
-    pump(&mut app, 130);
+    assert!(
+        wait_until(&mut app, 5.0, |app| {
+            app.mod_notifications.is_empty() && toasts_len(app, &toast) == Some(0)
+        }),
+        "1 秒超时后队列与提示表面都应清空"
+    );
     println!(
-        "after 1.3s: queue = {} props = {}",
+        "after timeout: queue = {} props = {}",
         app.mod_notifications.len(),
         toast_props(&app, &toast)
     );
@@ -458,11 +508,32 @@ fn toast_ticket_empty_domains_are_not_broadcast() {
         None,
     )
     .unwrap();
-    pump(&mut app, 40);
-    let before = app.mod_notifications.len();
+    // 探针的回报是异步的：先等第一条落地，再等 500 毫秒内条数不再变化才记基线。
+    assert!(
+        wait_until(&mut app, 3.0, |app| !app.mod_notifications.is_empty()),
+        "探针没报任何 state.changed"
+    );
+    let mut before = app.mod_notifications.len();
+    let mut quiet = std::time::Instant::now();
+    while quiet.elapsed() < std::time::Duration::from_millis(500) {
+        pump(&mut app, 1);
+        if app.mod_notifications.len() != before {
+            before = app.mod_notifications.len();
+            quiet = std::time::Instant::now();
+        }
+    }
     let revision = app.mod_revision;
     app.bump_mod_revision_domains(&[]);
-    pump(&mut app, 30);
+    assert!(
+        wait_until(&mut app, 3.0, |app| app.mod_revision > revision),
+        "空域 bump 没推进 revision"
+    );
+    // 空域只推进 revision，不广播：给探针 500 毫秒反应时间，条数一直不变。
+    let observe = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < observe {
+        pump(&mut app, 1);
+        assert_eq!(app.mod_notifications.len(), before, "空域 bump 广播了通知");
+    }
     println!(
         "empty bump: revision {} -> {}, notifications {} -> {}",
         revision,
@@ -470,11 +541,15 @@ fn toast_ticket_empty_domains_are_not_broadcast() {
         before,
         app.mod_notifications.len()
     );
-    assert!(app.mod_revision > revision);
-    assert_eq!(app.mod_notifications.len(), before);
     // 真实域照常广播。
     app.bump_mod_revision_domains(&["theme"]);
-    pump(&mut app, 30);
+    assert!(
+        wait_until(&mut app, 3.0, |app| app
+            .mod_notifications
+            .iter()
+            .any(|item| item.text.contains("[\"theme\"]"))),
+        "主题域没有广播"
+    );
     let texts: Vec<String> = app
         .mod_notifications
         .iter()

@@ -39,6 +39,35 @@ fn my_parity() {
 - 进程正常退出（包括用例 panic 被 harness 收尾后继续跑完）时，`atexit`
   再兜一次：先杀掉本进程拉起的 `hc connect`，避免客户端重连把 core 拉起来。
 
+## 测试不许依赖墙钟与固定帧数
+
+`pump(app, N)` 里的 `N` 是帧数，不是时间：机器慢下来时一帧可能跨过一整秒，
+拿帧数当秒表去等「通知该过期了」「props 该到了」，在慢 runner 上就是随机红。
+
+- 等「某事发生」：用带超时的等待，条件成立就返回，超时才断言失败。
+  单元测试（`src/app/mods/toast_tests.rs`）用 `wait_until`：
+
+  ```rust
+  // 超时门槛写秒数，条件写闭包；返回 false 就断言失败并带出消息。
+  assert!(
+      wait_until(&mut app, 3.0, |app| app.mod_notifications.len() == 1),
+      "通知没有入队"
+  );
+  ```
+
+  集成测试（`tests/m9g_toast_parity.rs`）用 `Harness::pump_until`：
+
+  ```rust
+  harness.pump_until("props arrive", |app| app.mod_notifications.len() == 1);
+  ```
+
+- 等「某事不会发生」：先等到安静（条数在一个时间窗口内不再变化）再记基线，
+  断言只针对基线；同时把被测对象自己的超时设得够长（探针模块的 `notify`
+  带 `timeout: 600`），别让「过期」伪装成「没有广播」。
+
+- 断言「某条状态还在」的用例，超时要大于等待窗口：3 秒的等待配 4 秒过期
+  的通知，在慢机器上仍然会先过期。
+
 ## 泄漏自检
 
 ```sh

@@ -2940,45 +2940,52 @@ mount(() => <View><Text>{result()}</Text></View>);
     }
 
     /// 被拒的宿主调用落一行 `outcome="denied"`：用真实分发路径，不用假造日志。
+    /// 全局 subscriber 由 [`crate::api_log::install_for_tests`] 装一次，引擎线程
+    /// 与 App 线程都写同一棵树，所以不依赖哪一个线程先碰到分发路径。
     #[test]
     fn a_denied_host_call_writes_one_denied_log_line() {
-        let root = std::env::temp_dir().join(format!(
-            "hctui-mods-denied-log-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
-        let subscriber = crate::api_log::subscriber(root.clone());
+        let root = crate::api_log::install_for_tests().to_path_buf();
         let mut app = app();
         probe(&mut app);
         let log_path = root
             .join("logs")
             .join(crate::api_log::CORE_PACKAGE)
             .join(format!("{}.stdout.log", crate::api_log::CORE_REQUEST));
-        let screen = tracing::subscriber::with_default(subscriber, || {
-            let screen = frames(&mut app, 40);
-            // 慢机器上被拒调用可能晚几帧才走到分发路径：落到日志文件出现为止。
-            for _ in 0..200 {
-                if log_path.exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                let _ = frames(&mut app, 1);
-            }
-            screen
-        });
+        // 同进程其它用例也在写这份日志：只看本用例开始之后新增的那一段。
+        let before = std::fs::metadata(&log_path)
+            .map(|meta| meta.len() as usize)
+            .unwrap_or(0);
+        let screen = frames(&mut app, 40);
         assert!(screen.contains("forbidden"), "screen: {screen}");
-        let log = std::fs::read_to_string(&log_path).expect("the denied call wrote no log line");
-        println!("{log}");
-        assert!(
-            log.lines().any(|line| line.contains("subsystem=\"mods\"")
-                && line.contains("outcome=\"denied\"")
-                && line.contains("method=\"exec\"")),
-            "{log}"
-        );
-        std::fs::remove_dir_all(root).ok();
+        // 慢机器上被拒调用可能晚几帧才走到分发路径：落到日志文件出现为止。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if denied_line(&log_path, before).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            frames(&mut app, 1);
+        }
+        let Some(line) = denied_line(&log_path, before) else {
+            let all = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!("the denied call wrote no log line; log now:\n{all}");
+        };
+        println!("{line}");
+    }
+
+    /// 从 `before` 字节之后找那一行 `subsystem="mods" outcome="denied"
+    /// method="exec"`；文件缺失或没写到就当没有。
+    fn denied_line(path: &std::path::Path, before: usize) -> Option<String> {
+        let bytes = std::fs::read(path).ok()?;
+        let tail = &bytes[before.min(bytes.len())..];
+        String::from_utf8_lossy(tail)
+            .lines()
+            .find(|line| {
+                line.contains("subsystem=\"mods\"")
+                    && line.contains("outcome=\"denied\"")
+                    && line.contains("method=\"exec\"")
+            })
+            .map(str::to_string)
     }
 
     #[test]
