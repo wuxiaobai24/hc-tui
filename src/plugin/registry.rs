@@ -738,8 +738,10 @@ pub fn set_enabled(config: &Config, id: &str, enabled: bool) -> Result<(), Strin
 
 /// 安装一个包目录到新代际；先校验清单与模块 bundle。
 ///
-/// 发布顺序在包锁内完成：分配代际 → 复制到暂存目录 → rename 成正式代际 →
-/// 原子写记录 → 切换 `current`。任何一步失败都不会改动旧记录与旧指针。
+/// 发布顺序在包锁内完成：分配代际 → 复制到独占的暂存目录 → 逐文件 fsync →
+/// rename 成正式代际 → 校验清单在位 → 原子写记录 → 最后切 `current`。
+/// 不变量：`current` 只指向完整落盘的代际，记录先于指针；任何一步失败都不会
+/// 改动旧记录与旧指针。
 pub fn install(config: &Config, dir: &Path, policy: EnablePolicy) -> Result<Record, String> {
     install_from(config, dir, None, policy)
 }
@@ -779,6 +781,14 @@ pub fn install_from(
             return Err(error.to_string());
         }
     };
+    // 落盘不完整就不发布：不写记录，也不让 `current` 指过去。
+    if !crate::pkg::has_manifest(&target) {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(format!(
+            "{}: published generation {generation} has no manifest",
+            target.display()
+        ));
+    }
     let record = Record {
         id: id.clone(),
         source: Source::Local,
@@ -1104,6 +1114,117 @@ mod tests {
                 .enabled
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 并发安装的必现用例：注入 20 ms 锁内延迟，两个安装者的临界区必然重叠，
+    /// 再配 8 MiB 负载把复制窗口拉长；任何共享暂存目录、提前切指针或把空锁
+    /// 文件当残留的实现都会在这里暴露。每轮换新根目录，重复 20 轮。
+    #[test]
+    fn racing_installers_never_publish_an_incomplete_generation() {
+        const ROUNDS: usize = 20;
+        // 复制负载让两个安装者的复制窗口真的重叠；没有它，微秒级的交错几乎命中不到。
+        const PAYLOAD: usize = 8 * 1024 * 1024;
+        crate::store::set_lock_create_delay(Some(std::time::Duration::from_millis(20)));
+        for round in 0..ROUNDS {
+            let root = unique_dir(&format!("amplified-{round}"));
+            let config = config_in(&root);
+            let source = write_plugin_at(&root.join("source").join("race"), "dev.example.race");
+            std::fs::write(source.join("payload.bin"), vec![7u8; PAYLOAD]).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let config = config.clone();
+                let source = source.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    install(&config, &source, EnablePolicy::Keep).map(|record| record.generation)
+                }));
+            }
+            let results: Vec<Result<u64, String>> = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+            // 两个安装者必须串行：都成功、各拿一个代际，谁也不因对手的暂存
+            // 目录被删而失败。
+            assert!(
+                results.iter().all(Result::is_ok),
+                "round {round}: an installer failed instead of waiting: {results:?}"
+            );
+            let mut generations: Vec<u64> = results
+                .iter()
+                .filter_map(|result| result.as_ref().ok().copied())
+                .collect();
+            generations.sort_unstable();
+            assert_ne!(
+                generations[0], generations[1],
+                "round {round}: installers shared one generation"
+            );
+
+            // 恢复之前的原始状态：安装者全部退出后，记录、指针与目录必须已经一致。
+            let state = config.plugins_state_dir();
+            let package = state.join("store").join("dev.example.race");
+            let records: Vec<String> = std::fs::read_dir(state.join("records"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            assert_eq!(records, vec!["dev.example.race.json"], "round {round}");
+            let record: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(state.join("records").join("dev.example.race.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            let generation = record["generation"].as_u64().unwrap();
+            let published = package.join(generation.to_string());
+            assert!(
+                published.join("plugin.toml").is_file(),
+                "round {round}: record points at an incomplete generation {}",
+                published.display()
+            );
+            let pointer = state.join("current").join("dev.example.race");
+            assert_eq!(
+                std::fs::read_link(&pointer).unwrap(),
+                published,
+                "round {round}: current does not follow the record"
+            );
+            assert!(
+                pointer.join("plugin.toml").is_file(),
+                "round {round}: current points at an incomplete generation"
+            );
+            assert_eq!(
+                std::fs::metadata(published.join("payload.bin"))
+                    .unwrap()
+                    .len(),
+                PAYLOAD as u64,
+                "round {round}: published generation is truncated"
+            );
+
+            // 恢复之后仍然一致，且没有留下暂存目录。
+            let store = crate::store::Store::open(state);
+            assert!(
+                store.recovery_issues().is_empty(),
+                "round {round}: {:?}",
+                store.recovery_issues()
+            );
+            assert_eq!(
+                store.current_dir("dev.example.race").as_deref(),
+                Some(published.as_path()),
+                "round {round}: recovery moved the pointer off the record"
+            );
+            let leftovers: Vec<String> = std::fs::read_dir(&package)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with(".tmp-"))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "round {round}: left behind {leftovers:?}"
+            );
+            std::fs::remove_dir_all(&root).ok();
+        }
+        crate::store::set_lock_create_delay(None);
     }
 
     #[test]
