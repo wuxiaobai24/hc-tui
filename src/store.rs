@@ -5,10 +5,13 @@
 //! 指向当前代际；记录文件保存来源、代际、启用状态与安装时间。运行中的
 //! 表面继续使用已加载的代码，旧代际在最后一个引用关闭后回收。
 //!
+//! 发布不变量：`current` 只指向已经完整落盘的代际——内容先写进包锁内独占的
+//! 暂存目录、逐文件 fsync，再 rename 成正式代际，最后才写记录、切指针。
+//!
 //! 记录是唯一发布真相，`current` 只是可重建索引：记录先原子落盘，指针再
 //! 原子切换；[`Store::open`] 在每次打开时做一次幂等恢复，清理临时目录、按
-//! 记录补回缺失或与记录不一致的指针，并把「有指针没记录」的包报成问题而不是
-//! 悄悄删除。
+//! 记录补回缺失或与记录不一致的指针，把「目录在但清单不在」的代际报成问题
+//! 并摘掉指向它的指针，把「有指针没记录」的包报成问题而不是悄悄删除。
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -100,14 +103,19 @@ pub struct RecoveryIssue {
     pub message: String,
 }
 
-/// 包级互斥的持有者；离开作用域即删除锁文件。
+/// 包级互斥的持有者；离开作用域即释放锁。
 #[derive(Debug)]
 pub struct PackageLock {
     path: PathBuf,
+    /// unix 上持着 `flock` 排他锁的文件描述符；进程消失时内核释放它。
+    #[cfg(unix)]
+    _held: std::fs::File,
 }
 
 impl Drop for PackageLock {
     fn drop(&mut self) {
+        // 先删锁文件，再随字段释放 `flock`：等在同一个 inode 上的进程拿到锁后
+        // 会发现路径换了（见 [`same_file`]），回头重来，不会两个进程各持一把。
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -196,18 +204,26 @@ impl Store {
     }
 
     /// 删除写记录中途留下的临时文件。
+    ///
+    /// 记录写入没有包锁保护：名字里的持有者进程还活着就跳过
+    /// （`write_atomic` 的临时文件名形如 `.tmp-<pid>-<seq>-<记录名>`），
+    /// 只有持有者已消失或文件老到不可能还在写时才当残留。
     fn clean_temporary_records(&mut self) {
         let Ok(entries) = std::fs::read_dir(self.records_dir()) else {
             return;
         };
         for entry in entries.filter_map(Result::ok) {
-            if entry.file_name().to_string_lossy().starts_with(".tmp-") {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(".tmp-") && temp_entry_is_stale(&name, &entry.path()) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
 
     /// 指针缺失、指向不存在的目标或与记录不一致时，按记录重建 `current`。
+    ///
+    /// 只把指针指向完整代际（目录里已有清单）。目录在而清单不在，说明那一代
+    /// 没落完：上报问题、摘掉指向它的指针，不删记录也不删目录。
     fn rebuild_missing_current(&mut self) {
         for record in self.list() {
             let target = match record.source {
@@ -227,6 +243,20 @@ impl Store {
             };
             // 记录是发布真相：指针停在旧代际（切换中途失败）也算需要重建。
             let target = std::path::absolute(&target).unwrap_or(target);
+            if !crate::pkg::has_manifest(&target) {
+                self.recovery.push(RecoveryIssue {
+                    id: Some(record.id.clone()),
+                    path: target.clone(),
+                    message: format!(
+                        "generation {} is incomplete (no {} or {}); the package is not loaded",
+                        record.generation,
+                        crate::pkg::MANIFEST_FILE,
+                        crate::pkg::PLUGIN_FILE
+                    ),
+                });
+                self.drop_incomplete_current(&record.id, &target);
+                continue;
+            }
             if self.current_dir(&record.id).as_deref() == Some(target.as_path()) {
                 continue;
             }
@@ -241,6 +271,16 @@ impl Store {
                     message: format!("cannot rebuild the current pointer: {error}"),
                 });
             }
+        }
+    }
+
+    /// 摘掉指向不完整代际的指针；与正在切换代际的安装者抢锁时让路。
+    fn drop_incomplete_current(&self, id: &str, target: &Path) {
+        let Some(_lock) = self.try_lock_package(id) else {
+            return;
+        };
+        if self.current_dir(id).as_deref() == Some(target) {
+            let _ = std::fs::remove_file(self.current_link(id));
         }
     }
 
@@ -331,8 +371,11 @@ impl Store {
         write_atomic(&self.record_path(&record.id), text.as_bytes())
     }
 
-    /// 取得一个包的互斥锁；最多等 [`LOCK_TIMEOUT`]，超时返回 `TimedOut`。
-    /// 持有者进程已消失或锁文件过旧时视为残留并接管。
+    /// 等待一个包的锁：unix 上靠 `flock` 排队，其他平台靠 PID 文件。
+    ///
+    /// 判不了持有者（内容为空、不可解析、PID 已消失）一律视为可接管，接管不等待
+    /// 锁文件自己变旧：macOS 没有 `/proc`，靠 `kill(pid, 0)` 探活会把 `EPERM` 当成
+    /// 活着、把被复用的 PID 当成活着，SIGKILL 之后的下一个安装者就会卡到超时。
     pub fn lock_package(&self, id: &str) -> io::Result<PackageLock> {
         let dir = self.root.join("store").join(id);
         std::fs::create_dir_all(&dir)?;
@@ -340,8 +383,9 @@ impl Store {
         let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
         loop {
             match try_create_lock(&path) {
-                Ok(()) => return Ok(PackageLock { path }),
+                Ok(lock) => return Ok(lock),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    #[cfg(not(unix))]
                     if stale_lock(&path) {
                         let _ = std::fs::remove_file(&path);
                         continue;
@@ -364,27 +408,27 @@ impl Store {
         let dir = self.root.join("store").join(id);
         std::fs::create_dir_all(&dir).ok()?;
         let path = dir.join(".lock");
-        try_create_lock(&path).ok()?;
-        Some(PackageLock { path })
+        try_create_lock(&path).ok()
     }
 
-    /// 在包锁内分配下一个代际，返回暂存目录 `store/<id>/.tmp-<gen>`。
-    /// 调用方复制完成后用 [`Store::publish_staged`] 换入正式目录。
+    /// 在包锁内分配下一个代际，返回独占的暂存目录
+    /// `store/<id>/.tmp-<pid>-<seq>-<gen>`。名字带持有者 PID 与会话内序号，
+    /// 两个安装者永不共用一个暂存目录。调用方复制完成后用
+    /// [`Store::publish_staged`] 换入正式目录。
     pub fn alloc_generation(&self, id: &str) -> io::Result<(u64, PathBuf)> {
         let generation = self.next_generation(id);
-        let staged = self
-            .root
-            .join("store")
-            .join(id)
-            .join(format!(".tmp-{generation}"));
-        if staged.exists() {
-            std::fs::remove_dir_all(&staged)?;
-        }
+        let staged = self.root.join("store").join(id).join(format!(
+            ".tmp-{}-{}-{generation}",
+            std::process::id(),
+            temp_id()
+        ));
         std::fs::create_dir_all(&staged)?;
         Ok((generation, staged))
     }
 
-    /// 把暂存目录整体 rename 成 `store/<id>/<generation>`。
+    /// 把暂存目录整体落盘后 rename 成 `store/<id>/<generation>`。
+    /// rename 之前内容已经 fsync：从外部看这一代要么不存在、要么内容完整，
+    /// `current` 才能指向它。
     pub fn publish_staged(&self, id: &str, generation: u64, staged: &Path) -> io::Result<PathBuf> {
         let dir = self.generation_dir(id, generation);
         if dir.exists() {
@@ -393,6 +437,7 @@ impl Store {
                 format!("generation {generation} already exists"),
             ));
         }
+        sync_tree(staged);
         std::fs::rename(staged, &dir)?;
         if let Some(parent) = dir.parent() {
             sync_directory(parent);
@@ -579,19 +624,29 @@ fn sync_directory(dir: &Path) {
     }
 }
 
-/// 排他创建锁文件并写入持有者 PID。
-fn try_create_lock(path: &Path) -> io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    writeln!(file, "{}", std::process::id())?;
-    let _ = file.sync_all();
-    Ok(())
+/// 递归落盘：每个文件与目录都 fsync，保证 rename 之前内容已经在盘上。
+fn sync_tree(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            sync_tree(&path);
+        } else if let Ok(file) = std::fs::File::open(&path) {
+            let _ = file.sync_all();
+        }
+    }
+    sync_directory(dir);
 }
 
-/// 锁文件是否残留：持有者进程已消失，或锁文件老到不可能还有活着的安装。
-fn stale_lock(path: &Path) -> bool {
+/// 临时条目名里的持有者 PID：`<prefix><pid>-<seq>-...`；解析失败返回 `None`。
+fn temp_owner(name: &str) -> Option<u32> {
+    name.strip_prefix(".tmp-")?.split('-').next()?.parse().ok()
+}
+
+/// 临时条目是否残留：持有者已消失，或文件老到不可能还在写。
+fn temp_entry_is_stale(name: &str, path: &Path) -> bool {
     let age = std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
@@ -599,25 +654,130 @@ fn stale_lock(path: &Path) -> bool {
     if age.is_some_and(|age| age > LOCK_STALE_AGE) {
         return true;
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
+    match temp_owner(name) {
+        Some(pid) => !process_alive(pid),
+        None => false,
+    }
+}
+
+/// `EPERM` 说明进程存在但不属于自己，按活着算；只有 `ESRCH` 才是死了。
+fn process_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    if pid == 0 || pid > i32::MAX as u32 {
         return false;
+    }
+    #[cfg(unix)]
+    {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        let error = io::Error::last_os_error();
+        !matches!(error.raw_os_error(), Some(libc::ESRCH))
+    }
+    #[cfg(not(unix))]
+    {
+        // 没有廉价探活手段时按活着算，残渣交给年龄上限处理。
+        true
+    }
+}
+
+/// 排他取得锁文件，成功时返回持有者。
+///
+/// unix 上的互斥由内核 `flock` 提供：锁跟着打开的文件描述符走，持有者被
+/// SIGKILL 时自动释放，与 PID 是否被复用、平台探活语义无关；锁文件内容只是
+/// 持有者 PID，供排查用。锁文件被别的进程删掉重建时描述符指向的 inode 已经
+/// 不同，拿到锁后核对一次，不一致就当作被占用重来。
+#[cfg(unix)]
+fn try_create_lock(path: &Path) -> io::Result<PackageLock> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    let acquired = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if acquired != 0 {
+        let error = io::Error::last_os_error();
+        // EWOULDBLOCK 与 EAGAIN 在 Linux 与 macOS 上同值，用比较避免重复模式。
+        let busy = matches!(error.raw_os_error(), Some(code)
+            if code == libc::EWOULDBLOCK || code == libc::EAGAIN);
+        return Err(if busy {
+            io::Error::new(io::ErrorKind::AlreadyExists, "the package lock is held")
+        } else {
+            error
+        });
+    }
+    if !same_file(&file, path) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the package lock file was replaced",
+        ));
+    }
+    let mut file = file;
+    file.set_len(0)?;
+    writeln!(file, "{}", std::process::id())?;
+    let _ = file.sync_all();
+    #[cfg(test)]
+    if let Some(delay) = lock_create_delay() {
+        std::thread::sleep(delay);
+    }
+    Ok(PackageLock {
+        path: path.to_path_buf(),
+        _held: file,
+    })
+}
+
+/// 打开的描述符与路径上现在那个文件是不是同一个 inode。
+#[cfg(unix)]
+fn same_file(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(held), Ok(at_path)) => held.dev() == at_path.dev() && held.ino() == at_path.ino(),
+        _ => false,
+    }
+}
+
+/// 非 unix：先把持有者 PID 写进临时文件，再用硬链接原子占位。
+/// 锁文件一出现就带着完整内容，不存在「已建、还没写 PID」的可疑窗口。
+#[cfg(not(unix))]
+fn try_create_lock(path: &Path) -> io::Result<PackageLock> {
+    let staged = path.with_file_name(format!(".tmp-{}-{}-lock", std::process::id(), temp_id()));
+    std::fs::write(&staged, format!("{}\n", std::process::id()))?;
+    let linked = std::fs::hard_link(&staged, path);
+    let _ = std::fs::remove_file(&staged);
+    linked?;
+    Ok(PackageLock {
+        path: path.to_path_buf(),
+    })
+}
+
+/// 锁文件年龄；读不到元数据时返回 `None`。
+#[cfg(not(unix))]
+fn lock_age(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()?;
+    std::time::SystemTime::now().duration_since(modified).ok()
+}
+
+/// 锁文件是否残留。内容为空、不可解析（备份/重启后只留下半个文件）或持有者
+/// 已消失一律视为可接管；锁文件已经被删掉时也直接接管。
+#[cfg(not(unix))]
+fn stale_lock(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
     };
     let Ok(pid) = text.trim().parse::<u32>() else {
         return true;
     };
     // 同一进程的另一线程不算残留，必须等它释放。
-    pid != std::process::id() && !process_alive(pid)
-}
-
-#[cfg(target_os = "linux")]
-fn process_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_alive(_pid: u32) -> bool {
-    // 没有 /proc 时只靠锁文件年龄判断，避免把活着的持有者踢掉。
-    true
+    if pid == std::process::id() {
+        return false;
+    }
+    lock_age(path).is_some_and(|age| age > LOCK_STALE_AGE)
 }
 
 /// 当前 Unix 时间秒数；平台时间不可用时返回 0。
@@ -655,6 +815,23 @@ pub fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 放大并发用例用的注入延迟：每个安装者拿到包锁后停这么久。
+#[cfg(test)]
+static LOCK_CREATE_DELAY: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
+
+/// 打开或关闭放大用例的锁内延迟。
+#[cfg(test)]
+pub fn set_lock_create_delay(delay: Option<Duration>) {
+    if let Ok(mut held) = LOCK_CREATE_DELAY.lock() {
+        *held = delay;
+    }
+}
+
+#[cfg(test)]
+fn lock_create_delay() -> Option<Duration> {
+    LOCK_CREATE_DELAY.lock().map(|held| *held).unwrap_or(None)
 }
 
 /// 文件的 SHA-256 十六进制；读不到时返回 `None`。
@@ -745,6 +922,7 @@ mod tests {
         let store = Store::open(&root);
         let (first, dir) = store.prepare_generation("probe").unwrap();
         std::fs::write(dir.join("bundle.js"), "one").unwrap();
+        std::fs::write(dir.join(crate::pkg::PLUGIN_FILE), "manifest_version = 1\n").unwrap();
         store.set_current("probe", &dir).unwrap();
         store.save_record(&record("probe", first)).unwrap();
 
@@ -772,6 +950,7 @@ mod tests {
         let store = Store::open(&root);
         let (generation, dir) = store.prepare_generation("probe").unwrap();
         std::fs::write(dir.join("bundle.js"), "one").unwrap();
+        std::fs::write(dir.join(crate::pkg::PLUGIN_FILE), "manifest_version = 1\n").unwrap();
         store.set_current("probe", &dir).unwrap();
         store.save_record(&record("probe", generation)).unwrap();
         std::fs::remove_file(root.join("current").join("probe")).unwrap();
@@ -834,7 +1013,98 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    #[cfg(target_os = "linux")]
+    /// 锁文件内容为「空」「垃圾字符串」「不存在」三种情形都要能接管：认不出
+    /// 持有者就不是「别人正在装」。unix 上互斥由 `flock` 提供，内容只是诊断；
+    /// 非 unix 上按内容加年龄判残留，空与垃圾直接接管。
+    #[test]
+    fn a_lock_with_an_unknown_holder_is_taken_over() {
+        for content in [Some(""), Some("not-a-pid\n"), None] {
+            let root = unique_dir("unknown-holder");
+            let store = Store::open(&root);
+            let dir = root.join("store").join("probe");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(".lock");
+            match content {
+                Some(text) => std::fs::write(&path, text).unwrap(),
+                None => assert!(!path.exists()),
+            }
+            let lock = store
+                .lock_package("probe")
+                .unwrap_or_else(|error| panic!("lock content {content:?}: {error}"));
+            drop(lock);
+            assert!(
+                !path.exists(),
+                "lock content {content:?} left the lock file behind"
+            );
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    /// 目录在、清单不在：恢复不把指针指向它，已经指进去的摘掉；只报问题，
+    /// 记录与目录都不删。清单落地后下一次打开自动把指针修回来。
+    #[test]
+    fn a_generation_without_its_manifest_is_not_published() {
+        let root = unique_dir("incomplete");
+        let store = Store::open(&root);
+        let (generation, dir) = store.prepare_generation("probe").unwrap();
+        store.set_current("probe", &dir).unwrap();
+        store.save_record(&record("probe", generation)).unwrap();
+
+        let reopened = Store::open(&root);
+        let issues = reopened.recovery_issues();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("incomplete"),
+            "{}",
+            issues[0].message
+        );
+        assert_eq!(
+            reopened.current_dir("probe"),
+            None,
+            "pointer still points at a half-written generation"
+        );
+        assert!(!root.join("current").join("probe").exists());
+        // 不删数据：记录还在，代际目录还在，用户重装即可覆盖。
+        assert_eq!(reopened.record("probe").unwrap().generation, generation);
+        assert!(dir.is_dir());
+
+        std::fs::write(dir.join(crate::pkg::PLUGIN_FILE), "manifest_version = 1\n").unwrap();
+        let repaired = Store::open(&root);
+        assert!(
+            repaired.recovery_issues().is_empty(),
+            "{:?}",
+            repaired.recovery_issues()
+        );
+        assert_eq!(
+            repaired.current_dir("probe").as_deref(),
+            Some(dir.as_path())
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 记录临时文件跟持有者走：正在写的不能删，持有者已消失才当残留。
+    #[test]
+    fn record_temp_files_follow_their_writer() {
+        let root = unique_dir("record-temp");
+        let _store = Store::open(&root);
+        let records = root.join("records");
+        std::fs::create_dir_all(&records).unwrap();
+        let live = records.join(format!(".tmp-{}-0-probe.json", std::process::id()));
+        let dead = records.join(".tmp-4294967295-0-probe.json");
+        std::fs::write(&live, "half").unwrap();
+        std::fs::write(&dead, "half").unwrap();
+        let reopened = Store::open(&root);
+        assert!(live.exists(), "a live writer's temp file was removed");
+        assert!(!dead.exists(), "a dead writer's temp file survived");
+        assert!(
+            reopened.recovery_issues().is_empty(),
+            "{:?}",
+            reopened.recovery_issues()
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_dead_holders_lock_is_taken_over() {
         let root = unique_dir("lock");
