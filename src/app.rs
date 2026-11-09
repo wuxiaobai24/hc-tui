@@ -40,6 +40,7 @@ mod actions;
 mod agent_tree;
 mod bindings;
 mod branches;
+pub mod dialogs;
 mod form;
 pub(crate) mod interaction;
 mod keyboard;
@@ -533,6 +534,8 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// 按动作的 args schema 生成的参数表单；打开期间不吃其它分发。
     pub form: Option<ActionForm>,
+    /// 模块接管的对话框（与 `prompt`/`form` 互斥）。
+    pub dialogs: Option<dialogs::Dialog>,
     pub copy: Option<CopyMode>,
     /// 打开的 Chat 视图；覆盖内容区，但 Pane 照常 attach。
     pub chat: Option<Chat>,
@@ -728,6 +731,7 @@ impl App {
             workspace_mode: false,
             prompt: None,
             form: None,
+            dialogs: None,
             copy: None,
             chat: None,
             drag: None,
@@ -1704,6 +1708,10 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: String) {
+        if self.dialogs.is_some() {
+            self.paste_dialog(&text);
+            return;
+        }
         if let Some(form) = &mut self.form {
             if let Some(row) = form.focused_row_mut() {
                 let text = text.replace(['\r', '\n'], " ");
@@ -3153,6 +3161,9 @@ impl App {
     // ---------------------------------------------------------------- 动作
 
     fn ask(&mut self, kind: PromptKind, label: &str) {
+        if self.open_dialogs_prompt(&kind, label, "") {
+            return;
+        }
         self.prompt = Some(Prompt {
             label: label.to_string(),
             buffer: String::new(),
@@ -3166,6 +3177,9 @@ impl App {
 
     /// 带预填内容的提示行（重命名与新建 Tab 用）。
     fn ask_with(&mut self, kind: PromptKind, label: &str, initial: String) {
+        if self.open_dialogs_prompt_at(&kind, label, &initial, initial.len()) {
+            return;
+        }
         self.ask(kind, label);
         if let Some(prompt) = &mut self.prompt {
             prompt.cursor = initial.len();

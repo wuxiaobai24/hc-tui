@@ -1,0 +1,12 @@
+[mod]
+id = "dialogs"
+title = "Dialogs"
+place = "none"
+host_api = 1
+
+[overlay]
+kind = "dialog"
+
+[grants]
+host = ["run", "closeOverlay", "theme"]
+events = ["props.changed", "theme.changed", "action.finished"]
