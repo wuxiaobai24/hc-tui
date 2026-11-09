@@ -691,14 +691,15 @@ fn timeout_removes_the_entry() {
     install_toast(&config);
     let mut harness = Harness::new(config, 120, 40);
     harness.pump_until("toast surface opens", has_toast_surface);
-    harness.notify(&[notify_step("warn", "expiring entry", 1)]);
+    harness.notify(&[notify_step("warn", "expiring entry", 3)]);
     harness.pump_until("props arrive", |app| app.mod_notifications.len() == 1);
     harness.pump(10);
     let content = harness.content;
     let before = region_text(&harness.frame(), content);
     println!("before timeout:\n{}", tail_lines(&before, 4));
     assert!(before.contains("expiring entry"));
-    std::thread::sleep(std::time::Duration::from_millis(1300));
+    harness.pump_until("entry expires", |app| app.mod_notifications.is_empty());
+    // 队列清空后还要再泵几帧，模块才会收到新的 props 并擦掉那一条。
     harness.pump(30);
     let after = region_text(&harness.frame(), content);
     println!("after 1.3s:\n{}", tail_lines(&after, 4));
