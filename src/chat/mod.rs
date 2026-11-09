@@ -870,6 +870,8 @@ mod tests {
         assert_eq!(chat.blocks[1].text, "hello");
 
         // /new 之后目录里多一份更新的会话：Chat 跟过去。
+        // 选会话按 mtime 排序，文件系统时间戳精度不够时两者会相同，先拉开。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         let second = dir.join("2026-01-02T00-00-00Z_bbb.jsonl");
         append(
             &second,

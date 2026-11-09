@@ -2953,14 +2953,24 @@ mount(() => <View><Text>{result()}</Text></View>);
         let subscriber = crate::api_log::subscriber(root.clone());
         let mut app = app();
         probe(&mut app);
-        let screen = tracing::subscriber::with_default(subscriber, || frames(&mut app, 40));
+        let log_path = root
+            .join("logs")
+            .join(crate::api_log::CORE_PACKAGE)
+            .join(format!("{}.stdout.log", crate::api_log::CORE_REQUEST));
+        let screen = tracing::subscriber::with_default(subscriber, || {
+            let screen = frames(&mut app, 40);
+            // 慢机器上被拒调用可能晚几帧才走到分发路径：落到日志文件出现为止。
+            for _ in 0..200 {
+                if log_path.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                let _ = frames(&mut app, 1);
+            }
+            screen
+        });
         assert!(screen.contains("forbidden"), "screen: {screen}");
-        let log = std::fs::read_to_string(
-            root.join("logs")
-                .join(crate::api_log::CORE_PACKAGE)
-                .join(format!("{}.stdout.log", crate::api_log::CORE_REQUEST)),
-        )
-        .expect("the denied call wrote no log line");
+        let log = std::fs::read_to_string(&log_path).expect("the denied call wrote no log line");
         println!("{log}");
         assert!(
             log.lines().any(|line| line.contains("subsystem=\"mods\"")
