@@ -590,15 +590,14 @@ impl App {
         let Some(action) = self.plugins.action(name) else {
             return false;
         };
+        let target = args.get("_target").cloned().unwrap_or(Value::Null);
+        if self.open_dialogs_form(&action, target.clone()) {
+            return true;
+        }
         let Some(schema) = action.args.as_ref() else {
             return false;
         };
-        let form = ActionForm::build(
-            &action.name,
-            &action.title,
-            schema,
-            args.get("_target").cloned().unwrap_or(Value::Null),
-        );
+        let form = ActionForm::build(&action.name, &action.title, schema, target);
         if !form.has_fields() {
             return false;
         }

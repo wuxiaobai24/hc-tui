@@ -1,0 +1,9 @@
+{
+  "name": "Dialogs",
+  "id": "dev.hctui.mods.dialogs",
+  "version": "1.0.0",
+  "build": 1,
+  "capabilities": {
+    "host": ["run", "closeOverlay", "theme"]
+  }
+}

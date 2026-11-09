@@ -188,7 +188,8 @@ impl App {
                     .filter(|tag| !before.contains(*tag))
                     .cloned()
                     .collect();
-                let confirmation_pending = self.prompt.is_some() || self.form.is_some();
+                let confirmation_pending =
+                    self.prompt.is_some() || self.form.is_some() || self.dialogs.is_some();
                 let error = result.as_ref().err().map(|error| error.to_string());
                 let status = match (&result, confirmation_pending, in_flight.is_empty()) {
                     (Err(_), _, _) => "failed",
@@ -221,6 +222,9 @@ impl App {
                     });
                     if let Some(value) = value {
                         payload["value"] = value;
+                    }
+                    if let Some(error) = &error {
+                        payload["error"] = json!(error);
                     }
                     reply.resolve(payload);
                 }
@@ -505,6 +509,7 @@ impl App {
                     host::reject(reply, "not_found", "no such overlay");
                     return;
                 }
+                self.dialog_surface_closed(target);
                 if self.focused_mod.as_deref() == Some(target) {
                     self.focus_mod_surface(None);
                 }
@@ -2339,6 +2344,15 @@ impl App {
 
     /// 让外框里的模块区域与活表面一致；树未变时直接返回。
     pub fn sync_mod_surfaces(&mut self) {
+        // 对话框表面被别处关掉（重载、停用）时，冻结上下文一起丢掉。
+        if self
+            .dialogs
+            .as_ref()
+            .is_some_and(|dialog| self.mods.surface(&dialog.surface).is_none())
+        {
+            self.dialogs = None;
+            self.settle_mod_confirm("cancelled");
+        }
         if self.config.no_mods {
             return;
         }

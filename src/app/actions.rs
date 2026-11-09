@@ -262,6 +262,23 @@ impl App {
 
     pub fn execute_action(&mut self, name: &str, args: Value) -> Result<()> {
         anyhow::ensure!(args.is_object(), t("command arguments must be an object"));
+        // 模块接管的对话框：值回到冻结上下文，校验与派发走内置同一路径。
+        if self.dialogs.is_some() {
+            if let Some(command) = name.strip_prefix("dialogs.") {
+                return match command {
+                    "submit" => self.submit_dialog(&args),
+                    "resize" => {
+                        self.resize_dialog(&args);
+                        Ok(())
+                    }
+                    "cancel" => {
+                        self.cancel_dialog();
+                        Ok(())
+                    }
+                    _ => anyhow::bail!(t1("unknown action {}", name)),
+                };
+            }
+        }
         // picker 内部动作不出现在命令目录里，先于插件与模块命令解析。
         if let Some(rest) = name.strip_prefix("picker.") {
             return self.execute_picker_action(rest, args);
