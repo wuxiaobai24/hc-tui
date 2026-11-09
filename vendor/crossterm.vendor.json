@@ -1,0 +1,15 @@
+{
+  "crate": "crossterm",
+  "version": "0.29.0",
+  "source": "https://crates.io/api/v1/crates/crossterm/0.29.0/download",
+  "reason": "上游 0.29.0 与 master 的 mio 事件源在终端消失（读返回 EOF 或 EIO）时不退出，内层 loop 反复读同一个坏 fd，事件循环打满单核。",
+  "patched": {
+    "src/event/source/unix/mio.rs": [
+      "TTY_TOKEN 分支：read 返回 Ok(0) 时返回 UnexpectedEof，不再落回内层 loop",
+      "TTY_TOKEN 分支：WouldBlock / Interrupted 之外的读错误直接返回，不再落回内层 loop"
+    ],
+    "src/terminal/sys/unix.rs": [
+      "去掉 window_size 里多出的一对括号（vendor 成 path 依赖后 clippy 会看到这个 warning）"
+    ]
+  }
+}

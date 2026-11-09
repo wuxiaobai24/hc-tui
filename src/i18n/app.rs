@@ -281,6 +281,7 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "other clients" => Some("其他客户端"),
         "command + JSON arguments" => Some("命令加 JSON 参数"),
         "Command socket: {}" => Some("命令套接字：{}"),
+        "Terminal closed: {}" => Some("终端已关闭：{}"),
         "blocked" => Some("需要你"),
         "error" => Some("出错"),
         "done" => Some("完成"),

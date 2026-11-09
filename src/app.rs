@@ -110,6 +110,8 @@ const RESTORE_TIMEOUT: Duration = Duration::from_millis(1500);
 const DOC_NAME: &str = "hctui-layout-v1";
 /// 事件循环检查一次退出信号的间隔；SIGTERM/SIGHUP 只置标志。
 const TERMINATION_POLL: Duration = Duration::from_millis(50);
+/// 每次等输入的下限。截止时间已过期、或终端已经消失时也不能紧循环。
+const INPUT_BACKOFF: Duration = Duration::from_millis(1);
 const TOAST_LIFETIME: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7514,6 +7516,38 @@ fn termination_requested() -> bool {
     TERMINATION_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// 等一次输入事件。`Err` 表示终端已经不可读（EOF / EIO / 其他读错误），
+/// 调用方走正常退出路径；`Ok(None)` 只是这次等待超时。
+fn input_event(wait: Duration) -> std::io::Result<Option<Event>> {
+    if !event::poll(wait)? {
+        return Ok(None);
+    }
+    event::read().map(Some)
+}
+
+/// 终端消失（pty 被关闭：读返回 EOF/EIO，写返回 EIO）之后的统一收尾：把 stderr 挪开
+/// （已经没人读，写它会让 `eprintln!` panic）、记一条提示，然后走 `q` 的同一条退出路径，
+/// 而不是把错误抛出去、跳过状态保存。返回退出原因。
+fn lost_terminal(app: &mut App, error: &dyn std::fmt::Display) -> String {
+    crate::tui::detach_stderr();
+    let reason = error.to_string();
+    app.note = t1("Terminal closed: {}", &reason);
+    app.request_quit();
+    reason
+}
+
+/// 一次输入事件派发。
+fn dispatch_input(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) => app.on_key(key),
+        Event::Paste(text) => app.on_paste(text),
+        Event::Mouse(mouse) => app.on_mouse(mouse),
+        Event::FocusGained => app.route_focus_to_mods(true),
+        Event::FocusLost => app.route_focus_to_mods(false),
+        Event::Resize(_, _) => app.mark_dirty(),
+    }
+}
+
 pub fn run(config: Config) -> Result<()> {
     crate::i18n::set_zh(config.zh());
     let mouse = config.mouse_capture;
@@ -7536,6 +7570,8 @@ pub fn run(config: Config) -> Result<()> {
     let mut graphics = crate::term::graphics::Graphics::default();
     let mut next_draw = Instant::now();
     let mut title = String::new();
+    // 终端消失的原因；有值时不再读输入、不再画帧，只等收尾。
+    let mut terminal_lost: Option<String> = None;
 
     loop {
         app.pump();
@@ -7545,15 +7581,15 @@ pub fn run(config: Config) -> Result<()> {
         if let Some(deadline) = app.wake_at() {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
-        wait = wait.min(TERMINATION_POLL);
-        if event::poll(wait)? {
-            match event::read()? {
-                Event::Key(key) => app.on_key(key),
-                Event::Paste(text) => app.on_paste(text),
-                Event::Mouse(mouse) => app.on_mouse(mouse),
-                Event::FocusGained => app.route_focus_to_mods(true),
-                Event::FocusLost => app.route_focus_to_mods(false),
-                Event::Resize(_, _) => app.mark_dirty(),
+        wait = wait.clamp(INPUT_BACKOFF, TERMINATION_POLL);
+        if terminal_lost.is_some() {
+            // 终端已经没了：每次读都会立刻失败，退避而不是空转。
+            std::thread::sleep(INPUT_BACKOFF);
+        } else {
+            match input_event(wait) {
+                Ok(Some(event)) => dispatch_input(&mut app, event),
+                Ok(None) => {}
+                Err(error) => terminal_lost = Some(lost_terminal(&mut app, &error)),
             }
         }
         if termination_requested() && !app.should_quit() {
@@ -7562,21 +7598,32 @@ pub fn run(config: Config) -> Result<()> {
         app.pump();
         app.tick();
 
-        if app.take_dirty() || Instant::now() >= next_draw {
+        if terminal_lost.is_none() && (app.take_dirty() || Instant::now() >= next_draw) {
             use crossterm::SynchronizedUpdate;
-            std::io::stdout().sync_update(|output| -> Result<()> {
-                terminal.draw(|frame| ui::draw(frame, &mut app))?;
-                graphics.draw(&mut app, output)?;
-                Ok(())
-            })??;
-            next_draw = Instant::now() + frame;
-            if let Some(next) = app.window_title() {
-                if next != title {
-                    title = next.clone();
-                    let mut stdout = std::io::stdout();
-                    let _ =
-                        crossterm::execute!(stdout, crossterm::terminal::SetTitle(title.clone()));
+            let painted: Result<()> = std::io::stdout()
+                .sync_update(|output| -> Result<()> {
+                    terminal.draw(|frame| ui::draw(frame, &mut app))?;
+                    graphics.draw(&mut app, output)?;
+                    Ok(())
+                })
+                .map_err(anyhow::Error::from)
+                .and_then(|painted| painted);
+            match painted {
+                Ok(()) => {
+                    next_draw = Instant::now() + frame;
+                    if let Some(next) = app.window_title() {
+                        if next != title {
+                            title = next.clone();
+                            let mut stdout = std::io::stdout();
+                            let _ = crossterm::execute!(
+                                stdout,
+                                crossterm::terminal::SetTitle(title.clone())
+                            );
+                        }
+                    }
                 }
+                // 写终端失败同样是终端消失（pty 被关闭），走同一条正常退出路径。
+                Err(error) => terminal_lost = Some(lost_terminal(&mut app, &error)),
             }
         }
         app.reconcile();
