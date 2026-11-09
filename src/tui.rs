@@ -47,6 +47,21 @@ pub fn restore() -> Result<()> {
 /// Drop 时尽力恢复。放在 `init()` 之后立即创建。
 pub struct Guard;
 
+/// 终端消失后 stderr 已经没有读者：`eprintln!` 写失败会 panic（ratatui 的
+/// `Terminal::drop` 就会打一行「光标恢复失败」）。把它接到 `/dev/null`，收尾期间
+/// 的提示不会再变成崩溃。
+pub fn detach_stderr() {
+    // SAFETY: 只把本进程的 fd 2 换成 /dev/null；开不了 /dev/null 就保持原样。
+    unsafe {
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+        if devnull == -1 {
+            return;
+        }
+        libc::dup2(devnull, libc::STDERR_FILENO);
+        libc::close(devnull);
+    }
+}
+
 impl Drop for Guard {
     fn drop(&mut self) {
         let _ = restore();

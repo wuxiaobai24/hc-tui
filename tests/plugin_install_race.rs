@@ -5,13 +5,46 @@
 //! 一个装完另一个才拿到锁，被 SIGKILL 的持有者留下的锁由下一个进程接管。
 
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_hc-tui");
 const ID: &str = "dev.example.race";
 /// 复制负载足够大，让两个安装者的复制窗口真的重叠。
 const PAYLOAD: usize = 48 * 1024 * 1024;
+
+/// `spawn()` 出来的子进程：`Drop` 里一定 kill + wait，用例 panic 也不会留下孤儿。
+struct Spawned {
+    child: Option<Child>,
+}
+
+impl Spawned {
+    fn spawn(command: &mut Command) -> Self {
+        let child = command.spawn().expect("installer starts");
+        Self { child: Some(child) }
+    }
+
+    fn child(&mut self) -> &mut Child {
+        self.child.as_mut().expect("the child is still owned here")
+    }
+
+    fn wait_with_output(mut self) -> Output {
+        self.child
+            .take()
+            .expect("the child is still owned here")
+            .wait_with_output()
+            .expect("the installer finishes")
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 struct Workspace {
     root: PathBuf,
@@ -147,25 +180,24 @@ fn killed_status(output: &Output) -> String {
 fn two_processes_installing_the_same_plugin_serialize() {
     let workspace = Workspace::new("race");
     // 两个进程同时起跑，各自都是完整的 `hc-tui plugins install`。
-    let first = workspace
-        .install()
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("first installer starts");
-    let second = workspace
-        .install()
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("second installer starts");
-    let mut first = first;
+    let mut first = Spawned::spawn(
+        workspace
+            .install()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let second = Spawned::spawn(
+        workspace
+            .install()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     assert!(
-        first.try_wait().unwrap().is_none(),
+        first.child().try_wait().unwrap().is_none(),
         "the first installer already exited before the second one started"
     );
-    let first = first.wait_with_output().unwrap();
-    let second = second.wait_with_output().unwrap();
+    let first = first.wait_with_output();
+    let second = second.wait_with_output();
 
     // 本用例写死的判定：两个安装者都必须退出码 0。锁超时（30s）不算通过，
     // 那条分支由 `a_killed_installer_leaves_a_lock_the_next_process_takes_over` 覆盖。
@@ -212,12 +244,12 @@ fn two_processes_installing_the_same_plugin_serialize() {
 #[test]
 fn a_killed_installer_leaves_a_lock_the_next_process_takes_over() {
     let workspace = Workspace::new("killed");
-    let mut child = workspace
-        .install()
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("installer starts");
+    let mut child = Spawned::spawn(
+        workspace
+            .install()
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let lock = workspace.package_dir().join(".lock");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !lock.exists() {
@@ -227,8 +259,8 @@ fn a_killed_installer_leaves_a_lock_the_next_process_takes_over() {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    child.kill().expect("installer is killed");
-    let status = child.wait().unwrap();
+    child.child().kill().expect("installer is killed");
+    let status: ExitStatus = child.child().wait().unwrap();
     // SIGKILL 不执行 `PackageLock` 的 Drop：锁文件带着死掉的持有者 PID 留下。
     assert!(
         status.code().is_none(),

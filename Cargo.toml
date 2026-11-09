@@ -48,6 +48,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 unicode-width = "0.2"
 
+# 终端输入读取的补丁：vendor/crossterm 修了上游「pty 消失后事件循环空转」的读路径。
+# 补丁内容与理由见 vendor/crossterm.vendor.json。
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
+
 [dev-dependencies]
 nsh-bundler = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false }
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "951556dc1af6f5acf593cfd28640a0fd467b71e3", default-features = false }

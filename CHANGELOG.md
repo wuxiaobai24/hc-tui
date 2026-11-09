@@ -3,6 +3,7 @@
 ## 未发布
 
 - 发行：macOS Intel（`x86_64-apple-darwin`）不再构建预编译包（GitHub Intel runner 构建时间过长、实际使用面很小），`install.sh` 在该平台给出明确提示并引导从源码构建；CI 的发行矩阵与 `docs/release.md`、站点安装页同步。
+- 修复：pty 消失（终端关掉、父进程没了）之后事件循环在紧循环里打满单核。`vendor/crossterm` 的补丁让终端读返回 EOF 或 `WouldBlock` 之外的错误时把错误交回上层，`hc-tui` 读到这类错误就走与 `q` 相同的退出路径（保存状态、恢复键盘协议）；每次等输入都有 1ms 下限，退出期间不再往已经没了的 stderr 写（ratatui 的 `Terminal::drop` 会因此 panic）。新增 `tests/pty_gone.rs`（关掉 master，断言 5 秒内自行退出）与 `scripts/check-orphans.sh`（全套测试后查 `ppid=1` 且 `%CPU>50` 的 hc-tui）。
 
 ## 0.5.0 — 2026-11-09
 
