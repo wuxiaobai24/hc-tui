@@ -1,27 +1,30 @@
 //! `hc-tui config check|reset-keys|dump|init`：配置文件诊断、`[keys]` 段重置、
 //! 整份配置导出与默认配置落盘。
 //!
-//! `check` 只读配置文件，错误带 `文件:行:列`；有错误退出 1，只有警告退出 2，
-//! 干净时退出 0。`reset-keys` 先备份再把 `[keys]` 段换成默认键位，其它段原样
+//! `check` 只读配置文件，错误带 `文件:行:列`；有错误退出 1（末行带
+//! `(code: config_invalid)`），只有警告或干净都退出 0。`reset-keys` 先备份再把 `[keys]` 段换成默认键位，其它段原样
 //! 保留；不带 `--yes` 时只打印计划，不落盘。`dump` 与 `init` 见 [`crate::cli::config_dump`]。
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hc_tui::config::{self, Config, Keys};
+use hc_tui::error::{fail, usage, ErrorCode};
 use hc_tui::i18n::{t, t1};
 
 /// `config` 的用法行；`--help` 与未知子命令共用。
-fn usage() -> &'static str {
-    "usage: hc-tui config check|reset-keys [--config <path>] [--yes]\n       hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]\n       hc-tui config init [--path <path>] [--force]"
+fn usage_line() -> &'static str {
+    "usage: hc-tui config check|reset-keys [--config <path>] [--yes]\n       \
+     hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]\n       \
+     hc-tui config init [--path <path>] [--force]"
 }
 
 pub fn run(args: &[String]) -> Result<()> {
     let Some(sub) = args.first().map(String::as_str) else {
-        anyhow::bail!("{}", usage());
+        return Err(usage(usage_line()));
     };
     if crate::wants_help(sub) || args[1..].iter().any(|arg| crate::wants_help(arg)) {
-        println!("{}", usage());
+        println!("{}", crate::group_help("config", sub));
         return Ok(());
     }
     match sub {
@@ -29,7 +32,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "reset-keys" => reset_keys(&args[1..]),
         "dump" => crate::cli::config_dump::dump_command(&args[1..]),
         "init" => crate::cli::config_dump::init_command(&args[1..]),
-        other => anyhow::bail!("{} (unknown: {})", usage(), other),
+        other => Err(usage(format!("{} (unknown: {})", usage_line(), other))),
     }
 }
 
@@ -46,13 +49,14 @@ fn parse_args(args: &[String]) -> Result<Args> {
         match args[index].as_str() {
             "--config" => {
                 index += 1;
-                parsed.config =
-                    Some(PathBuf::from(args.get(index).cloned().ok_or_else(
-                        || anyhow::anyhow!(t("--config needs a value")),
-                    )?));
+                parsed.config = Some(PathBuf::from(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| usage(t("--config needs a value")))?,
+                ));
             }
             "--yes" | "-y" => parsed.yes = true,
-            other => anyhow::bail!(t1("unknown option: {}", other)),
+            other => return Err(usage(t1("unknown option: {}", other))),
         }
         index += 1;
     }
@@ -81,7 +85,10 @@ fn check(args: &[String]) -> Result<()> {
             "Possible fix: cp {path} {path}.bak && hc-tui --default-config > {path}",
             path = path.display()
         );
-        std::process::exit(1);
+        return Err(fail(
+            ErrorCode::ConfigInvalid,
+            format!("{} 处配置错误未修正", config.errors.len()),
+        ));
     }
     let theme = match config.theme_name_position {
         Some(position) => format!(
@@ -130,7 +137,6 @@ fn check(args: &[String]) -> Result<()> {
     let count = conflicts.len() + config.warnings.len();
     if count > 0 {
         println!("{count} 个警告");
-        std::process::exit(2);
     }
     Ok(())
 }
@@ -140,8 +146,7 @@ fn reset_keys(args: &[String]) -> Result<()> {
     let path = parsed
         .config
         .unwrap_or_else(|| Config::default().config_path);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+    let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
     let Some(plan) = config::reset_keys(&text) else {
         println!("{}: 没有 [keys] 段，无需重置", path.display());
         return Ok(());
@@ -157,10 +162,8 @@ fn reset_keys(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let backup = backup_path(&path);
-    std::fs::write(&backup, &text)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", backup.display()))?;
-    std::fs::write(&path, &plan.text)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+    std::fs::write(&backup, &text).with_context(|| backup.display().to_string())?;
+    std::fs::write(&path, &plan.text).with_context(|| path.display().to_string())?;
     println!("已备份 {}", backup.display());
     println!("已重置 {}", path.display());
     Ok(())

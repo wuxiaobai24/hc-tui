@@ -4,12 +4,16 @@
 //! 与 `commands`），取不到就静默留空，不阻塞补全。
 
 use anyhow::Result;
+use hc_tui::error::usage;
 
 /// 支持的 shell，按 `hc-tui completion` 无参数时的打印顺序。
 const SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 
 /// `hc-tui completion [<shell>]`：带 shell 打印脚本，不带参数列出支持的 shell。
 pub fn run(args: &[String]) -> Result<()> {
+    if args.iter().any(|arg| crate::wants_help(arg)) {
+        return crate::print_help("completion");
+    }
     let Some(shell) = args.first().map(String::as_str) else {
         println!("usage: hc-tui completion <shell>");
         println!("shells: {}", SHELLS.join(" "));
@@ -19,7 +23,11 @@ pub fn run(args: &[String]) -> Result<()> {
         "zsh" => print!("{ZSH}"),
         "bash" => print!("{BASH}"),
         "fish" => print!("{FISH}"),
-        other => anyhow::bail!("usage: hc-tui completion zsh|bash|fish (unknown: {other})"),
+        other => {
+            return Err(usage(format!(
+                "usage: hc-tui completion zsh|bash|fish (unknown: {other})"
+            )))
+        }
     }
     Ok(())
 }

@@ -50,11 +50,25 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         "unknown level {}; use info, warn or error" => {
             "未知级别 {}；可用 info、warn、error"
         }
-        "no hc-tui window is running on session {}; notification not delivered (exit 3)." => {
-            "会话 {} 上没有运行中的 hc-tui 窗口；通知未送达（退出码 3）。"
+        "no hc-tui window is running on session {}; notification not delivered" => {
+            "会话 {} 上没有运行中的 hc-tui 窗口；通知未送达"
         }
         "the core doc stores layout only, so there is no place to keep the notification; start hc-tui and retry" => {
             "core 文档只存布局，没有保存通知的位置；先启动 hc-tui 再重试"
+        }
+        "--seconds needs a number" => "--seconds 需要一个数字",
+        "a request ID is required" => "需要请求 ID",
+        "a terminal or name is required" => "需要终端地址或名字",
+        // `--help` 的输出契约段与 reload 结果的提示。
+        "output:" => "输出:",
+        "human form" => "人类形态",
+        "exit codes" => "退出码",
+        "0 ok / 1 failure / 2 usage / 3 core unavailable" => {
+            "0 成功 / 1 失败 / 2 用法 / 3 core 不可用"
+        }
+        "common errors" => "常见错误",
+        "the old configuration is still in use; fix the problems above and rerun" => {
+            "当前使用的是旧配置；修好上面的问题后重跑这条命令"
         }
         // `probe` 的握手输出：字段名保留，值前的对齐不变。
         "hc {} (generation {})" => "hc {}（generation {}）",

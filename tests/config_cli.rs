@@ -75,7 +75,8 @@ fn key_conflicts_warn_without_failing() {
         &["config", "check", "--config", path.to_str().unwrap()],
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(2), "{stdout}");
+    // 退出码契约（docs/cli-errors.md）：2 只表示用法错误，所以只有警告时退出 0。
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(
         stdout.contains("键位冲突 prefix+q：detach、new_tab"),
         "{stdout}"

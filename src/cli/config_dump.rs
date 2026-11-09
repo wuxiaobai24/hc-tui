@@ -7,8 +7,9 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hc_tui::config::Config;
+use hc_tui::error::{exists, usage, ErrorCode};
 
 pub use hc_tui::config_dump::{dump, Mode};
 
@@ -25,17 +26,20 @@ pub fn dump_command(args: &[String]) -> Result<()> {
             "--minimal" => set_mode(&mut mode, Mode::Minimal)?,
             "--config" => config_path = Some(value(args, &mut index, "--config")?),
             "--out" => out = Some(value(args, &mut index, "--out")?),
-            other => anyhow::bail!("unknown option: {other}"),
+            other => return Err(usage(format!("unknown option: {other}"))),
         }
         index += 1;
     }
     let mode = mode.unwrap_or(Mode::Effective);
     let config = Config::load(config_path);
     if !config.errors.is_empty() {
-        anyhow::bail!(
-            "配置文件有 {} 个错误，先跑 `hc-tui config check` 修掉",
-            config.errors.len()
-        );
+        return Err(hc_tui::error::fail(
+            ErrorCode::ConfigInvalid,
+            format!(
+                "配置文件有 {} 个错误，先跑 `hc-tui config check` 修掉",
+                config.errors.len()
+            ),
+        ));
     }
     let text = dump(&config, mode);
     let Some(path) = out else {
@@ -56,7 +60,7 @@ pub fn init_command(args: &[String]) -> Result<()> {
         match args[index].as_str() {
             "--path" => path = Some(value(args, &mut index, "--path")?),
             "--force" => force = true,
-            other => anyhow::bail!("unknown option: {other}"),
+            other => return Err(usage(format!("unknown option: {other}"))),
         }
         index += 1;
     }
@@ -64,16 +68,14 @@ pub fn init_command(args: &[String]) -> Result<()> {
     let text = dump(&Config::default(), Mode::Defaults);
     if target.exists() {
         if !force {
-            anyhow::bail!(
+            return Err(exists(format!(
                 "{} 已存在；加 --force 覆盖（覆盖前会备份成 .bak.<时间戳>）",
                 target.display()
-            );
+            )));
         }
-        let original = std::fs::read(&target)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", target.display()))?;
+        let original = std::fs::read(&target).with_context(|| target.display().to_string())?;
         let backup = crate::cli::config::backup_path(&target);
-        std::fs::write(&backup, original)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", backup.display()))?;
+        std::fs::write(&backup, original).with_context(|| backup.display().to_string())?;
         println!("已备份 {}", backup.display());
     }
     write_file(&target, &text)?;
@@ -83,7 +85,7 @@ pub fn init_command(args: &[String]) -> Result<()> {
 
 fn set_mode(current: &mut Option<Mode>, mode: Mode) -> Result<()> {
     if current.is_some() {
-        anyhow::bail!("--effective / --defaults / --minimal 只能选一个");
+        return Err(usage("--effective / --defaults / --minimal 只能选一个"));
     }
     *current = Some(mode);
     Ok(())
@@ -93,7 +95,7 @@ fn value(args: &[String], index: &mut usize, name: &str) -> Result<PathBuf> {
     *index += 1;
     let value = args
         .get(*index)
-        .ok_or_else(|| anyhow::anyhow!("{name} needs a value"))?;
+        .ok_or_else(|| usage(format!("{name} needs a value")))?;
     Ok(PathBuf::from(value))
 }
 
@@ -101,10 +103,13 @@ fn value(args: &[String], index: &mut usize, name: &str) -> Result<PathBuf> {
 fn write_file(path: &std::path::Path, text: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.is_dir() {
-            anyhow::bail!("{}: 目录不存在", parent.display());
+            return Err(hc_tui::error::fail(
+                ErrorCode::FileNotFound,
+                format!("{}: 目录不存在", parent.display()),
+            ));
         }
     }
-    std::fs::write(path, text).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))
+    std::fs::write(path, text).with_context(|| path.display().to_string())
 }
 
 fn mode_label(mode: Mode) -> &'static str {
