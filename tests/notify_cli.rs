@@ -12,7 +12,9 @@ fn root(tag: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
-    let root = std::env::temp_dir().join(format!("hctui-notify-cli-{tag}-{unique}"));
+    // 控制 socket 路径上限 104 字节（macOS）：`env::temp_dir()` 在 macOS 上是
+    // `/var/folders/…/T`，加 `state/control-<hash>.sock` 就超限，所以用例起短根。
+    let root = std::path::Path::new("/tmp").join(format!("hctui-notify-cli-{tag}-{unique}"));
     std::fs::create_dir_all(root.join("config").join("hc-tui")).unwrap();
     std::fs::write(root.join("config").join("hc-tui").join("config.toml"), "").unwrap();
     std::fs::create_dir_all(root.join("state")).unwrap();

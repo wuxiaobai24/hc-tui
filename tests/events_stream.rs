@@ -12,11 +12,13 @@ use hc_tui::config::Config;
 use hc_tui::control::Server;
 
 fn config() -> Config {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let root = std::env::temp_dir().join(format!("hctui-events-{unique}"));
+    // unix socket 路径上限 104 字节（macOS）：`env::temp_dir()` 在 macOS 上是
+    // `/var/folders/…/T`，再加会话根与 `state/control-<hash>.sock` 就超限，
+    // 所以用例自己起短根。
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root =
+        std::path::Path::new("/tmp").join(format!("hctui-ev-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(root.join("state")).unwrap();
     Config {
         config_path: root.join("config").join("config.toml"),
