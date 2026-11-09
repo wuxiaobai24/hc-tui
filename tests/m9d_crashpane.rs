@@ -48,12 +48,15 @@ mount(() => <View><Text>unreachable</Text></View>);
 "#;
 
 fn unique_dir(tag: &str) -> PathBuf {
+    // macOS 的 SystemTime 精度是微秒，并行的用例可能拿到同一个值；加计数器兜底。
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
     std::env::temp_dir().join(format!(
-        "hctui-crashpane-{tag}-{}-{unique}",
+        "hctui-crashpane-{tag}-{}-{unique}-{serial}",
         std::process::id()
     ))
 }
@@ -226,9 +229,11 @@ fn crashing_status_region_leaves_an_error_box_and_recovers_on_r() {
         1,
         "one log line per module and error: {log}"
     );
+    // 按模块筛：同一份崩溃源可能同时装在别的表面上，每个模块各一条才算对。
     let toasts = app
         .mod_notifications
         .iter()
+        .filter(|item| item.text.starts_with("mod status:"))
         .filter(|item| item.text.contains("crashpane probe"))
         .count();
     assert_eq!(toasts, 1, "one toast per module and error");
