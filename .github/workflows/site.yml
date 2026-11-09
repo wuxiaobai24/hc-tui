@@ -1,0 +1,68 @@
+name: site
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    env:
+      SITE_URL: https://blog.codeand.fun
+      SITE_BASE: /hc-tui/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: build
+        run: npm run build
+
+      # 子路径部署最容易翻车的是链接：抽查产物里不能出现从根开始的绝对链接。
+      - name: check no root-absolute internal links
+        run: |
+          set -euo pipefail
+          if grep -rEo 'href="/[^"]*"' dist --include='*.html' | grep -vE 'href="//' | grep -v '/hc-tui/'; then
+            echo "发现从根开始的绝对链接，子路径部署会 404" >&2
+            exit 1
+          fi
+          echo "ok: 站内链接均为相对路径"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
