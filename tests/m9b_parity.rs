@@ -116,14 +116,26 @@ fn config_in(root: &Path, theme: Theme, fixture: Fixture) -> Config {
 
 /// 把 TSX 源码编译成包并装进临时配置目录。
 fn install_module(config: &Config, module: &RegionMod, capabilities: &str) {
+    install_source(config, module, module.tsx, module.manifest, capabilities);
+}
+
+/// 同上，源码与清单由调用方给：迟到 props 用例要把标记文件路径编进源码，
+/// 并给清单加上 `exec` 授权（模块落笔前 `touch` 标记文件）。
+fn install_source(
+    config: &Config,
+    module: &RegionMod,
+    tsx: &str,
+    manifest: &str,
+    capabilities: &str,
+) {
     let staging = unique_dir(&format!("src-{}", module.id));
     std::fs::create_dir_all(staging.join("dist")).expect("staging dist");
-    std::fs::write(staging.join("hctui.toml"), module.manifest).expect("staging manifest");
+    std::fs::write(staging.join("hctui.toml"), manifest).expect("staging manifest");
     std::fs::write(staging.join("nsh.json"), module.nsh).expect("staging nsh.json");
     // `nsh build` 的产物：运行期按这份能力表判定 host 方法，缺了就是未授予。
     std::fs::write(staging.join("dist").join("capabilities.json"), capabilities)
         .expect("staging capabilities");
-    let code = nsh_bundler::compile_module("App.tsx", module.tsx, &[]).expect("module compiles");
+    let code = nsh_bundler::compile_module("App.tsx", tsx, &[]).expect("module compiles");
     std::fs::write(staging.join("dist").join("bundle.js"), code).expect("staging bundle");
     hc_tui::mods::store::install_local(config, &staging).expect("module installs");
     std::fs::remove_dir_all(staging).ok();
@@ -437,16 +449,21 @@ fn default_theme_color_gap_is_measurable() {
     }
 }
 
-/// 首份 props 延迟 500 ms 才生效的侧栏：在这之前一行都不画。
+/// 首份 props 延迟 500 ms 才生效的侧栏：在这之前一行都不画，落笔前落下标记文件。
 const DELAYED_PROPS_TSX: &str = r##"
 import { host, mount, signal, Text, View } from "nsh";
 const params: any = (host as any).params ?? {};
 const props = signal<any>({});
 const ready = signal(false);
-// 首份 props 迟到 500 ms：等到了才落笔。
+// 首份 props 迟到 500 ms：等到了才落笔。落笔前先 `touch` 标记文件，测试据此
+// 判定「模块已经拿到 props」，不拿墙钟窗口当同步原语。
 setTimeout(() => {
-  props.set(params.props ?? {});
-  ready.set(true);
+  host.call("exec", { argv: ["touch", __HC_PROPS_MARKER__], cwd: "/" })
+    .catch(() => {})
+    .then(() => {
+      props.set(params.props ?? {});
+      ready.set(true);
+    });
 }, 500);
 mount(() => (
   <View style={{ flex: 1 }}>
@@ -547,7 +564,12 @@ fn delayed_first_props_keeps_the_builtin_region() {
     let expected = region_text(&builtin, sidebar);
 
     let config = config_in(&root, theme, PLAIN);
-    install_module(
+    // 手写握手：模块拿到 props 后 `touch` 这个标记文件，测试按「宿主记账的
+    // 接手状态 + 标记是否落下」判定，不拿 400 ms 窗口当同步原语。
+    let marker = root.join("props-received");
+    let tsx = DELAYED_PROPS_TSX.replace("__HC_PROPS_MARKER__", &format!("{marker:?}"));
+    let manifest = SIDEBAR_MANIFEST.replace("host = [\"state\"]", "host = [\"state\", \"exec\"]");
+    install_source(
         &config,
         &RegionMod {
             id: "sidebar",
@@ -555,35 +577,46 @@ fn delayed_first_props_keeps_the_builtin_region() {
             manifest: SIDEBAR_MANIFEST,
             nsh: SIDEBAR_NSH,
         },
-        "{\"host\":[\"state\"]}",
+        &tsx,
+        &manifest,
+        "{\"host\":[\"state\",\"exec\"]}",
     );
     let mut app = app_in(config, PLAIN);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-    // 首份 props 到达之前每画一帧都必须是内置内容。
-    let started = std::time::Instant::now();
-    let deadline = std::time::Duration::from_millis(400);
+    // 模块落笔之前每画一帧都必须是内置内容：循环的退出条件是宿主记账的
+    // 「模块已按交付的 props 落过笔」，不是墙钟窗口。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut frames = 0;
-    while started.elapsed() < deadline {
+    while !app.mod_ready("sidebar") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "模块没有在 30 秒内落笔，标记文件：{marker:?}"
+        );
         terminal
             .draw(|frame| ui::draw(frame, &mut app))
             .expect("draw");
         app.pump_mods();
+        if app.mod_ready("sidebar") {
+            break;
+        }
         let shown = region_text(terminal.backend().buffer(), sidebar);
         println!(
-            "frame {frames:02} builtin={} {:?}",
+            "frame {frames:02} props_marker={} builtin={} {:?}",
+            marker.exists(),
             shown == expected,
             shown.lines().nth(2).unwrap_or("")
         );
         assert_eq!(
             shown, expected,
-            "frame {frames}: region left the builtin render"
+            "frame {frames}: region left the builtin render before the takeover"
         );
         frames += 1;
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
+    println!("builtin frames before takeover: {frames}");
     assert!(
-        frames > 5,
-        "the delay window must cover several frames, got {frames}"
+        marker.exists(),
+        "模块接手了区域却没有落下 props 标记：{marker:?}"
     );
     // 500 ms 之后模块落笔，区域换成模块自己的内容。
     support::pump_until_ready(&mut app, &mut terminal, &["sidebar"]);

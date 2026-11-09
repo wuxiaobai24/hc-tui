@@ -363,11 +363,13 @@ fn toast_ticket_queue_dismiss_and_timeout() {
         toast_props(&app, &toast)["toasts"].as_array().map(Vec::len),
         Some(1)
     );
+    // 到期不靠真实等满 1 秒：把宿主时钟往前拨 1.5 秒，`tick` 按拨后的时刻判定。
+    app.advance_clock(std::time::Duration::from_millis(1500));
     assert!(
-        wait_until(&mut app, 5.0, |app| {
+        wait_until(&mut app, 20.0, |app| {
             app.mod_notifications.is_empty() && toasts_len(app, &toast) == Some(0)
         }),
-        "1 秒超时后队列与提示表面都应清空"
+        "时钟拨过 1 秒超时后队列与提示表面都应清空"
     );
     println!(
         "after timeout: queue = {} props = {}",
@@ -570,10 +572,14 @@ fn toast_ticket_notify_routing() {
     let second = app
         .mods_open("toast", SurfacePlace::Toast, json!({}), None, None, None)
         .unwrap();
-    pump(&mut app, 40);
     // 未指定 surface 走默认（第一条提示表面）。
     app.push_mod_notification("default", "", "info", 30, None, None, None, false);
-    pump(&mut app, 20);
+    assert!(
+        wait_until(&mut app, 20.0, |app| {
+            toasts_len(app, &first) == Some(1) && toasts_len(app, &second) == Some(0)
+        }),
+        "默认提示表面没有收到 props"
+    );
     println!(
         "default: first = {}, second = {}",
         toast_props(&app, &first)["toasts"],
@@ -591,7 +597,12 @@ fn toast_ticket_notify_routing() {
     );
     // 指定 surface 只投给那一条。
     app.push_mod_notification("routed", "", "warn", 30, None, None, Some(&second), false);
-    pump(&mut app, 20);
+    assert!(
+        wait_until(&mut app, 20.0, |app| {
+            toasts_len(app, &first) == Some(1) && toasts_len(app, &second) == Some(1)
+        }),
+        "指定提示表面没有收到 props"
+    );
     println!(
         "routed to {}: first = {}, second = {}",
         second,
@@ -621,7 +632,12 @@ fn toast_ticket_package_place_opens_surface() {
         .unwrap()
         .replace("host_api = 1", "place = \"toast\"\nhost_api = 1");
     std::fs::write(&manifest, text).unwrap();
-    pump(&mut app, 80);
+    assert!(
+        wait_until(&mut app, 20.0, |app| app.mods.surfaces.iter().any(
+            |surface| surface.mod_id == "toast" && surface.place == SurfacePlace::Toast
+        )),
+        "清单声明 place = \"toast\" 的包没有自动打开提示表面"
+    );
     let surfaces: Vec<(String, SurfacePlace)> = app
         .mods
         .surfaces

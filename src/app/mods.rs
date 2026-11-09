@@ -1214,7 +1214,7 @@ impl App {
             created: crate::store::now_unix(),
             created_ms: crate::store::now_millis(),
             timeout_ms,
-            since: std::time::Instant::now(),
+            since: self.clock_now(),
         });
         // 队列只保留最近 200 条，旧条目被挤掉后 `dismiss` 返回 `not_found`。
         while self.mod_notifications.len() > 200 {
@@ -1228,8 +1228,7 @@ impl App {
             self.toast = Some(crate::app::Toast {
                 text,
                 level: level.to_string(),
-                until: std::time::Instant::now()
-                    + std::time::Duration::from_millis(timeout_ms.max(1)),
+                until: self.clock_now() + std::time::Duration::from_millis(timeout_ms.max(1)),
             });
             self.toast_notification = Some(id.clone());
         }

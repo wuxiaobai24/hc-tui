@@ -606,6 +606,9 @@ pub struct App {
     next_workspace: u32,
     restore_pending: bool,
     restore_since: Instant,
+    /// 宿主时钟的测试偏移：登记与到期都按 `Instant::now() + 偏移` 取值。
+    /// 生产恒为零；测试推进它来驱动到期逻辑，不靠真实等待。
+    clock_skew: Duration,
     layout_dirty: bool,
     layout_since: Option<Instant>,
     /// 待重放的 RPC（断线时发不出去的那些）。
@@ -797,6 +800,7 @@ impl App {
             next_workspace: 0,
             restore_pending,
             restore_since: Instant::now(),
+            clock_skew: Duration::ZERO,
             layout_dirty: false,
             layout_since: None,
             pending_calls: Vec::new(),
@@ -1068,9 +1072,22 @@ impl App {
         }
     }
 
+    /// 宿主当前时刻：真实时钟加上测试偏移。登记与到期判定共用这一处，
+    /// 免去测试里「登记用真钟、到期用假钟」的错位。
+    fn clock_now(&self) -> Instant {
+        Instant::now() + self.clock_skew
+    }
+
+    /// 测试钩子：把宿主时钟往前拨 `by`，到期逻辑（通知、内置 toast、状态行）
+    /// 立刻按拨后的时刻判定。生产路径没有调用者，偏移恒为零。
+    pub fn advance_clock(&mut self, by: Duration) {
+        self.clock_skew += by;
+        self.dirty = true;
+    }
+
     /// 防抖持久化、toast 过期、恢复超时。
     pub fn tick(&mut self) {
-        let now = Instant::now();
+        let now = self.clock_now();
         crate::theme::source::poll(self);
         self.sync_package_modules();
         self.sync_mod_surfaces();

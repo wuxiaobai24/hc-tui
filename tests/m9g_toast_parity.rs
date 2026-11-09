@@ -231,6 +231,24 @@ impl Harness {
         panic!("{label}: 超时未达成");
     }
 
+    /// 出帧到内容区满足 `want`（出现或消失某条通知）；超时 panic。
+    /// 判的是屏幕上的字，不是固定帧数：慢 runner 上帧率低也只会多转几轮。
+    fn pump_until_region(&mut self, label: &str, mut want: impl FnMut(&str) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            self.terminal
+                .draw(|frame| ui::draw(frame, &mut self.app))
+                .expect("draw");
+            self.app.pump_mods();
+            self.app.tick();
+            if want(&region_text(&self.frame(), self.content)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("{label}: 超时未达成");
+    }
+
     /// 真实 `notify` 通道（模块 `notify` 与 `hc-tui notify` 同一入口）。
     fn notify(&mut self, steps: &[Value]) {
         self.app
@@ -693,16 +711,25 @@ fn timeout_removes_the_entry() {
     harness.pump_until("toast surface opens", has_toast_surface);
     harness.notify(&[notify_step("warn", "expiring entry", 3)]);
     harness.pump_until("props arrive", |app| app.mod_notifications.len() == 1);
-    harness.pump(10);
+    harness.pump_until_region("entry reaches the toast surface", |text| {
+        text.contains("expiring entry")
+    });
     let content = harness.content;
     let before = region_text(&harness.frame(), content);
     println!("before timeout:\n{}", tail_lines(&before, 4));
     assert!(before.contains("expiring entry"));
+    // 到期不靠真实等 3 秒：把宿主时钟拨过超时，`tick` 按拨后的时刻判定。
+    harness.app.advance_clock(std::time::Duration::from_secs(4));
     harness.pump_until("entry expires", |app| app.mod_notifications.is_empty());
-    // 队列清空后还要再泵几帧，模块才会收到新的 props 并擦掉那一条。
-    harness.pump(30);
+    // 队列清空后模块还要按新 props 重绘擦掉那一条：等画面本身。
+    harness.pump_until_region("frame drops the entry", |text| {
+        !text.contains("expiring entry")
+    });
     let after = region_text(&harness.frame(), content);
-    println!("after 1.3s:\n{}", tail_lines(&after, 4));
+    println!(
+        "after the clock passes the timeout:\n{}",
+        tail_lines(&after, 4)
+    );
     println!(
         "queue={} props={}",
         harness.app.mod_notifications.len(),
