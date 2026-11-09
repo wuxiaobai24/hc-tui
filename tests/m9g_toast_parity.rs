@@ -215,7 +215,9 @@ impl Harness {
 
     /// 出帧到条件成立；超时返回 false。
     fn pump_until(&mut self, label: &str, mut ready: impl FnMut(&App) -> bool) -> bool {
-        for _ in 0..600 {
+        // 慢 runner（尤其 macOS CI）上模块加载可能远超固定轮数：按墙钟等 30 秒。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             self.terminal
                 .draw(|frame| ui::draw(frame, &mut self.app))
                 .expect("draw");
