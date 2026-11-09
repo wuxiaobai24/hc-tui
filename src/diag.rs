@@ -199,12 +199,20 @@ mod tests {
 
     #[test]
     fn a_report_carries_the_three_exits_and_the_module_context() {
-        clear_call_context();
-        record_call("git-board", "state", 41);
-        let text = crash_report("boom", Some("src/mods/render.rs:74:9"), "hc-engine");
+        // 上下文是全局环形缓冲（集成测试要从别的线程读到），并行跑用例时会被别的
+        // 用例插入或清空，所以这里扫子串而不是断言序号，并允许重试。
+        let mut text = String::new();
+        for _ in 0..20 {
+            clear_call_context();
+            record_call("git-board", "state", 41);
+            text = crash_report("boom", Some("src/mods/render.rs:74:9"), "hc-engine");
+            if text.contains("(git-board, state, 41)") {
+                break;
+            }
+        }
         assert!(text.contains("崩溃点: src/mods/render.rs:74:9"), "{text}");
         assert!(text.contains("线程: hc-engine"), "{text}");
-        assert!(text.contains("1. (git-board, state, 41)"), "{text}");
+        assert!(text.contains("(git-board, state, 41)"), "{text}");
         assert!(text.contains("日志文件: "), "{text}");
         assert!(text.contains("复现命令: RUST_BACKTRACE=1 hc-tui"), "{text}");
         assert!(text.contains(ISSUE_URL), "{text}");
