@@ -1,6 +1,34 @@
 # 变更记录
 
-## 未发布
+## 0.5.0 — 2026-11-09
+
+这一版的主题是**界面全部模块化**：侧栏、Tab 栏、模式行、设置、选择器、帮助、提示层与表单
+共八块界面，都可以由界面模块绘制；没装模块、被停用或渲染失败时逐块回落到内置实现，
+`--no-mods` 下与旧版逐字节一致。每一块都有「与内置逐格对拍」的用例，外加一条**反例断言**
+（故意少画一行必须让对拍失败），避免绿灯只是没验到。
+
+配套的变化：
+
+- **包与插件**：统一清单 `hctui.toml` v2（动作 / 终端入口 / 界面模块 / 授权 / 服务同文件声明）、
+  代际存储与原子发布、`packages install|update` 支持目录 / git / tarball 三种来源、
+  注册表 250ms 指纹热重载（装包不重启）。
+- **CLI 契约**：失败统一为 `{"error":{"code","message"},"id":"cli:<动词>"}`（`--json` 时走 stderr），
+  退出码固定 0/1/2/3，20 个稳定错误码，每个子命令的 `--help` 写明输出形态与退出码；
+  `docs/cli-errors.md` 与代码码集有防漂移测试。
+- **配置**：`config dump [--effective|--defaults|--minimal]` 输出整份配置（稳定顺序、带注释）、
+  `config init` 安全写盘（不覆盖已有文件）、`docs/default-config.toml` 由同一序列化器生成并与代码对齐。
+- **新命令**：`notify`、`doctor`（分节自检，失败项列出查找过的目录）、`keys where <动作>`
+  （反查完整前缀链）、`events --since <rev>`（断线续订，rev 过期回落全量并标 `resync`）、
+  `completion zsh|bash|fish`。
+- **输入与交互**：Kitty 键盘协议（探测 / 启用 / 退出恢复），OSC 8 链接 `Ctrl+Click` 打开，
+  pane `swap` / `move`，模块崩溃留错误占位（`r` 重载）。
+- **主题**：跟随 Omarchy 与 Ghostty 主题（解析 ghostty 配置的 `theme=` / 内联 palette / include），
+  热重载。
+- **诊断**：三段式错误（事实 / 你的情况 / `Possible fix:`）、崩溃报告三条出口、
+  请求日志结构化（`event= subsystem= outcome=`）。
+- **工程**：测试会话 RAII 回收（`IsolatedCore`）+ `scripts/check-core-leaks.sh`，
+  解决对拍泄漏几十个常驻 core 的问题。
+
 
 - cfg2 配置导出与初始化：新增单一序列化器 `src/config_dump.rs`，`hc-tui config dump [--effective|--defaults|--minimal] [--config <path>] [--out <path>]` 按固定段顺序输出整份配置（每段与每键带注释与默认值提示，运行时字段不写盘，`--minimal` 只出与默认值不同的键），`hc-tui config init [--path <path>] [--force]` 把默认配置写到用户配置路径并在目标已存在时拒绝、`--force` 时先备份成 `config.toml.bak.<时间戳>`；`--default-config` 与 `config dump --defaults` 共用同一实现，默认配置落到 `docs/default-config.toml`，`tests/config_dump.rs::config_default_file_is_current` 逐字节比对防漂移（`HC_UPDATE_DEFAULT_CONFIG=1` 重新生成），`docs/configuration.md` 不再手抄默认值，shell 补全与 `--help` 同步。
 
