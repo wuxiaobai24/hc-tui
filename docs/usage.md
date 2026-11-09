@@ -142,6 +142,17 @@ Error: dev.hctui.demo.svc declares no service nope
 
 日志文件还不存在时打印 `no log for <id>: No such file or directory` 并退出 0；服务日志的落点见[配置说明](configuration.md#文件与优先级)。
 
+hc-tui 自己的 tracing 与插件日志同一套预算：写到 `<state>/plugins/logs/core/tracing.stdout.log`，
+单份超过 1 MiB 轮转成 `.1`，每个包最多 32 个文件、总计 8 MiB。请求完成行的形状固定：
+
+```console
+$ grep 'outcome="err"' ~/.local/state/hc-tui/plugins/logs/core/tracing.stdout.log | tail -1
+2026-11-09T01:42:46.096535Z  INFO hc_tui::api_log: event="api.request.complete" subsystem="control" outcome="err" request_id="req_2051783_1" method="do" dur_ms=13
+```
+
+`subsystem` 是 `core`、`control` 或 `mods`；`outcome` 只有 `ok` / `err` / `timeout` / `denied` /
+`stream_closed` 五个值。失败要看全就把后三个一起 grep。
+
 ```console
 $ hc-tui packages uninstall dev.hctui.pkg.git-board
 uninstalled dev.hctui.pkg.git-board

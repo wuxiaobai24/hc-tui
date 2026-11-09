@@ -218,6 +218,17 @@ impl Conn {
         self.next_id += 1;
         let id = self.next_id;
         let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let log = crate::api_log::Request::new("core", format!("req_{id}"), method);
+        let answer = self.call_once(id, method, request).await;
+        log.finish(if answer.is_ok() {
+            crate::api_log::Outcome::Ok
+        } else {
+            crate::api_log::Outcome::Err
+        });
+        answer
+    }
+
+    async fn call_once(&mut self, id: u64, method: &str, request: Value) -> Result<Value> {
         self.write_data(0, request.to_string().as_bytes()).await?;
 
         loop {

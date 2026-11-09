@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use toml::Spanned;
 
 use crate::config::Config;
-use crate::plugin::manifest::{self, fail, Manifest, ManifestError, HOST_API};
+use crate::plugin::manifest::{self, fail, HostApiRange, Manifest, ManifestError, HOST_API};
 use crate::store::{Record, Source, Store};
 
 pub mod source;
@@ -467,7 +467,7 @@ struct LegacyMod {
     #[serde(default)]
     bundle: Option<Spanned<String>>,
     #[serde(default)]
-    host_api: Option<Spanned<u32>>,
+    host_api: Option<Spanned<HostApiRange>>,
     #[serde(default)]
     min_hc_tui_version: Option<Spanned<String>>,
 }
@@ -491,7 +491,7 @@ impl LegacyFile {
             host_api: legacy
                 .host_api
                 .clone()
-                .unwrap_or_else(|| Spanned::new(span.clone(), HOST_API)),
+                .unwrap_or_else(|| Spanned::new(span.clone(), HostApiRange::exact(HOST_API))),
             platforms: None,
             description: None,
             actions: Vec::new(),

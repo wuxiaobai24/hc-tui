@@ -116,6 +116,13 @@ pub fn lookup(en: &str) -> Option<&'static str> {
         // 配置文件里剩下的两条英文警告。
         "Invalid panel {}" => "无效的 panel：{}",
         "[[panels]] requires name and command" => "[[panels]] 需要 name 和 command",
+        // `keys where` 与 `events --since` 的新文案。
+        "--since needs a value" => "--since 需要一个值",
+        "--since needs a number" => "--since 需要一个数字",
+        "where needs an action name" => "where 需要一个动作名",
+        "unknown action {}" => "未知动作 {}",
+        "prefix ({}) + {}  →  {}" => "前缀（{}）+ {}  →  {}",
+        "{}  →  {}" => "{}  →  {}",
         _ => return None,
     })
 }

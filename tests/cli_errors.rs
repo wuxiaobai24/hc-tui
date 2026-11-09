@@ -167,3 +167,87 @@ fn json_needs_an_explicit_flag() {
     assert!(!stderr.trim_start().starts_with('{'), "{stderr}");
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn keys_where_prints_the_prefix_chain_and_its_own_code() {
+    let root = root("keys-where");
+    let help = run(&root, &["keys", "where", "help", "--json"]);
+    assert_eq!(help.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&help.stdout).expect("keys where --json prints one object");
+    assert_eq!(value["action"], serde_json::json!("help"));
+    assert_eq!(
+        value["keys"],
+        serde_json::json!(["ctrl+b", "?"]),
+        "the chain keeps the prefix key first"
+    );
+
+    let human = run(&root, &["keys", "where", "help"]);
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("→  help"), "{stdout:?}");
+
+    let missing = run(
+        &root,
+        &["keys", "where", "definitely-not-an-action", "--json"],
+    );
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        json_error(&missing),
+        ("action_not_found".to_string(), "cli:keys:where".to_string())
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn host_api_accepts_a_range_and_rejects_a_too_new_one() {
+    let root = root("host-api");
+    let write = |name: &str, host_api: &str| {
+        let package = root.join(name);
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("hctui.toml"),
+            format!(
+                "manifest_version = 2\nid = \"dev.example.{name}\"\nname = \"Probe\"\nversion = \"0.1.0\"\nhost_api = {host_api}\n"
+            ),
+        )
+        .unwrap();
+        package
+    };
+    let exact = write("exact", "1");
+    let range = write("range", "\"1..=2\"");
+    let too_new = write("toonew", "\"2..=3\"");
+
+    for (package, field) in [(&exact, "1"), (&range, "1..=2")] {
+        let output = run(
+            &root,
+            &["packages", "info", "--json", package.to_str().unwrap()],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}: {}",
+            package.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["host_api"], serde_json::json!(field));
+    }
+
+    let output = run(
+        &root,
+        &["packages", "info", "--json", too_new.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(
+        value["error"]["code"],
+        serde_json::json!("host_api_too_old")
+    );
+    let message = value["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("upgrade hc-tui") && message.contains("downgrade the package"),
+        "{message}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

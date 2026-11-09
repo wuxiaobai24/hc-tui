@@ -41,6 +41,8 @@ pub enum ErrorCode {
     PaneNotFound,
     /// 找不到终端。
     TerminalNotFound,
+    /// 找不到动作名（`keys where` 的反查对象）。
+    ActionNotFound,
     /// 找不到机器。
     MachineNotFound,
     /// 找不到文件或安装来源。
@@ -82,6 +84,7 @@ impl ErrorCode {
         ErrorCode::PackageNotFound,
         ErrorCode::PaneNotFound,
         ErrorCode::TerminalNotFound,
+        ErrorCode::ActionNotFound,
         ErrorCode::MachineNotFound,
         ErrorCode::FileNotFound,
         ErrorCode::FileExists,
@@ -107,6 +110,7 @@ impl ErrorCode {
             ErrorCode::PackageNotFound => "package_not_found",
             ErrorCode::PaneNotFound => "pane_not_found",
             ErrorCode::TerminalNotFound => "terminal_not_found",
+            ErrorCode::ActionNotFound => "action_not_found",
             ErrorCode::MachineNotFound => "machine_not_found",
             ErrorCode::FileNotFound => "file_not_found",
             ErrorCode::FileExists => "file_exists",
