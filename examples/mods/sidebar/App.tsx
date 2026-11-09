@@ -166,6 +166,7 @@ const snapshot = signal<Snapshot>({});
 const size = signal({ cells: 0, rows: 0 });
 // 启动参数里的 props 只是首份；宿主用 `props.changed` 推最新的 Agents 分组。
 const pushed = signal<Record<string, any>>({});
+const ready = signal(false);
 
 const props = (): any => ({ ...(params.props ?? {}), ...pushed() });
 
@@ -177,12 +178,15 @@ host.on("props.changed", (event: any) => {
 
 
 const failure = signal("");
+// 首份 state 到手前一行都不画：这段时间区域由宿主的内置实现顶着，不会上屏
+// 半份内容（只有标题、没有 Space 与 Agent 行）。
 async function refresh() {
   try {
     const reply = await host.call<Snapshot>("state", {
       domains: ["machines", "spaces", "agents", "focused"],
     });
     snapshot.set(reply);
+    ready.set(true);
     failure.set("");
   } catch (error) {
     failure.set(String((error as Error)?.message ?? error));
@@ -432,6 +436,7 @@ function Line(props: { row: Row }) {
 
 function layoutRows(): Row[] {
   const current = size();
+  if (!ready()) return [];
   if (current.cells <= 0 || current.rows <= 0) return [];
   return rowsFor(snapshot(), props(), Math.max(current.cells - 1, 0), current.rows);
 }

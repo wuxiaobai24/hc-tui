@@ -391,6 +391,7 @@ impl App {
                     return;
                 };
                 surface.props = props.clone();
+                surface.props_revision += 1;
                 surface.host.send("props.changed", json!({"props": props}));
                 self.dirty = true;
                 if let Some(reply) = reply {
@@ -411,6 +412,7 @@ impl App {
                             return;
                         };
                         surface.props = props.clone();
+                        surface.props_revision += 1;
                         surface.host.send("props.changed", json!({"props": props}));
                         target.to_string()
                     }
@@ -1286,6 +1288,7 @@ impl App {
             let props = json!({"toasts": toasts, "max": limit});
             if let Some(surface) = self.mods.surface_mut(&surface_id) {
                 surface.props = props.clone();
+                surface.props_revision += 1;
                 surface.host.send("props.changed", json!({"props": props}));
             }
         }
@@ -1534,6 +1537,8 @@ impl App {
         surface.state = SurfaceState::Running;
         surface.store_generation = store_generation;
         surface.props = props;
+        // 打开即交付首份 props（启动参数里同步可取）。
+        surface.props_revision = 1;
         // 形态默认行为：清屏、焦点、`Esc`、鼠标与 z 序都按表。
         surface.modal = shape.modal;
         surface.autofocus = shape.focus;
@@ -1727,6 +1732,9 @@ impl App {
         surface.fails = 0;
         surface.last_error = None;
         surface.store_generation = store_generation;
+        // 新实例从零开始落笔：首帧到首份 props 之间仍归内置实现。
+        surface.painted_revision = None;
+        surface.painted_cells = None;
         // 新代际重新开始计数：以后同样错误还要写日志与弹 toast。
         self.mods.seen_errors.remove(mod_id);
         self.dirty = true;
@@ -1865,7 +1873,8 @@ impl App {
             key,
         )?;
         self.apply_surface_options(&id, &data);
-        if let (Some(props), Some(surface)) = (props, self.mods.surface(&id)) {
+        if let (Some(props), Some(surface)) = (props, self.mods.surface_mut(&id)) {
+            surface.props_revision += 1;
             surface.host.send("props.changed", json!({"props": props}));
         }
         Ok(id)

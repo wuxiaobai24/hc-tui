@@ -38,6 +38,8 @@ const selected = signal(0);
 const size = signal({ cells: 0, rows: 0 });
 const error = signal("");
 const tokens = signal<Record<string, string>>(params.theme?.tokens ?? {});
+// 首份 state 到手前一行都不画：连接、主题与当前值未定时画出来的是半份面板。
+const ready = signal(false);
 
 function token(name: string, fallback: string): string {
   return tokens()[name] ?? fallback;
@@ -52,6 +54,7 @@ async function refresh() {
       section.set(settings.section);
       selected.set(activeIndex(settings.section, settings));
     }
+    ready.set(true);
     error.set("");
   } catch (err) {
     error.set((err as Error).message);
@@ -390,6 +393,7 @@ function App() {
 
   const rows = () => panelRows();
   const layout = () => {
+    if (!ready()) return { width: 0, height: 0, left: 0, top: 0 };
     const cells = Math.max(0, size().cells);
     const count = Math.max(0, size().rows);
     const width = Math.min(60, cells);
