@@ -7,14 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod support;
+
 const BIN: &str = env!("CARGO_BIN_EXE_hc-tui");
 
 fn root(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let root = std::env::temp_dir().join(format!("hctui-diag-cli-{tag}-{unique}"));
+    let root = support::unique_dir("hctui-diag-cli", tag);
     std::fs::create_dir_all(root.join("config").join("hc-tui")).unwrap();
     std::fs::write(root.join("config").join("hc-tui").join("config.toml"), "").unwrap();
     std::fs::create_dir_all(root.join("state")).unwrap();

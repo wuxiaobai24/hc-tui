@@ -335,11 +335,7 @@ mod tests {
     use crate::pkg::PLUGIN_FILE;
 
     fn unique_root(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!("hctui-source-{tag}-{unique}"));
+        let root = crate::testutil::unique_dir("hctui-source", tag);
         std::fs::create_dir_all(&root).unwrap();
         root
     }

@@ -2852,11 +2852,7 @@ mount(() => <View><Text>{result()}</Text></View>);
 "#;
 
     fn app() -> App {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("hctui-mods-{}-{unique}", std::process::id()));
+        let dir = crate::testutil::unique_dir("hctui-mods", "app");
         let (_, events) = std::sync::mpsc::channel();
         App::with_network(
             Config {

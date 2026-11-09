@@ -5,15 +5,14 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod support;
+
 const BIN: &str = env!("CARGO_BIN_EXE_hc-tui");
 
 fn root(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
     // 控制 socket 路径上限 104 字节（macOS）：`env::temp_dir()` 在 macOS 上是
     // `/var/folders/…/T`，加 `state/control-<hash>.sock` 就超限，所以用例起短根。
+    let unique = format!("{}-{}", std::process::id(), support::serial());
     let root = std::path::Path::new("/tmp").join(format!("hctui-notify-cli-{tag}-{unique}"));
     std::fs::create_dir_all(root.join("config").join("hc-tui")).unwrap();
     std::fs::write(root.join("config").join("hc-tui").join("config.toml"), "").unwrap();

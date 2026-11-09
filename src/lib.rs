@@ -36,3 +36,7 @@ pub mod store;
 pub mod control;
 
 pub mod update;
+
+/// 单元测试共用的临时目录与序号；只在 `cargo test` 里编译。
+#[cfg(test)]
+pub(crate) mod testutil;

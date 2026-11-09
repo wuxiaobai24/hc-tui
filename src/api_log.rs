@@ -199,14 +199,7 @@ pub fn install(root: PathBuf) {
 pub fn install_for_tests() -> &'static std::path::Path {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!(
-            "hctui-api-log-tests-{}-{unique}",
-            std::process::id()
-        ));
+        let root = crate::testutil::unique_dir("hctui-api-log-tests", "root");
         install(root.clone());
         // 别的用例可能已经把这个 callsite 在空订阅者下注册过（兴趣记成
         // `never`），装好全局订阅者之后要重算一次，否则事件在调用点就被
@@ -221,11 +214,7 @@ mod tests {
     use super::*;
 
     fn temp_root(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        std::env::temp_dir().join(format!("hctui-api-log-{tag}-{unique}"))
+        crate::testutil::unique_dir("hctui-api-log", tag)
     }
 
     #[test]

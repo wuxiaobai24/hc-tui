@@ -1335,12 +1335,7 @@ mod tests {
 
     fn app() -> App {
         let (_, events) = std::sync::mpsc::channel();
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root =
-            std::env::temp_dir().join(format!("hctui-plugin-app-{}-{unique}", std::process::id()));
+        let root = crate::testutil::unique_dir("hctui-plugin", "app");
         App::with_network(
             Config {
                 restore: false,

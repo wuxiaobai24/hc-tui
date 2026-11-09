@@ -15,11 +15,7 @@ type Opener = Box<dyn Fn(&mut App)>;
 type ActionBuilder = Box<dyn Fn(&mut App) -> Value>;
 
 fn temp_root(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("hctui-m9d-{tag}-{}-{unique}", std::process::id()))
+    crate::testutil::unique_dir("hctui-m9d-picker", tag)
 }
 
 fn offline_app(tag: &str) -> App {

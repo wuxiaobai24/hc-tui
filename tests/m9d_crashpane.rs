@@ -48,17 +48,7 @@ mount(() => <View><Text>unreachable</Text></View>);
 "#;
 
 fn unique_dir(tag: &str) -> PathBuf {
-    // macOS 的 SystemTime 精度是微秒，并行的用例可能拿到同一个值；加计数器兜底。
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "hctui-crashpane-{tag}-{}-{unique}-{serial}",
-        std::process::id()
-    ))
+    support::unique_dir("hctui-crashpane", tag)
 }
 
 fn config_in(root: &Path) -> Config {

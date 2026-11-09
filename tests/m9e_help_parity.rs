@@ -30,11 +30,7 @@ const DROPPED_ROW_OLD: &str = "for (const row of group.rows)";
 const DROPPED_ROW_NEW: &str = "for (const row of group.rows.slice(1))";
 
 fn unique_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("hctui-m9e-{tag}-{}-{unique}", std::process::id()))
+    support::unique_dir("hctui-m9e", tag)
 }
 
 fn config_in(root: &Path) -> Config {

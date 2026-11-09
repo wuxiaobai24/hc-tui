@@ -623,11 +623,7 @@ mod tests {
 
     #[test]
     fn manifest_grants_read_both_arrays() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!("hctui-grants-{unique}"));
+        let root = crate::testutil::unique_dir("hctui-grants", "grants");
         let config = crate::config::Config {
             config_path: root.join("config").join("config.toml"),
             state_path: root.join("state").join("state.json"),

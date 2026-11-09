@@ -92,6 +92,19 @@ fn my_parity() {
 `scripts/check-test-timing.sh` 把上面三类里容易 grep 的近似模式列出来，只作
 提示，不作为门禁。
 
+### 临时目录必须进程内唯一
+
+只拿 `SystemTime::now()` 当临时目录名的唯一来源，在 macOS 上会翻车：那一侧
+墙钟精度到微秒，同一进程里并行的用例常常拿到同一个值。两个用例共用一份暂存
+目录时，一个 `remove_dir_all`、另一个正在写 `dist/bundle.js`，安装看到的就是
+「module bundle is empty」。
+
+所以临时根一律走带进程内序号的入口：
+
+- 集成测试：`support::unique_dir("<前缀>", tag)`，或需要自定义根时
+  `support::serial()` 参与拼名。
+- 单元测试：`crate::testutil::unique_dir("<前缀>", tag)`。
+
 ## 泄漏自检
 
 ```sh

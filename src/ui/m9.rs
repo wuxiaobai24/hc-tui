@@ -88,11 +88,7 @@ impl Region {
 }
 
 fn temp_root(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("hctui-m9-{tag}-{}-{unique}", std::process::id()))
+    crate::testutil::unique_dir("hctui-m9", tag)
 }
 
 /// 离屏 App：临时配置目录、无网络线程、固定主题与语言。

@@ -679,11 +679,7 @@ events = ["state.changed", "terminal.status"]
 "#;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("hctui-pkg-{tag}-{unique}"));
+        let dir = crate::testutil::unique_dir("hctui-pkg", tag);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

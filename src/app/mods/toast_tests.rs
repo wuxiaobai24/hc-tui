@@ -107,11 +107,7 @@ mount(App);
 "#;
 
 fn app() -> App {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let dir = std::env::temp_dir().join(format!("hctui-toast-{}-{unique}", std::process::id()));
+    let dir = crate::testutil::unique_dir("hctui-toast", "app");
     let (_, events) = std::sync::mpsc::channel();
     App::with_network(
         Config {
@@ -464,11 +460,7 @@ fn toast_ticket_builtin_fallback() {
     assert!(app.mod_notifications.is_empty());
 
     // `--no-mods` 下同一路径照旧。
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let dir = std::env::temp_dir().join(format!("hctui-toast-nomods-{unique}"));
+    let dir = crate::testutil::unique_dir("hctui-toast-nomods", "app");
     let (_, events) = std::sync::mpsc::channel();
     let mut plain = App::with_network(
         Config {

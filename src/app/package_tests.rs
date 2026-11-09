@@ -9,11 +9,7 @@ use ratatui_core::terminal::Terminal;
 const PACKAGE: &str = "dev.hctui.pkg.git-board";
 
 fn unique_dir(tag: &str) -> std::path::PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("hctui-pkg-{tag}-{}-{unique}", std::process::id()))
+    crate::testutil::unique_dir("hctui-pkg", tag)
 }
 
 fn config_in(root: &std::path::Path) -> Config {

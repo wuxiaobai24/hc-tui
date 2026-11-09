@@ -17,14 +17,7 @@ use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use serde_json::json;
 
 fn temp_root(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "hctui-m9d-parity-{tag}-{}-{unique}",
-        std::process::id()
-    ))
+    support::unique_dir("hctui-m9d-parity", tag)
 }
 
 fn app(tag: &str) -> App {

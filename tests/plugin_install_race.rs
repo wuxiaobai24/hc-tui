@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+mod support;
+
 const BIN: &str = env!("CARGO_BIN_EXE_hc-tui");
 const ID: &str = "dev.example.race";
 /// 复制负载足够大，让两个安装者的复制窗口真的重叠。
@@ -19,11 +21,7 @@ struct Workspace {
 
 impl Workspace {
     fn new(tag: &str) -> Workspace {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!("hctui-install-race-{tag}-{unique}"));
+        let root = support::unique_dir("hctui-install-race", tag);
         let workspace = Workspace { root };
         std::fs::create_dir_all(workspace.config().join("hc-tui")).unwrap();
         std::fs::write(workspace.config().join("hc-tui").join("config.toml"), "").unwrap();

@@ -438,11 +438,7 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("hctui-service-{tag}-{unique}"));
+        let dir = crate::testutil::unique_dir("hctui-service", tag);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

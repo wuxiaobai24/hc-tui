@@ -867,12 +867,7 @@ properties = { env = { type = "string", enum = ["dev", "prod"] }, count = { type
 
     fn app() -> App {
         let (_, events) = std::sync::mpsc::channel();
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root =
-            std::env::temp_dir().join(format!("hctui-form-app-{}-{unique}", std::process::id()));
+        let root = crate::testutil::unique_dir("hctui-form", "app");
         App::with_network(
             Config {
                 restore: false,

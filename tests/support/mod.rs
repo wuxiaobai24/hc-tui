@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hc_tui::app::App;
@@ -13,6 +15,32 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+
+/// 进程内递增序号：临时目录名的唯一性来源之一。
+///
+/// 只靠 `SystemTime` 在 macOS 上不够——那一侧墙钟精度到微秒，同一进程里并行
+/// 的用例常常拿到同一个值，随后共用暂存目录：一个用例 `remove_dir_all` 时
+/// 另一个正在写或读 bundle，就会看到 0 字节或半份文件。
+pub fn serial() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 一次性的临时根目录：`<tmp>/<prefix>-<tag>-<pid>-<时间戳>-<序号>`。
+///
+/// 序号保证同一进程里并行的用例永不撞名，时间戳只用来避开上一次运行留下的
+/// 同名目录。
+pub fn unique_dir(prefix: &str, tag: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "{prefix}-{tag}-{}-{stamp}-{}",
+        std::process::id(),
+        serial()
+    ))
+}
 
 /// 一帧里某块矩形的文本：逐行取字符。
 pub fn region_text(buffer: &Buffer, area: Rect) -> String {
@@ -107,7 +135,6 @@ pub fn pump_until_repainted(
 // 也不往 stderr 写东西影响断言。
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 

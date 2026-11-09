@@ -258,11 +258,7 @@ events = ["state.changed"]
 
     #[test]
     fn check_renders_a_bundle_and_reads_the_manifest() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("hctui-check-{unique}"));
+        let dir = crate::testutil::unique_dir("hctui-check", "bundle");
         let dist = dir.join("dist");
         std::fs::create_dir_all(&dist).unwrap();
         std::fs::write(
@@ -292,11 +288,7 @@ mount(() => <View><Text>check</Text></View>);"#,
 
     #[test]
     fn check_rejects_a_missing_bundle() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("hctui-check-missing-{unique}"));
+        let dir = crate::testutil::unique_dir("hctui-check", "missing");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("hctui.toml"), "[mod]\nid = \"probe\"\n").unwrap();
         let error = check(&Config::default(), dir.to_str().unwrap()).unwrap_err();

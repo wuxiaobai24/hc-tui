@@ -88,11 +88,7 @@ const CALLER_NSH: &str = r#"{"name":"Caller","id":"dev.hctui.mods.caller","versi
 const CALLER_CAPABILITIES: &str = r#"{"host":["notify","run","dismiss","closeOverlay"]}"#;
 
 fn unique_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("hctui-m9g-{tag}-{}-{unique}", std::process::id()))
+    support::unique_dir("hctui-m9g", tag)
 }
 
 fn config_in(root: &std::path::Path) -> Config {

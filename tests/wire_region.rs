@@ -30,11 +30,7 @@ mount(App);
 "#;
 
 fn unique_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let dir = std::env::temp_dir().join(format!("hctui-wire-{tag}-{unique}"));
+    let dir = support::unique_dir("hctui-wire", tag);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

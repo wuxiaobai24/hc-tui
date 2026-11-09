@@ -7,13 +7,10 @@ use hc_tui::app::App;
 use hc_tui::config::Config;
 use serde_json::json;
 
+mod support;
+
 fn app() -> App {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let root =
-        std::env::temp_dir().join(format!("hctui-m9f-actions-{}-{unique}", std::process::id()));
+    let root = support::unique_dir("hctui-m9f-actions", "app");
     let config = Config {
         restore: false,
         prompt_new_tab: false,
@@ -86,14 +83,7 @@ fn five_actions_accept_and_reject() {
         "output required",
     );
 
-    let file = std::env::temp_dir().join(format!(
-        "hctui-m9f-put-{}-{}.bin",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default()
-    ));
+    let file = support::unique_dir("hctui-m9f-put", "fixture").with_extension("bin");
     std::fs::write(&file, [0u8, 159, 146, 150]).expect("fixture");
     accepted(
         &mut app,

@@ -846,11 +846,7 @@ mod tests {
     use super::*;
 
     fn unique_dir(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        std::env::temp_dir().join(format!("hctui-store-{tag}-{unique}"))
+        crate::testutil::unique_dir("hctui-store", tag)
     }
 
     #[test]
