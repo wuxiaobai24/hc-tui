@@ -7,10 +7,11 @@
 //! HC_TUI_E2E=1 cargo test -p hc-tui --test multi_pane -- --nocapture
 //! ```
 //!
-//! 全程使用 `/tmp/hc-tui-e2e` 下的独立 XDG 路径与 `hctui-mp` session。
+//! 会话走 `support::IsolatedCore`：独立 runtime 目录，测试结束自动回收。
+
+mod support;
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -19,21 +20,6 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use hc_tui::hc::net::{Command, NetConfig, NetEvent, NetHandle};
 use hc_tui::term::view::TerminalView;
-
-fn isolated_environment() {
-    let root = Path::new("/tmp/hc-tui-e2e");
-    for (key, name) in [
-        ("XDG_RUNTIME_DIR", "run"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_CACHE_HOME", "cache"),
-    ] {
-        let path = root.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        std::env::set_var(key, path);
-    }
-    std::env::set_var("HC_SESSION", "hctui-mp");
-}
 
 struct Harness {
     net: NetHandle,
@@ -48,12 +34,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let (sender, events) = std::sync::mpsc::channel();
-        let net = NetHandle::spawn(
-            NetConfig {
-                session: Some("hctui-mp".to_string()),
-            },
-            sender,
-        );
+        let net = NetHandle::spawn(NetConfig { session: None }, sender);
         Self {
             net,
             events,
@@ -180,7 +161,7 @@ fn two_panes_have_independent_streams() -> Result<()> {
         eprintln!("skipping P2 end-to-end test; set HC_TUI_E2E=1 to run it against a real core");
         return Ok(());
     }
-    isolated_environment();
+    let _core = support::IsolatedCore::new("mp");
     let mut harness = Harness::new();
 
     harness.net.send(Command::Spawn {
@@ -279,9 +260,5 @@ fn two_panes_have_independent_streams() -> Result<()> {
     harness.pump(Duration::from_millis(300));
 
     harness.net.shutdown();
-    let _ = std::process::Command::new("hc")
-        .arg("server")
-        .arg("stop")
-        .output();
     Ok(())
 }

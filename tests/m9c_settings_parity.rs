@@ -65,7 +65,6 @@ fn config_in(root: &Path, values: Values) -> Config {
     let mut config = Config {
         restore: false,
         prompt_new_tab: false,
-        session: Some(format!("hcp-m9c-test-{}", std::process::id())),
         config_path: root.join("config").join("config.toml"),
         state_path: root.join("state").join("state.json"),
         theme: hc_tui::theme::builtin("catppuccin").expect("theme"),
@@ -209,6 +208,7 @@ fn compare(label: &str, builtin: &Buffer, module: &Buffer, area: Rect) -> usize 
 
 #[test]
 fn settings_match_builtin_cell_for_cell() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let mut failures = 0;
     for (width, height) in [(80u16, 24u16), (120, 40)] {
@@ -239,6 +239,7 @@ fn settings_match_builtin_cell_for_cell() {
 /// 反例：模块少渲染一个项，同一段流程必须报出差异。
 #[test]
 fn missing_item_is_caught() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("negative");
     let config = config_in(&root, Values::Default);
@@ -264,6 +265,7 @@ fn missing_item_is_caught() {
 /// 键盘：Tab 换段、j/k 移动、Enter 应用并落盘、Esc 与 q 关闭。
 #[test]
 fn keyboard_goes_through_the_module() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("keys");
     let config = config_in(&root, Values::Default);
@@ -324,6 +326,7 @@ fn keyboard_goes_through_the_module() {
 /// 鼠标：点击段标题切段，点击项应用设置。
 #[test]
 fn mouse_goes_through_the_module() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("mouse");
     let config = config_in(&root, Values::Default);
@@ -399,6 +402,7 @@ fn click(app: &mut App, terminal: &mut Terminal<TestBackend>, content: Rect, x: 
 /// `--no-mods` 与未安装时回落到内置浮层。
 #[test]
 fn no_mods_falls_back_to_the_builtin_panel() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("fallback");
     let mut config = config_in(&root, Values::Default);
@@ -436,6 +440,7 @@ fn no_mods_falls_back_to_the_builtin_panel() {
 /// 主题动作真的把 `theme.changed` 投给声明了该事件的模块。
 #[test]
 fn theme_changed_reaches_modules() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("theme");
     let config = config_in(&root, Values::Default);
@@ -485,6 +490,7 @@ fn theme_changed_reaches_modules() {
 #[test]
 #[ignore]
 fn keep_config_after_module_theme_change() {
+    let _core = support::IsolatedCore::new("m9c-settings");
     hc_tui::i18n::set_zh(false);
     let dir = std::env::var("M9C_EVIDENCE_DIR")
         .map(PathBuf::from)

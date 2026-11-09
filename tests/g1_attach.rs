@@ -10,10 +10,11 @@
 //! HC_TUI_E2E=1 cargo test -p hc-tui --test g1_attach -- --nocapture
 //! ```
 //!
-//! 全程使用 `/tmp/hc-tui-e2e` 下的独立 XDG 路径与 `hctui-e2e` session，
+//! 全程使用 `support::IsolatedCore` 的独立 runtime 目录，测试结束自动回收，
 //! 不会碰用户正在使用的 core。
 
-use std::path::Path;
+mod support;
+
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -116,28 +117,6 @@ impl Link {
     }
 }
 
-fn isolated_environment() {
-    let root = Path::new("/tmp/hc-tui-e2e");
-    for (key, name) in [
-        ("XDG_RUNTIME_DIR", "run"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_CACHE_HOME", "cache"),
-    ] {
-        let path = root.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        std::env::set_var(key, path);
-    }
-    std::env::set_var("HC_SESSION", "hctui-e2e");
-}
-
-fn stop_core() {
-    let _ = std::process::Command::new("hc")
-        .arg("server")
-        .arg("stop")
-        .output();
-}
-
 /// 把 VT 内容画进一个 Buffer，再按行拼成可搜索的文本。
 fn screen_text(view: &mut TerminalView) -> String {
     let area = Rect::new(0, 0, COLS, ROWS);
@@ -185,11 +164,9 @@ async fn wait_for_screen(
 }
 
 async fn connect() -> Result<Link> {
-    let parts = client::open(Some("hctui-e2e"))
-        .await
-        .map_err(|error| match error {
-            client::OpenError::Fatal(error) | client::OpenError::Retry(error) => error,
-        })?;
+    let parts = client::open(None).await.map_err(|error| match error {
+        client::OpenError::Fatal(error) | client::OpenError::Retry(error) => error,
+    })?;
     assert_eq!(parts.hello.generation, 1);
     assert!(parts.hello.framed);
     Ok(Link::new(parts))
@@ -256,15 +233,7 @@ async fn g1_single_pane_end_to_end() -> Result<()> {
         eprintln!("skipping G1 end-to-end test; set HC_TUI_E2E=1 to run it against a real core");
         return Ok(());
     }
-    isolated_environment();
-    struct CoreGuard;
-    impl Drop for CoreGuard {
-        fn drop(&mut self) {
-            stop_core();
-        }
-    }
-    let _core_guard = CoreGuard;
-    stop_core();
+    let core = support::IsolatedCore::new("g1");
     let mut screen = Vec::new();
     let mut link = connect().await?;
 
@@ -375,13 +344,13 @@ async fn g1_single_pane_end_to_end() -> Result<()> {
         .output()
         .is_ok()
     {
-        let path = Path::new("/tmp/hc-tui-e2e/nvim-input.txt");
-        std::fs::write(path, "original line\n")?;
+        let path = core.dir().join("nvim-input.txt");
+        std::fs::write(&path, "original line\n")?;
         let run = second
             .rpc(
                 "terminal.run",
                 json!({
-                    "argv":["nvim","--clean","-u","NONE","-i","NONE","-n",path],
+                    "argv":["nvim","--clean","-u","NONE","-i","NONE","-n",path.to_string_lossy()],
                     "cols":COLS,"rows":ROWS,
                 }),
                 &mut screen,
@@ -434,6 +403,5 @@ async fn g1_single_pane_end_to_end() -> Result<()> {
         eprintln!("nvim real core: ASCII typing, multilingual paste, resize and save passed");
     }
 
-    stop_core();
     Ok(())
 }

@@ -7,6 +7,8 @@
 //! 颜色不是对拍对象：nsh TUI 把前景归到终端 16 色/Reset，内置实现写主题
 //! RGB，逐格比色永远不相等（仓库既有 `scripts/mods-parity.sh` 同样只比字符格）。
 
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -39,7 +41,6 @@ fn config_in(root: &Path) -> Config {
     Config {
         restore: false,
         prompt_new_tab: false,
-        session: Some(format!("hcp-m9e-test-{}", std::process::id())),
         config_path: root.join("config").join("config.toml"),
         state_path: root.join("state").join("state.json"),
         theme: hc_tui::theme::builtin("catppuccin").expect("theme"),
@@ -251,6 +252,7 @@ fn scrollbar_column(buffer: &Buffer, area: Rect) -> String {
 
 #[test]
 fn help_matches_builtin_cell_for_cell() {
+    let _core = support::IsolatedCore::new("m9e");
     hc_tui::i18n::set_zh(false);
     let mut failures = 0;
     let states = [("empty", ""), ("hit", "zoom"), ("miss", "zzz")];
@@ -277,6 +279,7 @@ fn help_matches_builtin_cell_for_cell() {
 /// 滚动条位置：首行 / 中段 / 末行各比一次，并把两侧帧贴出来。
 #[test]
 fn scroll_positions_match() {
+    let _core = support::IsolatedCore::new("m9e");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("scroll");
     let config = config_in(&root);
@@ -314,6 +317,7 @@ fn scroll_positions_match() {
 /// 反例：模块少画一组的第一行键位，同一流程必须报出差异。
 #[test]
 fn missing_row_is_caught() {
+    let _core = support::IsolatedCore::new("m9e");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("negative");
     let config = config_in(&root);
@@ -333,6 +337,7 @@ fn missing_row_is_caught() {
 /// 键盘：查询输入、退格、移动键都走模块；`Esc`/`Enter`/空查询的 `q` 关闭。
 #[test]
 fn keyboard_goes_through_the_module() {
+    let _core = support::IsolatedCore::new("m9e");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("keys");
     let config = config_in(&root);
@@ -428,6 +433,7 @@ fn keyboard_goes_through_the_module() {
 /// 鼠标：右上关闭按钮走模块的 `onPress`。
 #[test]
 fn mouse_close_click_goes_through_the_module() {
+    let _core = support::IsolatedCore::new("m9e");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("mouse");
     let config = config_in(&root);
@@ -454,6 +460,7 @@ fn mouse_close_click_goes_through_the_module() {
 /// `--no-mods` 与未安装时回落到内置浮层。
 #[test]
 fn no_mods_falls_back_to_the_builtin_panel() {
+    let _core = support::IsolatedCore::new("m9e");
     hc_tui::i18n::set_zh(false);
     let root = unique_dir("fallback");
     let mut config = config_in(&root);

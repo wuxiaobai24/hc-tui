@@ -323,6 +323,7 @@ fn region_differences(
 
 #[test]
 fn regions_match_builtin_cell_for_cell() {
+    let _core = support::IsolatedCore::new("m9b");
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         for theme in parity_themes() {
             let name = theme.name.clone();
@@ -342,6 +343,7 @@ fn regions_match_builtin_cell_for_cell() {
 /// 侧栏里两条 Agent terminal 的状态：分组头、徽标、标签都要与内置实现逐格相同。
 #[test]
 fn regions_match_builtin_with_agent_terminals() {
+    let _core = support::IsolatedCore::new("m9b");
     let fixture = Fixture {
         agents: true,
         bottom_tabs: false,
@@ -368,6 +370,7 @@ fn regions_match_builtin_with_agent_terminals() {
 /// 外框把 Tab 栏放到底部时三块仍然逐格相同。
 #[test]
 fn regions_match_builtin_with_bottom_tab_bar() {
+    let _core = support::IsolatedCore::new("m9b");
     let fixture = Fixture {
         agents: true,
         bottom_tabs: true,
@@ -394,6 +397,7 @@ fn regions_match_builtin_with_bottom_tab_bar() {
 /// 机器组折叠：组头换 `▸`、该组的 Space 行收起，与内置实现逐格相同。
 #[test]
 fn regions_match_builtin_with_folded_machine_group() {
+    let _core = support::IsolatedCore::new("m9b");
     let fixture = Fixture {
         agents: true,
         bottom_tabs: false,
@@ -422,6 +426,7 @@ fn regions_match_builtin_with_folded_machine_group() {
 #[test]
 #[ignore = "measures the known color quantization gap of the default theme"]
 fn default_theme_color_gap_is_measurable() {
+    let _core = support::IsolatedCore::new("m9b");
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         let theme = theme::builtin("default").expect("default theme");
         for (module, differences, total) in
@@ -453,6 +458,7 @@ mount(() => (
 /// 启动期的每一帧只能是两种画面：完整的内置渲染，或完整的模块渲染。
 #[test]
 fn startup_frames_never_show_a_partial_region() {
+    let _core = support::IsolatedCore::new("m9b");
     let (width, height) = (80u16, 24u16);
     let theme = parity_themes().remove(0);
     let root = unique_dir("startup-frames");
@@ -528,6 +534,7 @@ fn startup_frames_never_show_a_partial_region() {
 /// 首份 props 迟到 500 ms：这段时间区域逐格显示内置内容，不是空白或半份。
 #[test]
 fn delayed_first_props_keeps_the_builtin_region() {
+    let _core = support::IsolatedCore::new("m9b");
     let (width, height) = (80u16, 24u16);
     let theme = parity_themes().remove(0);
     let root = unique_dir("late-props");
@@ -647,6 +654,7 @@ fn snapshot_path(width: u16, height: u16) -> PathBuf {
 
 #[test]
 fn no_mods_frame_matches_baseline_snapshot() {
+    let _core = support::IsolatedCore::new("m9b");
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         let root = unique_dir(&format!("no-mods-{width}x{height}"));
         let mut config = config_in(&root, parity_themes().remove(0), PLAIN);

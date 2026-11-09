@@ -49,6 +49,7 @@ core 持有终端和进程；TUI 持有布局、VT、attach 意图和显示状�
 cargo fmt -p hc-tui -- --check
 mise exec -- cargo clippy -p hc-tui --all-targets -- -D warnings
 mise exec -- cargo test -p hc-tui
+scripts/check-core-leaks.sh
 HC_TUI_E2E=1 mise exec -- cargo test -p hc-tui --test g1_attach --test multi_pane --test plugin_terminals
 mise exec -- just smoke
 mise exec -- just parity
@@ -70,7 +71,7 @@ UI 冒烟使用 tmux 和独立 session；可设 HC_TUI_SMOKE_ROOT 指向新的�
 parity 启动两套隔离 core，验证远端布局、新建、GUI 双向 CAS、未知字段、settle、park/keep/close/quit。
 不要让测试使用默认工作区。真实宿主图像、SSH 实机、macOS/Windows 不因 Linux tmux 测试通过而算已验收。
 
-测试与冒烟会留下隔离 runtime 里的 core：清理方式与判定方法见 [core 泄漏治理](ops-cores.md)（`scripts/reap-cores.sh`，默认干跑）。
+测试与冒烟会留下隔离 runtime 里的 core：测试进程用 `tests/support` 的 `IsolatedCore` 守卫自动回收（见 [tests/support/README.md](../tests/support/README.md)），套跑前后差值用 `scripts/check-core-leaks.sh` 自检；残留清理方式与判定方法见 [core 泄漏治理](ops-cores.md)（`scripts/reap-cores.sh`，默认干跑）。
 
 ## 安装、升级与回滚
 

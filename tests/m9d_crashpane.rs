@@ -4,6 +4,8 @@
 //! 保尺寸不自动关闭；`r` 重载、`?` 写详情、同一错误只记一条日志一次 toast。
 //! 构造方式沿用 `tests/m9b_interaction.rs`：临时配置目录 + `TestBackend` 帧循环。
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -174,6 +176,7 @@ fn click(app: &mut App, column: u16, row: u16) {
 /// region 失败后的证据：占位帧、日志行、通知条数、`?` 详情与 `r` 恢复。
 #[test]
 fn crashing_status_region_leaves_an_error_box_and_recovers_on_r() {
+    let _core = support::IsolatedCore::new("m9d");
     hc_tui::i18n::set_zh(true);
     let (mut app, root, config) = app_with(&[(
         "status",
@@ -275,6 +278,7 @@ fn crashing_status_region_leaves_an_error_box_and_recovers_on_r() {
 /// 状态机的另一条恢复路径：重装（包记录变了）后自动按新代际恢复，无需按 r。
 #[test]
 fn reinstalling_the_package_recovers_the_region_without_a_key() {
+    let _core = support::IsolatedCore::new("m9d");
     hc_tui::i18n::set_zh(true);
     let (mut app, root, config) = app_with(&[(
         "status",
@@ -309,6 +313,7 @@ fn reinstalling_the_package_recovers_the_region_without_a_key() {
 /// `?`：完整异常（模块、宿主方法、调用序号）写进 `packages log`。
 #[test]
 fn question_mark_writes_the_full_error_context_to_the_package_log() {
+    let _core = support::IsolatedCore::new("m9d");
     hc_tui::i18n::set_zh(true);
     let (mut app, root, config) = app_with(&[(
         "status",
@@ -335,6 +340,7 @@ fn question_mark_writes_the_full_error_context_to_the_package_log() {
 /// 侧栏占位时命中域照旧：点侧栏第 5 行仍选中第二个 Space。
 #[test]
 fn crashing_sidebar_keeps_its_click_hit_domains() {
+    let _core = support::IsolatedCore::new("m9d");
     hc_tui::i18n::set_zh(true);
     let (mut app, root, _config) = app_with(&[(
         "sidebar",
@@ -367,6 +373,7 @@ fn crashing_sidebar_keeps_its_click_hit_domains() {
 /// 覆盖层：加载失败也保尺寸显示错误盒，`Esc` 关掉后不自动重开。
 #[test]
 fn crashing_dialog_keeps_its_box_and_closes_on_esc() {
+    let _core = support::IsolatedCore::new("m9d");
     hc_tui::i18n::set_zh(true);
     let (mut app, root, _config) = app_with(&[(
         "crashdlg",
